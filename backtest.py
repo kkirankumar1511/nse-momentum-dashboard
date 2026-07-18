@@ -207,11 +207,17 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
 def run_backtest(candles: dict, bench: pd.DataFrame,
                  cfg: dict | None = None,
                  initial_capital: float = 1_000_000,
-                 cost_bps: float = 12.0,
+                 cost_bps: float = 0.0,
                  rebalance: str = "MS",
                  warmup_days: int = 260,
                  verbose: bool = False) -> dict:
     """Monthly-rebalanced long-only backtest.
+
+    cost_bps defaults to 0 -- Zerodha charges no brokerage on equity
+    delivery (CNC). Statutory costs (STT, stamp duty, exchange/SEBI
+    charges) still apply in reality (~5-7 bps round trip) and aren't
+    broker-specific; pass a non-zero cost_bps (e.g. via --cost-bps on the
+    CLI) to model them back in for a more conservative backtest.
 
     Rules replayed exactly as the README workflow:
       entries : gate-passers fill any open slot the moment it's free -- at
@@ -410,7 +416,10 @@ def main():
                     help="run on synthetic data (no Kite needed)")
     ap.add_argument("--years", type=float, default=3.0)
     ap.add_argument("--capital", type=float, default=1_000_000)
-    ap.add_argument("--cost-bps", type=float, default=12.0)
+    ap.add_argument("--cost-bps", type=float, default=0.0,
+                    help="statutory costs (STT, stamp duty, exchange/SEBI "
+                        "charges) per side -- 0 by default since Zerodha "
+                        "charges no brokerage on equity delivery")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 

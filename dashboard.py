@@ -484,23 +484,25 @@ def page_backtest():
         "sensitivity comparisons as more reliable than absolute returns."
     )
 
-    b1, b2, b3 = st.columns(3)
+    b1, b2 = st.columns(2)
     years = b1.slider("Years of history", 1.0, 5.0, 3.0, 0.5,
                       help="Up to 5 years supported via chunked Kite fetches "
                            "(Kite's historical API caps a single request at "
                            "~2000 days).")
     bt_capital = b2.number_input("Starting capital (₹)", value=1_000_000.0,
                                  step=100000.0)
-    cost_bps = b3.number_input("Cost per side (bps)", value=12.0, step=1.0,
-                               help="STT + charges + slippage estimate")
+    st.caption("No per-trade cost is modeled — Zerodha charges no brokerage "
+              "on equity delivery (CNC). Statutory costs (STT, stamp duty, "
+              "exchange/SEBI charges) still apply in reality (~5-7 bps round "
+              "trip) but aren't broker-specific; use `--cost-bps` on the CLI "
+              "if you want a more conservative run that includes them.")
 
     if st.button("Run backtest", type="primary"):
         with st.spinner("Loading candles (cached daily, first run is slow)..."):
             candles_bt, bench_bt = bt.load_candles_cached(
                 config.UNIVERSE, int(years * 365) + 400)
         with st.spinner("Simulating..."):
-            res = bt.run_backtest(candles_bt, bench_bt, initial_capital=bt_capital,
-                                  cost_bps=cost_bps)
+            res = bt.run_backtest(candles_bt, bench_bt, initial_capital=bt_capital)
             st.session_state["bt_result"] = res
             st.session_state["bt_bench"] = bench_bt
 
