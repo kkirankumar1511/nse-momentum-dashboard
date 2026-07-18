@@ -1,0 +1,14 @@
+# Secrets
+.env
+
+# Local tooling state
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+
+# Generated data / caches (NSE/Kite fetches, fundamentals scans, backtest output)
+cache/
+backtest_equity.csv
+backtest_trades.csv
