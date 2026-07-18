@@ -1,10 +1,11 @@
-# NSE 3–6 Month Momentum Dashboard
+# NSE Calendar-Entry Momentum Dashboard
 
-A single-screen decision-support tool for 3–6 month positional trading on NSE:
-a research-backed momentum + quality screener fed by Kite (Zerodha) historical
-data, an AI agent that pulls fundamentals from the web, live positions and
-holdings, and order execution / square-off with GTT stop-losses — all in one
-Streamlit page.
+A single-screen decision-support tool for 3–6 month positional trading on
+NSE: a research-backed momentum + fundamental-quality screener fed by Kite
+(Zerodha) historical data, a backtest engine, live positions/holdings, order
+execution with GTT stop-losses, and a Stage-1 "propose, review, execute"
+live-rebalance workflow — all in one Streamlit app. No AI/LLM anywhere in
+this system; every score and gate is deterministic and reproducible.
 
 > This is decision-support software, not investment advice. Momentum
 > strategies have well-documented crash risk (e.g., sharp reversals after
@@ -29,9 +30,8 @@ momentum** is best documented:
 
 3. **Asness, Frazzini & Pedersen (2019), "Quality Minus Junk", Review of
    Accounting Studies.** Quality (profitability, safety, growth) earns a
-   premium and, combined with momentum, cuts drawdowns. Gates: ROCE ≥ 15%,
-   Debt/Equity ≤ 1, TTM profit growth ≥ 0. The AI agent fetches these from
-   the web per stock.
+   premium and, combined with momentum, cuts drawdowns. The Fundamentals
+   page's primary-source XBRL value score is the quality gate.
 
 4. **Relative strength vs the index.** Ranking on return *minus NIFTY return*
    rather than raw return keeps the screen focused on genuine leadership
@@ -48,7 +48,7 @@ momentum** is best documented:
    Momentum's biggest weakness is violent reversals. Mitigations built in:
    RSI ceiling (no entries above 78), ATR-based stops (2.5×ATR) placed as
    **GTT orders** so they persist across days, and equal-risk position sizing
-   (1% of capital risked per trade).
+   (`risk_per_trade_pct` of capital risked per trade).
 
 ### Screening rules at a glance
 
@@ -57,11 +57,11 @@ momentum** is best documented:
 | Trend gate | Close > 50 EMA > rising; Close > 200 EMA |
 | 52-week high gate | Close ≥ 85% of 52-week high |
 | RSI gate | 45 ≤ RSI(14) ≤ 78 |
-| Quality gate | ROCE ≥ 15%, D/E ≤ 1, TTM profit growth ≥ 0 |
+| Quality gate | Fundamentals page's sector-aware XBRL value score ≥ `min_fundamental_score` |
 | Score (rank) | 40% RS-6m + 25% RS-3m + 20% 52w-high proximity + 15% volume expansion (z-scores) |
-| 🚀 Breakout priority | Recent (≤20d) break above a ~3-year high whose prior peak is ≥6 months old. Score bonus of 0.75 per year of base (capped at 2y); such stocks are flagged `priority` and listed first. Rationale: George & Hwang's 52-week-high effect strengthens at longer highs, and a multi-year base means no overhead supply of trapped sellers (the mechanism behind O'Neil/Minervini base-breakout systems). |
-| Sizing | qty = (1% of capital) / (entry − 2.5×ATR stop) |
-| Exits | GTT stop at 2.5×ATR; review monthly; exit if stock drops below 200 EMA or falls out of top-half of scores |
+| Sizing | qty = (`risk_per_trade_pct`% of capital) / (entry − 2.5×ATR stop) |
+| Entries | Calendar: any gate-passer fills an open slot the instant it's free — at the monthly rebalance, or immediately when a stop frees a slot mid-month, rather than waiting for the next rebalance |
+| Exits | GTT stop at 2.5×ATR; monthly rebalance exits anything below its 200 EMA or outside the top `2×max_positions` ranking |
 
 All parameters live in `config.py → STRATEGY` and are meant to be tuned.
 
@@ -82,9 +82,7 @@ python fno_universe.py --refresh  # force re-fetch from NSE
 Why F&O-only: they're NSE's most liquid names (the exchange's eligibility
 rules already screen for market cap and quarter-sigma order size), so
 slippage stays low — and slippage is what quietly kills momentum edges in
-live trading. They can also be hedged with options if a position sours. Note
-a full screen now fetches ~210 symbols from Kite (~75s at the rate limit;
-the backtest caches them in `cache/`).
+live trading. They can also be hedged with options if a position sours.
 
 Override the universe in `config.py` via `UNIVERSE_OVERRIDE = [...]`.
 
@@ -101,7 +99,6 @@ cp .env.example .env        # then fill in your keys
 KITE_API_KEY=...
 KITE_API_SECRET=...
 KITE_ACCESS_TOKEN=          # filled by the daily login step below
-ANTHROPIC_API_KEY=...       # optional: enables AI briefs tab
 ```
 
 You need a **Kite Connect** developer app (₹2000/month from Zerodha,
@@ -123,255 +120,124 @@ streamlit run dashboard.py
 
 ## Using it
 
-1. **Screener tab** — click *Run screen*. Fetches ~50 stocks of daily candles
-   from Kite (rate-limited, takes ~30s), scrapes fundamentals, and shows
-   ranked candidates that pass every gate, each with a suggested ATR stop.
-2. **Positions tab** — live positions, holdings, P&L, today's orders, and a
-   confirmed square-off button per symbol.
-3. **Trade tab** — pick a symbol; it shows LTP, the ATR stop, and a suggested
-   quantity for 1% risk. Orders require an explicit confirmation checkbox.
-   Optionally places a GTT stop-loss in the same click.
-4. **AI Briefs tab** — Claude (with web search) summarizes recent results,
-   catalysts, and red flags per candidate before you commit.
+The app is a sidebar-navigated set of pages, not a flat row of tabs:
+
+1. **🏠 Cockpit** — everything that matters at a glance: available cash,
+   portfolio value, unrealized P&L, open positions vs your cap, a locally
+   logged portfolio-value chart (one snapshot per day you open the app), and
+   whether the last rebalance scan proposed any action.
+2. **🔍 Screener** — the full ranked universe (every gate-passer, not just
+   what fits your open slots), plus a candlestick chart with EMA50/EMA200
+   for any symbol.
+3. **📡 Live Rebalance** — runs the daily scan, diffs it against your actual
+   Kite holdings, and proposes sells (rebalance-rule failures) and buys
+   (open slots, sized off real available cash). Running the scan never
+   places an order; execution requires an explicit confirmation checkbox.
+   Can also run headless on a schedule: `python live_rebalance.py`.
+4. **💼 Positions & Trade** — live positions/holdings, P&L, today's orders,
+   one-click confirmed square-off, and manual order entry (ATR-based
+   suggested sizing, optional GTT stop-loss placed in the same click).
+5. **🧪 Backtest** — the exact screener logic replayed point-in-time on 1–5
+   years of real Kite data (deep history via chunked fetches — Kite's
+   historical API caps a single request at ~2000 days).
+6. **📊 Fundamentals** — primary-source XBRL value score across the full
+   F&O universe (see below).
 
 ## Suggested workflow for a 3–6 month book
 
-- Run the screen weekly (e.g., Saturday). Enter new names Monday.
-- Hold max 8 positions (`max_positions`), equal risk each.
+- Run the Fundamentals scan periodically (annual filings refresh once a
+  year) and the Screener/Live Rebalance scan daily or weekly.
+- Hold max `max_positions` positions, equal risk each.
 - Rebalance monthly: exit anything that broke its stop, fell below the 200
-  EMA, or dropped out of the ranking's top half; replace with new candidates.
-- Avoid initiating right before results — check the AI brief's catalysts.
+  EMA, or dropped out of the ranking's top half; replace with new candidates
+  — Live Rebalance proposes this diff against your real holdings for you.
+- Let a freed slot refill immediately rather than waiting a month — that's
+  what the backtest engine and Live Rebalance both already do.
 
 ## Notes & limitations
 
-- Historical-data API is rate-limited (~3 req/s); the fetcher sleeps between
-  calls.
-- screener.in scraping is for personal use; keep the built-in delays and
-  respect their terms.
-- No backtest module is included; parameters come from the literature, not
-  from curve-fitting to recent NSE data — you can add a backtest with the
-  same `indicators.py` functions.
-- GTT stop-losses are not guaranteed fills (they fire a limit order); gap-down
-  risk remains.
+- Kite's historical-data API is rate-limited (~3 req/s); fetchers sleep
+  between calls, and "day"-interval requests over ~2000 days are
+  transparently split into chunks.
+- GTT stop-losses are not guaranteed fills (they fire a limit order); gap-
+  down risk remains.
+- Fundamental gates are disabled in the backtest (can't reconstruct
+  historical XBRL scores without lookahead bias) — live results with the
+  quality gate on will differ, usually fewer but higher-quality trades.
+- Today's F&O universe is used throughout the backtest window, so stocks
+  that fell out of eligibility are invisible (survivorship bias). Treat
+  absolute backtest returns as optimistic; parameter-sensitivity comparisons
+  are what the tool is reliable for.
 
 ## Backtesting
 
 ```bash
-python backtest.py --synthetic          # verify engine mechanics, no Kite needed
-python backtest.py --years 3            # real NSE data via Kite (cached in ./cache)
-python backtest.py --years 3 --no-breakout   # A/B: is the breakout tier adding value?
+python backtest.py --synthetic   # verify engine mechanics, no Kite needed
+python backtest.py --years 3     # real NSE data via Kite (cached in ./cache)
+python backtest.py --years 5     # deep history, chunked Kite fetches
 ```
 
-Or use the **🧪 Backtest tab** in the dashboard: equity curve vs NIFTY,
-metrics side-by-side with/without the breakout tier, drawdown chart, and the
-full trade log (win rate split into breakout vs non-breakout trades).
+Or use the **🧪 Backtest** page: equity curve vs NIFTY, key metrics,
+drawdown chart, open positions marked to market at period end (nothing is
+force-liquidated), and the full closed-trade log.
 
 The engine reuses `indicators.py` / `screener.py` verbatim, point-in-time —
-so what you backtest is literally the code that screens live. Honest caveats
-baked into the design: fundamental gates are disabled historically (can't
-reconstruct past ROCE without lookahead), and today's universe carries
-survivorship bias, so trust *relative* comparisons (parameters, A/B) more
-than absolute CAGR.
+so what you backtest is literally the code that screens live.
 
-
-## AI Filings Analyst (NSE primary sources)
+## Fundamentals: primary-source XBRL value score
 
 ```bash
-python nse_api.py HCLTECH          # announcements, promoter trend, corp actions
-python xbrl_parser.py HCLTECH      # quarterly financials parsed from XBRL
-python filing_analyst.py HCLTECH   # full AI analysis
-python filing_analyst.py HCLTECH --no-ar   # skip annual report PDFs (faster)
+python nse_api.py HCLTECH       # announcements, promoter trend, corp actions
+python xbrl_parser.py HCLTECH   # quarterly/annual financials parsed from XBRL
 ```
-Or use the **📑 Filings Analyst tab**.
 
-### Why these APIs beat scraping
+`fundamentals_agent.fno_value_scan()` (the **📊 Fundamentals** page) computes
+a 0-100 score per stock, entirely from the company's own audited XBRL
+filings — no scraping, no LLM, cheap enough to run across the whole F&O
+universe on every scan.
+
+**Sector-aware scoring.** Banks and NBFCs file under structurally different
+XBRL taxonomies — banks don't tag Revenue/Equity/Current Assets at all, and
+general-company thresholds would flag every healthy NBFC as over-levered
+(NBFCs run 3-6x leverage by design). Each symbol is routed via
+`nse_api.filing_taxonomy()` to the rubric matching what its filings actually
+contain:
+
+| Rubric | Key metrics |
+|---|---|
+| `general` | ROE, Debt/Equity, Current Ratio, FCF growth, Revenue CAGR, PEG |
+| `banking` | ROE, ROA, NIM proxy, Gross/Net NPA, Advances growth |
+| `nbfc` | ROE, ROA, Debt/Equity, Loan-book growth (also covers AMCs per NSE's own filing classification) |
+| `general_insurance` | ROE, ROA, Combined Ratio, Incurred Claims Ratio, Premium growth |
+| `life_insurance` | ROE, Premium growth, PAT growth |
+
+Missing sub-metrics are dropped from the total, not faked — the Fundamentals
+page's "Rows with incomplete data" section shows exactly which pillars were
+excluded and why (usually fewer than 2 years of annual filings retrievable
+via NSE's endpoint for that name).
 
 `/api/integrated-filing-results` returns the company's **XBRL** — the
-*as-reported* financials straight from the filing. That is strictly better
-than screener.in: primary source, timestamped, carries the audited/unaudited
-flag, available the evening results drop. `xbrl_parser.py` parses the Ind-AS
-taxonomy (matching several element-name vintages) and correctly ignores
-segment-level contexts so you get headline consolidated numbers, not a
-business line.
+*as-reported* financials straight from the filing, strictly better than
+scraping a ratios page: primary source, timestamped, carries the
+audited/unaudited flag, available the evening results drop.
 
-`/api/corporate-share-holdings-master` gives promoter holding **as a time
-series** — one of the few genuinely forward-looking free signals. Promoters
-raising their stake with their own money, quarter after quarter, is costly
-and hard to fake (cf. Jeng, Metrick & Zeckhauser 2003: insider *buying*
-predicts returns; selling much less so).
+## Stage 1 live automation: propose, review, execute
 
-`/api/corporates-corporateActions` matters more than it looks for a momentum
-book: an ex-dividend gap is not a breakdown. Don't let a stop fire on a ₹12
-ex-dividend gap and call it a trend break.
+`live_rebalance.py` runs the exact same screener pipeline used live and in
+the backtest, and diffs it against your **actual Kite holdings** — never
+placing an order itself. It proposes:
 
-### The funnel (this is the important part)
+- **Sells**: current holdings that now fail the rebalance rule (closed below
+  the 200 EMA, or dropped out of the top-ranked zone).
+- **Buys**: open slots after those sells, filled from gate-passers sized off
+  your real available cash.
 
-An Indian annual report is 200–400 pages. 210 F&O stocks × 5 years ≈ 300,000
-pages — sending that to any LLM costs more than most people's trading capital.
-So the analyst is the **last stage of a funnel**:
-
-```
-210 F&O stocks
-  → technical + gate screen (free, seconds)        → ~15-25 names
-  → XBRL + announcements + promoter scan (cheap)   → ~10 names
-  → AI deep-read of annual reports (expensive)     → final shortlist
-```
-
-Within a PDF it does **targeted section extraction** — auditor's report,
-MD&A, related-party transactions, contingent liabilities — rather than
-dumping the document. Those four sections are where decision-changing
-information actually lives. The Filings tab defaults its symbol list to
-whatever survived the Screener, so the funnel is the path of least resistance.
-
-### LLM: open-source / local by default
-
-No paid API required. `llm.py` abstracts the provider — set it in `.env`:
-
-| `LLM_PROVIDER` | Cost | Notes |
-|---|---|---|
-| `ollama` **(default)** | Free | Local. **Your filings never leave your machine.** No rate limits. |
-| `llamacpp` / `vllm` | Free | Local OpenAI-compatible servers |
-| `groq` | Free tier | Hosted Llama 3.3 70B / Qwen, very fast |
-| `openrouter` | Free tier | Look for `:free` model ids |
-| `together` | Cheap | Hosted open models |
-| `anthropic` | Paid | Optional fallback |
-
-Quickstart (fully free, fully local):
-```bash
-# 1. Install Ollama from https://ollama.com
-ollama pull qwen2.5:14b-instruct
-# 2. In .env:
-#    LLM_PROVIDER=ollama
-python llm.py           # verify the provider is reachable
-```
-
-**Picking a model — context length matters more than intelligence.** A full
-evidence prompt (12 quarters of XBRL + announcements + two annual reports'
-sections) is 20k–40k tokens. 8k-context models (Gemma 2, older Llama)
-physically cannot hold it and fall back to map-reduce chunking, which loses
-cross-section reasoning — the model never sees the auditor's key-audit-matter
-and the receivables spike at the same time. Prefer 32k+: Qwen2.5 (128k),
-Llama 3.1/3.3 (128k), Mistral Nemo (128k).
-
-Local hardware guide:
-
-| Model | RAM | Verdict |
-|---|---|---|
-| `qwen2.5:7b-instruct` | ~5GB | Works; shallow reasoning |
-| `qwen2.5:14b-instruct` | ~9GB | **Recommended default** |
-| `qwen2.5:32b-instruct` | ~20GB | Noticeably better on financial nuance |
-| `llama3.3:70b` | ~40GB | Best local, needs serious hardware |
-
-**JSON reliability is the real problem with small models, not reasoning.**
-They emit fences, preambles, trailing commas, single quotes, `None`/`True`,
-`<think>` tags, prose containing braces, missing keys, and invented enum
-values. `llm.py` defends with native JSON grammar (`format: json` on Ollama,
-`response_format` on OpenAI-compatible), balanced-brace extraction that tries
-*every* candidate object, a repair pass, schema coercion with fuzzy enum
-matching, and retries with escalating strictness. All 12 of those failure
-modes are covered by tests.
-
-One honest regression: local models have **no web search**, so `ai_brief`
-no longer free-associates about "recent news". It now reads NSE announcements
-instead. That's arguably an upgrade — a model recalling half-remembered news
-from training data is worse than one reading the company's actual filings.
-
-### Division of labour: deterministic vs AI
-
-**Deterministic code owns the safety-critical checks** — auditor/CFO
-resignations, promoter pledging, SEBI actions, insolvency, rating
-downgrades, tax-rate anomalies, other-income share of PBT, PAT growing
-without revenue. **The AI owns judgement** — is this growth real or
-engineered, is it durable, what would falsify the thesis.
-
-The AI **cannot overrule a deterministic red flag**; it can only add context.
-A verified example from the test suite: a stock with PAT +28% YoY,
-accelerating growth, expanding margins, promoters buying, and a 94/100
-fundamental score is still returned as **AVOID** because the CFO resigned.
-An LLM that creatively explains away an auditor resignation is an
-unacceptable failure mode; a regex that flags one is not.
-
-**This is precisely why open-source models are viable here.** The LLM never
-owns a safety-critical decision, so a weaker model degrades the *nuance* of
-the analysis rather than letting a blowup through. Verified in the test
-suite: with a mocked local model returning "strong" on a company whose
-auditor had resigned, the final verdict was still **avoid**. A 14B model on
-your laptop is a reasonable choice here in a way it would not be if the model
-were the last line of defence.
-
-The analyst outputs: `earnings_real` (real/mixed/engineered), auditor
-concerns, `durability`, key risks, catalysts, verdict, **confidence**, and
-`what_would_change_my_mind`. If evidence is thin it is instructed to say so
-and lower confidence rather than generate narrative.
-
-## Compounder watchlist (the "multibagger" question)
+Run it from the **📡 Live Rebalance** page (with inline, confirmation-gated
+execution buttons) or headless on a schedule:
 
 ```bash
-python compounder_scan.py            # scan the F&O universe
-python compounder_scan.py --top 30   # quick partial scan
+python live_rebalance.py   # prints the proposal, saves it to cache/, places nothing
 ```
-Or use the **🌱 Compounders tab**.
 
-**Read this honestly.** This does not predict multibaggers — nothing does. It
-scores stocks on the traits multibaggers demonstrably had *before* they ran,
-so you get a research-grounded watchlist instead of a tip sheet.
-
-Three things that must stay front of mind:
-
-1. **Horizon mismatch.** A multibagger (2x–10x) is a 3–7 year outcome. Your
-   momentum book is 3–6 months. These are kept in **separate sleeves** on
-   purpose: the momentum sleeve has stops and monthly rebalancing; the
-   compounder sleeve has neither and makes no timing claim. Do not let one
-   contaminate the other — a stopped-out momentum trade is not a failed
-   compounder thesis, and vice versa.
-2. **F&O is the wrong pond for multibaggers.** F&O eligibility *requires*
-   large cap and heavy liquidity. A ₹5,000cr company 10x-ing has happened
-   often; a ₹5,00,000cr company 10x-ing would exceed India's entire market
-   cap. Within F&O the scanner tilts to the smallest, fastest-growing names,
-   but expect low scores — that is the correct answer, not a bug.
-3. **Survivorship bias.** Every "multibagger trait" study picks winners in
-   hindsight. Thousands of stocks had identical traits and went nowhere or to
-   zero. A high score means *read the annual report*, never *buy*.
-
-What it scores (Lynch; Marcellus Coffee Can; Greenblatt Magic Formula;
-Fama–French RMW profitability factor):
-
-| Signal | Weight | Why |
-|---|---|---|
-| Earnings growth **acceleration** (TTM vs 3Y) | 22% | The market re-rates acceleration; PE expansion × earnings growth is the multibagger engine |
-| 3Y profit growth | 18% | The compounding base |
-| ROCE | 18% | Above cost of capital = reinvestment actually creates value |
-| 3Y sales growth | 12% | Real growth, not one-off margin |
-| Margin trend | 10% | Operating leverage kicking in |
-| Low debt | 8% | Survives downturns without dilution |
-| Promoter holding | 6% | Skin in the game |
-| Small mcap (runway) | 6% | Room left to compound |
-
-Hard red flags (disqualify regardless of score): promoter pledging >5%, D/E
->1.5, ROCE <10%, PEG >2, promoter holding <25%.
-
-The tab also shows an **⭐ Overlap** view: compounder-shortlist names that
-also pass today's momentum gates — a long-term quality story the market is
-repricing right now. Trade those with the momentum rules and stops anyway.
-
-
-## Honest answer on "multibaggers in 3–6 months"
-
-The filings agent makes the fundamental analysis genuinely good — primary
-source, earnings-quality detection, promoter accumulation, event risk. It
-does not change the arithmetic of the goal:
-
-- **3–6 months**: momentum + quality is the evidence-backed play. That's the
-  Screener + Backtest. Realistic aim is beating NIFTY by a few points with
-  controlled drawdown — not 2×.
-- **1 year**: fundamentals start to dominate. The Filings Analyst's
-  `durability` and `earnings_real` fields matter most here.
-- **Multibagger (2–10×)**: 3–7 years, and mostly outside F&O, because F&O
-  eligibility *requires* large caps. The Compounders tab is the right sleeve
-  for that money, and it has no stops and no timing claim.
-
-The confluence view (momentum gates passed **and** filings verdict "strong")
-is the closest honest thing to what you asked for: high-quality businesses
-the market is repricing right now. Trade them on the 3–6 month rules with
-stops. If one turns out to be a multibagger, that will be a 3-year outcome
-you happened to enter early — not something the screen predicted.
+Stop-losses aren't covered by this job — if you placed a GTT at entry, your
+broker already enforces it intraday without this needing to run.

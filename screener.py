@@ -7,19 +7,12 @@ Score construction (all cross-sectional z-scores, then weighted):
   25%  3-month relative strength vs NIFTY   (intermediate momentum)
   20%  proximity to 52-week high            (George & Hwang)
   15%  volume expansion                     (confirmation, NSE studies)
-  +    long-year breakout bonus: recent break above a multi-year high from a
-       >=6-month base adds up to breakout_bonus * 2 to the score, and such
-       stocks are flagged `priority` and sorted to the top of the list.
 
 Hard gates (a stock must pass ALL to appear as a candidate):
   - price above 50 EMA and 200 EMA, 50 EMA rising   (trend structure)
   - price >= 85% of 52-week high
   - RSI within [45, 78]  (in momentum regime, not parabolic)
   - fundamental quality gate (ROCE, D/E, profit growth) when data available
-  - not sitting under an unbroken multi-year high with a long base (`near_breakout`
-    in indicators.py) -- these are watchlist-only until a confirmed breakout;
-    entering while still under that overhead-supply ceiling is exactly the risk
-    the long-base breakout research is built to avoid
 """
 
 from __future__ import annotations
@@ -66,8 +59,6 @@ def apply_gates(tech: pd.DataFrame,
     t["trend_ok"] = t["above_ema50"] & t["above_ema200"] & t["ema50_rising"]
     t["near_high_ok"] = t["pct_52w_high"] >= cfg["near_high_threshold"]
     t["rsi_ok"] = t["rsi"].between(cfg["rsi_min"], cfg["rsi_max"])
-    # Coiled under an unbroken multi-year high: watch, don't buy yet.
-    t["not_pre_breakout"] = ~t["near_breakout"].astype(bool)
 
     if fundamentals is not None and not fundamentals.empty:
         fund = fundamentals.reindex(t.index)
@@ -84,44 +75,19 @@ def apply_gates(tech: pd.DataFrame,
         t["quality_ok"] = True
         t["quality_fails"] = ""
 
-    t["all_gates"] = (t["trend_ok"] & t["near_high_ok"] & t["rsi_ok"]
-                     & t["quality_ok"] & t["not_pre_breakout"])
+    t["all_gates"] = t["trend_ok"] & t["near_high_ok"] & t["rsi_ok"] & t["quality_ok"]
     return t
-
-
-def pre_breakout_watchlist(t: pd.DataFrame) -> pd.DataFrame:
-    """Stocks coiled under an unbroken multi-year high -- not tradeable yet,
-    but worth watching for a confirmed breakout. Sorted closest-to-breakout
-    first (highest pct_of_ly_high)."""
-    w = t[t["near_breakout"].astype(bool)].copy()
-    w["pct_to_breakout"] = (1 / w["pct_of_ly_high"] - 1) * 100
-    return w.sort_values("pct_of_ly_high", ascending=False)
 
 
 def score(t: pd.DataFrame, cfg: dict = config.STRATEGY) -> pd.DataFrame:
     t = t.copy()
-    base_score = (
+    t["score"] = (
         0.40 * _zscore(t["rs_6m"].astype(float))
         + 0.25 * _zscore(t["rs_3m"].astype(float))
         + 0.20 * _zscore(t["pct_52w_high"].astype(float))
         + 0.15 * _zscore(t["vol_expansion"].astype(float))
-    )
-
-    # Long-year breakout bonus: scaled by base length (longer base = bigger
-    # bonus), capped. Only recent breakouts above a >=6-month-old multi-year
-    # high receive it.
-    base_years = (t["base_days"].astype(float) / 252).clip(
-        upper=cfg["breakout_bonus_cap_years"])
-    bonus = t["ly_breakout"].astype(bool) * cfg["breakout_bonus"] * base_years
-    t["breakout_bonus"] = bonus.round(3)
-    t["score"] = (base_score + bonus).round(3)
-
-    # Priority flag: breakout stocks that also pass every gate rank first.
-    # Setting breakout_bonus to 0 disables the tier entirely (clean A/B).
-    use_breakout = cfg.get("breakout_bonus", 0) > 0
-    t["priority"] = (t["ly_breakout"].astype(bool) & t["all_gates"]
-                     & use_breakout)
-    return t.sort_values(["priority", "score"], ascending=[False, False])
+    ).round(3)
+    return t.sort_values("score", ascending=False)
 
 
 def position_size(capital: float, price: float, stop: float,

@@ -1,5 +1,5 @@
 """
-Backtest engine for the NSE momentum + long-year-breakout strategy.
+Backtest engine for the NSE calendar-entry momentum strategy.
 
 Design goals:
   * Reuses the EXACT production logic (indicators.compute_snapshot,
@@ -14,17 +14,17 @@ Known limitations (be honest with yourself about these):
   * Fundamental gates are DISABLED in the backtest — we cannot reconstruct
     what ROCE/D-E looked like on a past date from screener.in (survivorship/
     lookahead bias). The backtest therefore tests the technical engine only;
-    live results with the quality gate on should differ (usually fewer, 
+    live results with the quality gate on should differ (usually fewer,
     higher-quality trades).
   * The universe itself is today's list — stocks that crashed out of the
     index are missing (survivorship bias). Treat absolute returns as
-    optimistic; RELATIVE comparisons (with vs without breakout priority,
-    parameter sensitivity) are what this tool is for.
+    optimistic; RELATIVE comparisons (parameter sensitivity) are what this
+    tool is for.
 
 Usage:
-    python backtest.py --synthetic              # verify mechanics, no Kite
-    python backtest.py --years 3                # real data via Kite (cached)
-    python backtest.py --years 3 --no-breakout  # A/B: disable breakout tier
+    python backtest.py --synthetic  # verify mechanics, no Kite
+    python backtest.py --years 3    # real data via Kite (cached)
+    python backtest.py --years 5    # deep history (chunked Kite fetch)
 """
 
 from __future__ import annotations
@@ -113,7 +113,8 @@ def _stamp(path: str) -> str:
 def make_synthetic_universe(n_symbols: int = 30, n_days: int = 900,
                             seed: int = 3) -> tuple[dict, pd.DataFrame]:
     """Synthetic market with momentum autocorrelation baked in, plus a few
-    engineered long-base breakout stocks — used to verify engine mechanics."""
+    long-base-then-rally stocks for price-pattern diversity — used to verify
+    engine mechanics without needing a live Kite connection."""
     rng = np.random.default_rng(seed)
     dates = pd.bdate_range(end=dt.date.today(), periods=n_days)
 
@@ -137,7 +138,7 @@ def make_synthetic_universe(n_symbols: int = 30, n_days: int = 900,
             rets[n_days // 2:] += rng.choice([-0.001, 0.001])
         candles[f"SYM{i:02d}"] = ohlcv(100 * np.cumprod(1 + rets))
 
-    # three engineered long-base breakout stocks
+    # three extra long-base-then-rally stocks, for price-pattern diversity
     for j in range(3):
         peak = 200
         c = np.concatenate([
@@ -164,7 +165,6 @@ class Position:
     entry_price: float
     stop: float
     entry_date: pd.Timestamp
-    priority: bool = False
 
 
 @dataclasses.dataclass
@@ -176,7 +176,6 @@ class Trade:
     exit_price: float
     qty: int
     reason: str
-    priority: bool
 
     @property
     def pnl(self):
@@ -205,16 +204,6 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
     return screener.score(gated, cfg)
 
 
-def _pullback_trigger(df_upto: pd.DataFrame, cfg: dict) -> bool:
-    """Only meaningful for symbols already on the gate-passing watchlist
-    (trend/RSI/near-high checks are still done once a month at rebalance,
-    same as the calendar mode). See indicators.pullback_trigger for the
-    actual rule -- shared with live_rebalance.py so they can't drift apart."""
-    return indicators.pullback_trigger(
-        df_upto, cfg.get("pullback_ema_period", 20),
-        cfg.get("pullback_tolerance_pct", 3.0))
-
-
 def run_backtest(candles: dict, bench: pd.DataFrame,
                  cfg: dict | None = None,
                  initial_capital: float = 1_000_000,
@@ -225,21 +214,17 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     """Monthly-rebalanced long-only backtest.
 
     Rules replayed exactly as the README workflow:
-      entries : gate-passers (breakout priority first) fill any open slot
-                the moment it's free -- at the rebalance itself, or on any
-                later day a stop-loss frees one, rather than only at the
-                next month's rebalance -- so capital doesn't sit idle in
-                cash for weeks. entry_mode="ema_pullback" additionally
-                requires a dip-to-EMA-and-bounce before buying; "calendar"
-                buys the instant a slot is open. Both size equal-risk off
-                the 2.5x ATR stop.
+      entries : gate-passers fill any open slot the moment it's free -- at
+                the rebalance itself, or on any later day a stop-loss frees
+                one, rather than only at the next month's rebalance -- so
+                capital doesn't sit idle in cash for weeks. Sized equal-risk
+                off the 2.5x ATR stop.
       stops   : if day's low touches the stop -> exit at stop (GTT proxy)
       exits   : at rebalance, drop anything below its 200 EMA or outside the
                 top 2x max_positions ranking
     """
     cfg = dict(cfg or config.STRATEGY)
     cost = cost_bps / 10_000
-    entry_mode = cfg.get("entry_mode", "calendar")
 
     dates = bench.index.sort_values()
     dates = dates[warmup_days:]
@@ -251,9 +236,10 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     positions: dict[str, Position] = {}
     trades: list[Trade] = []
     curve = []
-    # ema_pullback mode only: gate-passers awaiting a pullback trigger,
-    # refreshed at each rebalance (same monthly cadence as everything else --
-    # a stock's gate status can go stale for up to a month either way).
+    # Gate-passers not yet held, refreshed at each rebalance (same monthly
+    # cadence as everything else -- a stock's gate status can go stale for
+    # up to a month either way) and consumed daily by step 2b so a slot
+    # freed by a stop mid-month doesn't sit in cash until next rebalance.
     watchlist: dict[str, pd.Series] = {}
 
     def close_position(sym, price, date, reason):
@@ -262,7 +248,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         proceeds = pos.qty * price * (1 - cost)
         cash += proceeds
         trades.append(Trade(sym, pos.entry_date, date, pos.entry_price,
-                            price * (1 - cost), pos.qty, reason, pos.priority))
+                            price * (1 - cost), pos.qty, reason))
 
     def try_enter(sym, row, price, stop, date):
         nonlocal cash
@@ -276,12 +262,9 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         if qty <= 0:
             return
         cash -= qty * price * (1 + cost)
-        positions[sym] = Position(sym, qty, price * (1 + cost), stop, date,
-                                  bool(row.get("priority", False)))
+        positions[sym] = Position(sym, qty, price * (1 + cost), stop, date)
         if verbose:
-            print(f"{date.date()} BUY  {sym:8s} x{qty} @ {price:.1f}"
-                 f" stop {stop:.1f}{' 🚀' if positions[sym].priority else ''}"
-                 f"{' (pullback)' if entry_mode == 'ema_pullback' else ''}")
+            print(f"{date.date()} BUY  {sym:8s} x{qty} @ {price:.1f} stop {stop:.1f}")
 
     for date in dates:
         # 1) stop checks on today's bar
@@ -321,10 +304,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
 
         # 2b) fill any open slot from the standing watchlist -- every day,
         # not just at rebalance, so freed-up capital gets redeployed right
-        # away instead of idling in cash until next month. Calendar mode
-        # buys the instant a slot opens; ema_pullback additionally requires
-        # a dip-to-EMA-and-bounce before buying (same redeployment logic,
-        # with an extra timing condition layered on top).
+        # away instead of idling in cash until next month.
         if watchlist and len(positions) < cfg["max_positions"]:
             # Highest-score candidates get first pick of the limited slots.
             ordered = sorted(watchlist.items(),
@@ -335,8 +315,6 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 if sym in positions or date not in candles[sym].index:
                     continue
                 df_upto = candles[sym].loc[:date]
-                if entry_mode == "ema_pullback" and not _pullback_trigger(df_upto, cfg):
-                    continue
                 price = float(df_upto["close"].iloc[-1])
                 atr_now = float(indicators.atr(df_upto, cfg["atr_period"]).iloc[-1])
                 stop = price - cfg["atr_stop_multiple"] * atr_now
@@ -371,7 +349,6 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             "unrealized_pnl": unrealized_pnl,
             "unrealized_ret_pct": (last_price / pos.entry_price - 1) * 100,
             "holding_days": (last - pos.entry_date).days,
-            "priority": pos.priority,
         })
     open_positions_df = pd.DataFrame(open_positions)
 
@@ -409,8 +386,6 @@ def compute_metrics(equity: pd.Series, trades: list[Trade],
     losses = [t for t in trades if t.pnl <= 0]
     gross_win = sum(t.pnl for t in wins)
     gross_loss = -sum(t.pnl for t in losses)
-    prio = [t for t in trades if t.priority]
-    non_prio = [t for t in trades if not t.priority]
 
     return {
         "CAGR %": round(cagr * 100, 2),
@@ -422,14 +397,6 @@ def compute_metrics(equity: pd.Series, trades: list[Trade],
         "Win rate %": round(100 * len(wins) / len(trades), 1) if trades else np.nan,
         "Profit factor": round(gross_win / gross_loss, 2) if gross_loss else np.inf,
         "Avg hold (days)": round(np.mean([t.holding_days for t in trades]), 0) if trades else np.nan,
-        "Breakout trades": len(prio),
-        "Breakout win rate %": round(100 * sum(t.pnl > 0 for t in prio) / len(prio), 1) if prio else np.nan,
-        "Breakout avg ret %": round(np.mean([t.ret_pct for t in prio]), 2) if prio else np.nan,
-        "Non-breakout trades": len(non_prio),
-        "Non-breakout win rate %": round(100 * sum(t.pnl > 0 for t in non_prio) / len(non_prio), 1)
-                                    if non_prio else np.nan,
-        "Non-breakout avg ret %": round(np.mean([t.ret_pct for t in non_prio]), 2)
-                                   if non_prio else np.nan,
     }
 
 
@@ -444,19 +411,10 @@ def main():
     ap.add_argument("--years", type=float, default=3.0)
     ap.add_argument("--capital", type=float, default=1_000_000)
     ap.add_argument("--cost-bps", type=float, default=12.0)
-    ap.add_argument("--no-breakout", action="store_true",
-                    help="A/B test: disable the long-year breakout bonus")
-    ap.add_argument("--pullback-entry", action="store_true",
-                    help="A/B test: enter on a pullback to the EMA instead "
-                        "of immediately at the monthly rebalance close")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
     cfg = dict(config.STRATEGY)
-    if args.no_breakout:
-        cfg["breakout_bonus"] = 0.0
-    if args.pullback_entry:
-        cfg["entry_mode"] = "ema_pullback"
 
     if args.synthetic:
         candles, bench = make_synthetic_universe()

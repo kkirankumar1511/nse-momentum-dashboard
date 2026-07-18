@@ -7,10 +7,6 @@ Create a `.env` file next to this one:
     KITE_API_KEY=your_kite_api_key
     KITE_API_SECRET=your_kite_api_secret
     KITE_ACCESS_TOKEN=            # filled daily after login flow
-    LLM_PROVIDER=ollama           # ollama | groq | openrouter | together | anthropic
-    LLM_MODEL=                    # blank = sensible default per provider
-    LLM_API_KEY=                  # only for hosted providers
-    ANTHROPIC_API_KEY=            # optional paid fallback
 """
 
 import os
@@ -21,19 +17,6 @@ load_dotenv()
 KITE_API_KEY = os.getenv("KITE_API_KEY", "")
 KITE_API_SECRET = os.getenv("KITE_API_SECRET", "")
 KITE_ACCESS_TOKEN = os.getenv("KITE_ACCESS_TOKEN", "")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")   # optional, paid
-
-# ---------------------------------------------------------------------------
-# LLM provider — open-source / local by default. See llm.py for the full list.
-#   LLM_PROVIDER=ollama      local, free, private (recommended default)
-#   LLM_PROVIDER=groq        hosted open weights, free tier, fast
-#   LLM_PROVIDER=openrouter  free ":free" open models
-#   LLM_PROVIDER=anthropic   paid fallback
-# ---------------------------------------------------------------------------
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
-LLM_MODEL = os.getenv("LLM_MODEL", "")          # blank = provider default
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Universe: NSE F&O-eligible stocks only (~210 names), fetched live from
@@ -100,35 +83,5 @@ STRATEGY = {
     # across profitability, health, and growth" bar — tune to taste.
     "min_fundamental_score": 50.0,
 
-    # Long-year breakout priority: stocks breaking above a multi-year high
-    # after a long base. George & Hwang's 52w-high effect strengthens at
-    # longer highs, and a 1-3 year base means no overhead supply of trapped
-    # sellers above the breakout level.
-    "breakout_lookback_days": 750,     # ~3 trading years scanned for the prior high
-    "breakout_confirm_window": 20,     # breakout must be recent (last ~1 month)
-    "breakout_min_base_days": 126,     # prior high must be >= ~6 months old
-    "breakout_bonus": 0.0,             # disabled: backtest showed no edge over
-                                        # non-breakout trades (n=4 sample though —
-                                        # revisit if the sample grows). 0 = no
-                                        # bonus/priority tier, see screener.score().
-    "breakout_bonus_cap_years": 2.0,   # bonus caps at 2 years of base (unused while 0)
-
-    # Pre-breakout watchlist: stocks still UNDER a multi-year high (overhead
-    # supply not yet cleared) but within this fraction of it, with a base
-    # already >= breakout_min_base_days old. Flagged `near_breakout` and
-    # HARD-EXCLUDED from buy candidates in screener.apply_gates -- the whole
-    # point of waiting is that a long base can fail right at the ceiling, so
-    # entry must happen only after a confirmed close above the prior high.
-    "near_breakout_pct": 0.90,
-
-    # Entry timing: "calendar" buys immediately at the monthly rebalance
-    # close (an arbitrary day relative to the stock's own short-term swing).
-    # "ema_pullback" instead waits for gate-passers to dip to/through the
-    # pullback EMA and close back up before buying -- a controlled entry on
-    # strength returning instead of chasing whatever the calendar date is.
-    # Trade-off: misses stocks that run straight up without ever pulling back.
-    "entry_mode": "calendar",          # "calendar" | "ema_pullback"
-    "pullback_ema_period": 20,
-    "pullback_tolerance_pct": 3.0,     # bar's low within this % above the EMA counts as "touched"
     "history_days": 1200,              # calendar days of candles to fetch
 }

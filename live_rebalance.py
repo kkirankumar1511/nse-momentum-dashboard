@@ -24,7 +24,6 @@ import os
 import pandas as pd
 
 import config
-import indicators
 import kite_client
 import screener
 
@@ -101,7 +100,6 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     still_held = set(held.index) - sold_syms
     open_slots = max(cfg["max_positions"] - len(still_held), 0)
 
-    entry_mode = cfg.get("entry_mode", "calendar")
     buys = []
     if open_slots > 0:
         for sym, row in candidates.iterrows():
@@ -109,26 +107,14 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
                 break
             if sym in still_held:
                 continue
-            if entry_mode == "ema_pullback":
-                df = kite_client.fetch_daily_candles(
-                    sym, days=cfg.get("pullback_ema_period", 20) + 60)
-                if df.empty or not indicators.pullback_trigger(
-                        df, cfg.get("pullback_ema_period", 20),
-                        cfg.get("pullback_tolerance_pct", 3.0)):
-                    continue
-                price = float(df["close"].iloc[-1])
-                atr_now = float(indicators.atr(df, cfg["atr_period"]).iloc[-1])
-                stop = price - cfg["atr_stop_multiple"] * atr_now
-            else:
-                price = float(row["price"])
-                stop = float(row["suggested_stop"])
+            price = float(row["price"])
+            stop = float(row["suggested_stop"])
             qty = screener.position_size(available_cash, price, stop, cfg)
             if qty <= 0:
                 continue
             buys.append({
                 "symbol": sym, "qty": qty, "price": round(price, 2),
                 "stop": round(stop, 2), "score": float(row["score"]),
-                "priority": bool(row.get("priority", False)),
             })
     buys_df = pd.DataFrame(buys)
 
