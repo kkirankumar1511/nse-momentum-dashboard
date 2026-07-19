@@ -79,15 +79,17 @@ STRATEGY = {
 
     # Trailing stop (chandelier-style): ratchets the stop up to
     # highest_close_since_entry - trailing_atr_multiple*ATR as a position
-    # gains, never back down. Off by default -- ships disabled until A/B'd
-    # via the Backtest page, same pattern as sector_bonus_weight above.
-    # Independent from atr_stop_multiple so the trailing distance can be
-    # tuned separately from the entry stop -- a real 5-year sweep found
-    # this forms an inverted-U across multiples (too narrow whipsaws,
-    # too wide barely trails at all), peaking at 4.0 (CAGR 24.30% vs
-    # baseline 22.51%, Sharpe 1.73 vs 1.50, max DD -14.37% vs -18.06%) --
-    # see the README's "Trailing stop" section for the full sweep.
-    "trailing_stop_enabled": False,
+    # gains, never back down. A real 5-year sweep found this forms an
+    # inverted-U across multiples (too narrow whipsaws, too wide barely
+    # trails at all), peaking at 4.0 (CAGR 24.30% vs baseline 22.51%,
+    # Sharpe 1.73 vs 1.50, max DD -14.37% vs -18.06%) -- see the README's
+    # "Trailing stop" section for the full sweep, including that adding
+    # either the fundamental gate or the sector bonus on top of it gave
+    # back the improvement rather than adding to it. This is the one
+    # experimental feature from that round that earned a spot in the
+    # default strategy -- sector_bonus_weight and the (also-tried,
+    # removed) regime filter did not.
+    "trailing_stop_enabled": True,
     "trailing_atr_multiple": 4.0,
 
     # Fundamental gate: xbrl_parser's sector-aware value_score/bank_score/

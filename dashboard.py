@@ -734,10 +734,19 @@ def page_backtest():
                 candles_ab, bench_ab = bt.load_candles_cached(
                     config.UNIVERSE, int(years * 365) + 400)
         sec_data = pd.read_pickle(SECTOR_DATA_CACHE)
+        # Explicit trailing_stop_enabled=False on both arms: isolates the
+        # sector effect against a pure-technical baseline (matching the
+        # already-published README numbers) regardless of what
+        # config.STRATEGY's own default is -- config.STRATEGY now ships
+        # with trailing_stop_enabled=True, so leaving it implicit here
+        # would silently fold the trailing stop into "baseline" too.
+        cfg_baseline = dict(config.STRATEGY)
+        cfg_baseline["trailing_stop_enabled"] = False
         cfg_sector = dict(config.STRATEGY)
+        cfg_sector["trailing_stop_enabled"] = False
         cfg_sector["sector_bonus_weight"] = sector_weight
         with st.spinner("Simulating baseline..."):
-            res_baseline = bt.run_backtest(candles_ab, bench_ab,
+            res_baseline = bt.run_backtest(candles_ab, bench_ab, cfg_baseline,
                                            initial_capital=bt_capital)
         with st.spinner("Simulating sector-aware..."):
             res_sector = bt.run_backtest(
@@ -780,11 +789,13 @@ def page_backtest():
             else:
                 candles_ts, bench_ts = bt.load_candles_cached(
                     config.UNIVERSE, int(years * 365) + 400)
+        cfg_ts_baseline = dict(config.STRATEGY)
+        cfg_ts_baseline["trailing_stop_enabled"] = False
         cfg_trailing = dict(config.STRATEGY)
         cfg_trailing["trailing_stop_enabled"] = True
         cfg_trailing["trailing_atr_multiple"] = trailing_mult
         with st.spinner("Simulating baseline..."):
-            res_ts_baseline = bt.run_backtest(candles_ts, bench_ts,
+            res_ts_baseline = bt.run_backtest(candles_ts, bench_ts, cfg_ts_baseline,
                                               initial_capital=bt_capital)
         with st.spinner("Simulating trailing-stop..."):
             res_ts_trailing = bt.run_backtest(candles_ts, bench_ts, cfg_trailing,
