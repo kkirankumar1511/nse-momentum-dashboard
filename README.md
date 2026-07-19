@@ -190,6 +190,124 @@ force-liquidated), and the full closed-trade log.
 The engine reuses `indicators.py` / `screener.py` verbatim, point-in-time —
 so what you backtest is literally the code that screens live.
 
+### Sector relative-strength (opt-in)
+
+`sector_universe.py` tilts ranking toward stocks in currently-outperforming
+sectors. Most of NSE's ~35 tracked sector indices (Auto, Bank, IT, Energy,
+Defence, PSE, Infra, ...) are themselves tradeable Kite instruments with
+real historical daily candles — exactly like the NIFTY 50 benchmark — so
+sector strength is computed point-in-time with the same
+`indicators.relative_strength()` formula already used for every stock's
+own momentum, not today's NSE heatmap snapshot applied retroactively.
+
+Sector membership comes from two sources: NSE's live `heatmap-symbols` API
+(~148 F&O stocks, some in multiple overlapping sector baskets — NSE's
+sectoral indices mix broad umbrellas, cap-segment cuts, and strict
+sub-sectors, not a clean one-stock-one-sector taxonomy) plus a
+manually-curated `sector_map_manual.json` (~50 more symbols the API's
+category doesn't classify, e.g. newer PSU/defence/energy listings). A
+stock's sector-strength signal is the *max* relative strength across every
+basket it belongs to, not a single arbitrarily-picked sector.
+
+```bash
+python sector_universe.py   # rebuild sector membership, print coverage
+```
+
+Off by default (`sector_bonus_weight: 0.0` in `config.py`) — use the
+**🧪 Backtest** page's "Include sector relative-strength bonus" checkbox
+and "Run A/B: baseline vs sector-aware" button to see the actual effect on
+your own data before trusting it. An earlier scoring dimension built the
+same way (long-year breakout priority) was A/B tested and found no edge,
+and was removed entirely rather than left as unused config — treat this
+one with the same scrutiny, not as an assumed improvement.
+
+**Real result on a 3-year Kite backtest (this codebase's own test, not a
+guarantee for your window)**: the sector bonus made things *worse* across
+the board, monotonically with weight — CAGR 25.89% → 23.10% (weight 1.0) →
+22.31% (weight 2.0); Sharpe 1.63 → 1.42 → 1.43; win rate 52.0% → 47.9% →
+48.3%; profit factor 2.32 → 2.08 → 1.95. Only max drawdown improved
+slightly (-14.98% → -13.53% → -12.43%), not enough to offset the rest.
+
+A 5-year year-by-year breakdown (weight=1.0) shows this isn't uniform,
+though: sector-aware actually wins or roughly ties baseline in 3 of 6 years
+(2022 +0.25pp, 2025 +1.90pp, 2026 +2.49pp), and 2021/2024 are only modest
+losses. The entire multi-year gap comes from **2023 alone** (-34pp), where
+tilting toward strong sectors missed a concentrated rally in stocks outside
+the leading sectors that year. One bad year dominating the aggregate, not
+uniform harm every year — still left off by default for this reason,
+re-run the A/B yourself before turning it on.
+
+A market regime filter (pause new entries whenever NIFTY 50 itself fell
+below its own 200 EMA / 50 EMA wasn't rising) was also tried, targeting the
+same year-by-year gap: rebalance exits carry a ~76% win rate vs 0% for
+stops by definition, and the stop-out rate nearly doubles in choppy years
+(38-44% vs 21-29%). A real 5-year A/B found the hypothesis didn't hold —
+only 1 of the 4 weak years improved, 2025 got notably worse (+9.28%→+2.35%
+vs NIFTY's +10.51%), and aggregate CAGR/Alpha/Sharpe all fell (22.51%→
+19.35%, 13.60%→10.45%, 1.50→1.43) despite a real drawdown improvement
+(-18.06%→-13.56%). NIFTY's own trend health turned out to be a weaker
+proxy for individual-stock whipsaw risk than hypothesized, and a binary
+index-level gate risks whipsawing through a real chop itself — removed
+entirely rather than left as unused config, same as the breakout-bonus
+mechanic above.
+
+### Trailing stop (opt-in)
+
+Same underlying diagnostic (rebalance exits carry a ~76% win rate averaging
++15.1%, and winners already run 60-86 days once they survive that long),
+approached from a different angle: the stop-loss is set once at entry
+(`entry_price - atr_stop_multiple*ATR`) and never moves — confirmed by
+inspection, `pos.stop` is only ever read at the daily stop-check and set
+once in `try_enter`. A position that runs up 20-30% and then reverses has
+to give back nearly the entire gain before the (unmoved, far-below-market)
+stop triggers or the next monthly rebalance re-evaluates it.
+
+The trailing stop (`config.STRATEGY["trailing_stop_enabled"]`, off by
+default) ratchets each position's stop up daily, chandelier-style:
+`highest_close_since_entry - trailing_atr_multiple*ATR`, monotonically
+(never back down), using only that day's close — causal, no lookahead,
+same decide-off-completed-bars model the rest of the engine already uses.
+Uses close (not intraday high) for the running peak, consistent with
+`relative_strength`/`momentum_return`/`pct_of_52w_high` elsewhere in this
+codebase.
+
+**Real result on a 5-year Kite backtest (2021-2026), swept across trailing
+distances**: this is the first of the three ideas tried here (sector bonus,
+regime filter, trailing stop) to show a genuine improvement — but it forms
+a sharp inverted-U across the ATR multiple, not "wider is always better":
+
+| Multiple | CAGR % | Alpha % | Sharpe | Max DD % | Trades | Final Capital |
+|---|---|---|---|---|---|---|
+| Baseline | 22.51 | 13.60 | 1.50 | -18.06 | 369 | 27,88,289 |
+| 2.5x | 18.72 | 9.82 | 1.48 | -12.99 | 866 | 23,79,461 |
+| 3.0x | 21.61 | 12.70 | 1.61 | -12.37 | 694 | 26,86,128 |
+| 3.5x | 22.75 | 13.84 | 1.65 | -14.04 | 573 | 28,16,028 |
+| **4.0x** | **24.30** | **15.39** | **1.73** | **-14.37** | 504 | **30,00,031** |
+| 4.5x | 23.21 | 14.30 | 1.65 | -15.38 | 466 | 28,69,472 |
+| 5.0x | 20.92 | 12.01 | 1.49 | -17.26 | 447 | 26,10,562 |
+| 6.0x | 21.45 | 12.55 | 1.45 | -17.89 | 404 | 26,69,358 |
+| 8.0x | 22.05 | 13.14 | 1.48 | -18.95 | 375 | 27,35,557 |
+
+Too narrow (near the entry stop's own 2.5x) whipsaws out of real winners
+early — more than double the trades (866 vs 369) and the worst CAGR of the
+sweep. Too wide (6.0x+) barely trails at all, converging back toward
+(and at 8.0x, past) baseline drawdown. **4.0x sits at the peak**: CAGR
++1.79pp, Sharpe +0.23, Alpha +1.79pp, and max drawdown improved by 3.7pp —
+all better simultaneously, on essentially unchanged profit factor (2.23 vs
+2.26). Year-by-year, 5 of 6 years improved or held steady at 4.0x (2021
++4.4pp, 2022 +0.6pp, 2023 +5.4pp, 2025 +1.2pp, 2026 +5.7pp, turning a
+-2.02% year into +3.65%); only 2024 gave back some of its exceptional
++50.47% (down to +39.80%, still 4.5x NIFTY's +8.80% that year).
+
+Shipped with `trailing_atr_multiple` defaulting to **4.0** (the identified
+sweet spot) for whenever the feature is turned on — `trailing_stop_enabled`
+itself still defaults to **off**, same as every other opt-in feature here.
+This is one 5-year window on today's F&O universe (survivorship bias
+applies, see Known limitations in `backtest.py`) — re-run the **🧪
+Backtest** page's "Run A/B: baseline vs trailing-stop" button on your own
+window before trusting it, and note the peak's exact location may shift
+with a different period.
+
 ## Fundamentals: primary-source XBRL value score
 
 ```bash

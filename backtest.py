@@ -48,6 +48,7 @@ import pandas as pd
 import config
 import indicators
 import screener
+import sector_universe
 
 CACHE_DIR = "cache"
 
@@ -104,10 +105,27 @@ def load_candles_cached(symbols: list[str], days: int,
             if is_fresh and covers_range:
                 df = cached
         if df is None:
-            df = _naive(kite_client.fetch_daily_candles(sym, days))
-            if not df.empty:
+            import time
+            fetched_fresh = False
+            for attempt in range(3):
+                try:
+                    df = _naive(kite_client.fetch_daily_candles(sym, days))
+                    fetched_fresh = True
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        # One flaky symbol shouldn't kill the whole batch --
+                        # fall back to whatever's cached (even if stale/short)
+                        # rather than crashing the entire multi-hour backtest
+                        # data load over a single transient network blip.
+                        print(f"[warn] {sym}: fetch failed after 3 attempts "
+                             f"({e}); using stale cache if any, else empty")
+                        df = cached if os.path.exists(path) else pd.DataFrame()
+                    else:
+                        time.sleep(2)
+            if fetched_fresh and not df.empty:
                 df.to_csv(path)
-            import time; time.sleep(0.35)
+            time.sleep(0.35)
         sym_df = df[df.index >= cutoff] if not df.empty else df
         if end_ts is not None and not sym_df.empty:
             sym_df = sym_df[sym_df.index <= end_ts]
@@ -186,6 +204,7 @@ class Position:
     entry_price: float
     stop: float
     entry_date: pd.Timestamp
+    highest_close: float = 0.0
 
 
 @dataclasses.dataclass
@@ -214,12 +233,20 @@ class Trade:
 def rank_universe_asof(candles: dict, bench: pd.DataFrame,
                        date: pd.Timestamp, cfg: dict,
                        fundamentals_history: dict | None = None,
-                       score_cache: dict | None = None) -> pd.DataFrame:
+                       score_cache: dict | None = None,
+                       sector_candles: dict | None = None,
+                       sector_membership: dict | None = None) -> pd.DataFrame:
     """Point-in-time ranking: identical pipeline to the live screener, fed
     only data up to `date`. Fundamental gate is off by default (fundamentals_
     history=None reproduces that exactly); pass a fundamentals_history dict
     (fundamentals_agent.build_fundamentals_history) to turn it on with a real
-    point-in-time score (fundamentals_agent.score_asof), not lookahead."""
+    point-in-time score (fundamentals_agent.score_asof), not lookahead.
+
+    sector_candles/sector_membership: optional, from sector_universe.
+    fetch_sector_index_candles()/get_sector_membership() -- both None
+    (default) means no "sector_rs" column ever gets attached, so
+    screener.score()'s sector-bonus guard never fires (byte-identical to
+    before this feature existed)."""
     sliced = {s: df.loc[:date] for s, df in candles.items()
               if not df.empty and date in df.index}
     bench_slice = bench.loc[:date]
@@ -230,6 +257,12 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
     if fundamentals_history is not None:
         import fundamentals_agent
         fundamentals = fundamentals_agent.score_asof(fundamentals_history, date, score_cache)
+    if sector_candles is not None and sector_membership is not None:
+        sector_rank = sector_universe.sector_rs_asof(
+            sector_candles, bench_slice, date, cfg["sector_rs_lookback_days"])
+        tech["sector_rs"] = [
+            sector_universe.stock_sector_rs(sym, sector_membership, sector_rank)
+            for sym in tech.index]
     gated = screener.apply_gates(tech, fundamentals=fundamentals)
     return screener.score(gated, cfg)
 
@@ -241,7 +274,9 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                  rebalance: str = "MS",
                  warmup_days: int = 260,
                  verbose: bool = False,
-                 fundamentals_history: dict | None = None) -> dict:
+                 fundamentals_history: dict | None = None,
+                 sector_candles: dict | None = None,
+                 sector_membership: dict | None = None) -> dict:
     """Monthly-rebalanced long-only backtest.
 
     cost_bps defaults to 0 -- Zerodha charges no brokerage on equity
@@ -254,6 +289,18 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     fundamentals_history() -- turns on a real point-in-time fundamental
     quality gate (see module docstring's Known limitations). None (default)
     reproduces the original technical-only behavior exactly.
+
+    sector_candles/sector_membership: optional, from sector_universe.
+    fetch_sector_index_candles()/get_sector_membership() -- turns on the
+    sector relative-strength score bonus (config.STRATEGY["sector_bonus_
+    weight"], 0 by default). Both None (default) reproduces the original
+    behavior exactly.
+
+    trailing stop: config.STRATEGY["trailing_stop_enabled"] (False by
+    default) ratchets each position's stop up to highest_close_since_entry
+    - trailing_atr_multiple*ATR as it gains, never back down -- see the
+    daily loop's step 1b. Off by default reproduces the original fixed
+    entry-stop behavior exactly.
 
     Rules replayed exactly as the README workflow:
       entries : gate-passers fill any open slot the moment it's free -- at
@@ -308,7 +355,9 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         if qty <= 0:
             return
         cash -= qty * price * (1 + cost)
-        positions[sym] = Position(sym, qty, price * (1 + cost), stop, date)
+        entry_price = price * (1 + cost)
+        positions[sym] = Position(sym, qty, entry_price, stop, date,
+                                  highest_close=entry_price)
         if verbose:
             print(f"{date.date()} BUY  {sym:8s} x{qty} @ {price:.1f} stop {stop:.1f}")
 
@@ -325,11 +374,29 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 fill = min(fill, bar["open"]) if bar["open"] < pos.stop else fill
                 close_position(sym, fill, date, "stop")
 
+        # 1b) trailing stop: ratchet each surviving position's stop up to
+        # highest_close_since_entry - trailing_atr_multiple*ATR, never back
+        # down. Runs AFTER today's stop-check above, so today's own close
+        # only affects tomorrow's check -- same causal, decide-off-
+        # completed-bars model the rest of this engine already uses (see
+        # try_enter's identical same-day ATR use for the entry stop).
+        if cfg.get("trailing_stop_enabled", False):
+            for sym, pos in positions.items():
+                df = candles[sym]
+                if date not in df.index:
+                    continue
+                pos.highest_close = max(pos.highest_close, float(df.loc[date, "close"]))
+                atr_now = float(indicators.atr(df.loc[:date], cfg["atr_period"]).iloc[-1])
+                new_stop = pos.highest_close - cfg["trailing_atr_multiple"] * atr_now
+                if new_stop > pos.stop:
+                    pos.stop = new_stop
+
         # 2) monthly rebalance: recompute the universe, drop trend/rank
         # failures, and refresh the standing watchlist (see step 2b).
         if date in rb_dates:
             ranked = rank_universe_asof(candles, bench, date, cfg,
-                                       fundamentals_history, score_cache)
+                                       fundamentals_history, score_cache,
+                                       sector_candles, sector_membership)
             if not ranked.empty:
                 candidates = ranked[ranked["all_gates"]]
                 keep_zone = set(candidates.head(cfg["max_positions"] * 2).index)

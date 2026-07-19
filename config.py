@@ -77,11 +77,31 @@ STRATEGY = {
     "risk_per_trade_pct": 0.5,         # % of capital risked per position
     "max_positions": 10,
 
+    # Trailing stop (chandelier-style): ratchets the stop up to
+    # highest_close_since_entry - trailing_atr_multiple*ATR as a position
+    # gains, never back down. Off by default -- ships disabled until A/B'd
+    # via the Backtest page, same pattern as sector_bonus_weight above.
+    # Independent from atr_stop_multiple so the trailing distance can be
+    # tuned separately from the entry stop -- a real 5-year sweep found
+    # this forms an inverted-U across multiples (too narrow whipsaws,
+    # too wide barely trails at all), peaking at 4.0 (CAGR 24.30% vs
+    # baseline 22.51%, Sharpe 1.73 vs 1.50, max DD -14.37% vs -18.06%) --
+    # see the README's "Trailing stop" section for the full sweep.
+    "trailing_stop_enabled": False,
+    "trailing_atr_multiple": 4.0,
+
     # Fundamental gate: xbrl_parser's sector-aware value_score/bank_score/
     # nbfc_score/etc total (0-100), computed from primary-source XBRL via
     # fundamentals_agent.fno_value_scan(). 50 is a rough "average-or-better
     # across profitability, health, and growth" bar — tune to taste.
     "min_fundamental_score": 50.0,
+
+    # Sector relative-strength bonus (see sector_universe.py): tilts ranking
+    # toward stocks in currently-outperforming sectors. 0 = off, matching
+    # this codebase's pattern of shipping a new scoring dimension disabled
+    # until an A/B backtest earns it (see the removed breakout-bonus tier).
+    "sector_bonus_weight": 0.0,
+    "sector_rs_lookback_days": 126,    # matches mom_lookback_days_long
 
     "history_days": 1200,              # calendar days of candles to fetch
 }

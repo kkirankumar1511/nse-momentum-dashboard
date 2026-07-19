@@ -83,21 +83,37 @@ def instrument_map() -> dict:
     }
 
 
+@lru_cache(maxsize=1)
+def index_instrument_map() -> dict:
+    """tradingsymbol -> instrument_token for NSE indices (NIFTY 50, sector
+    indices like NIFTY AUTO/NIFTY BANK/NIFTY ENERGY, etc.) -- these are a
+    different segment ('INDICES') and so are invisible to instrument_map()
+    above, which explicitly filters to tradeable equities only."""
+    kite = get_kite()
+    instruments = kite.instruments("NSE")
+    return {
+        row["tradingsymbol"]: row["instrument_token"]
+        for row in instruments
+        if row["segment"] == "INDICES"
+    }
+
+
 _MAX_DAY_INTERVAL_SPAN = 2000  # Kite's historical API hard limit for "day" candles
 
 
-def fetch_daily_candles(symbol: str, days: int = 400) -> pd.DataFrame:
-    """Daily OHLCV for `symbol` covering the last `days` calendar days.
+def _fetch_chunked(token: int, days: int) -> pd.DataFrame:
+    """Daily OHLCV for `token` covering the last `days` calendar days.
 
     Kite's historical API rejects a single "day"-interval request spanning
     more than ~2000 days ("interval exceeds max limit: 2000 days") -- deep
     backtests (5y history + lookback buffer) exceed that, so requests longer
-    than the limit are split into sequential chunks and concatenated.
+    than the limit are split into sequential chunks and concatenated. Shared
+    by every candle fetcher below (stocks, NIFTY 50, sector indices) --
+    previously duplicated verbatim between fetch_daily_candles and
+    benchmark_candles, which became worth fixing once sector indices became
+    a third consumer of the same chunking logic.
     """
     kite = get_kite()
-    token = instrument_map().get(symbol)
-    if token is None:
-        raise ValueError(f"Unknown NSE symbol: {symbol}")
     to_date = dt.date.today()
     from_date = to_date - dt.timedelta(days=days)
 
@@ -122,6 +138,14 @@ def fetch_daily_candles(symbol: str, days: int = 400) -> pd.DataFrame:
     return df.set_index("date")
 
 
+def fetch_daily_candles(symbol: str, days: int = 400) -> pd.DataFrame:
+    """Daily OHLCV for `symbol` covering the last `days` calendar days."""
+    token = instrument_map().get(symbol)
+    if token is None:
+        raise ValueError(f"Unknown NSE symbol: {symbol}")
+    return _fetch_chunked(token, days)
+
+
 def fetch_universe_candles(symbols: list[str], days: int = 400,
                            pause: float = 0.35) -> dict[str, pd.DataFrame]:
     """Fetch candles for many symbols, respecting Kite's ~3 req/s historical
@@ -137,32 +161,21 @@ def fetch_universe_candles(symbols: list[str], days: int = 400,
     return out
 
 
+def fetch_index_candles(tradingsymbol: str, days: int = 400) -> pd.DataFrame:
+    """Daily OHLCV for an NSE index (NIFTY 50, or a sector index like
+    NIFTY AUTO/NIFTY BANK/NIFTY ENERGY) covering the last `days` calendar
+    days. Used for relative-strength calculations -- both the NIFTY 50
+    benchmark and sector-strength ranking need real historical index
+    levels, not just today's snapshot."""
+    token = index_instrument_map().get(tradingsymbol)
+    if token is None:
+        raise ValueError(f"Unknown NSE index: {tradingsymbol}")
+    return _fetch_chunked(token, days)
+
+
 def benchmark_candles(days: int = 400) -> pd.DataFrame:
     """NIFTY 50 index candles for relative-strength calculations."""
-    kite = get_kite()
-    # NIFTY 50 index token on Kite is 256265
-    to_date = dt.date.today()
-    from_date = to_date - dt.timedelta(days=days)
-
-    if days <= _MAX_DAY_INTERVAL_SPAN:
-        candles = kite.historical_data(256265, from_date, to_date, "day")
-    else:
-        candles = []
-        chunk_start = from_date
-        while chunk_start < to_date:
-            chunk_end = min(chunk_start + dt.timedelta(days=_MAX_DAY_INTERVAL_SPAN),
-                            to_date)
-            candles += kite.historical_data(256265, chunk_start, chunk_end, "day")
-            chunk_start = chunk_end + dt.timedelta(days=1)
-            if chunk_start < to_date:
-                time.sleep(0.35)
-
-    df = pd.DataFrame(candles)
-    if df.empty:
-        return df
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.drop_duplicates(subset="date").sort_values("date")
-    return df.set_index("date")
+    return fetch_index_candles("NIFTY 50", days)
 
 
 # ---------------------------------------------------------------------------

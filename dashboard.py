@@ -33,6 +33,7 @@ import indicators
 import kite_client
 import live_rebalance as lr
 import screener
+import sector_universe as su
 
 st.set_page_config(page_title="NSE Momentum Cockpit", layout="wide", page_icon="📈")
 
@@ -59,6 +60,7 @@ SCREEN_CACHE = os.path.join("cache", "screen.pkl")
 VALUE_SCORE_CACHE = os.path.join("cache", "fno_value_scores.pkl")
 BACKTEST_CACHE = os.path.join("cache", "backtest_result.pkl")
 FUNDAMENTALS_HISTORY_CACHE = os.path.join("cache", "fundamentals_history.pkl")
+SECTOR_DATA_CACHE = os.path.join("cache", "sector_data.pkl")
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +272,34 @@ def page_screener():
             fig.update_layout(height=500, xaxis_rangeslider_visible=False,
                               margin=dict(l=10, r=10, t=30, b=10))
             st.plotly_chart(fig, width="stretch")
+
+    st.divider()
+    with st.expander("🏭 Current sector rankings"):
+        st.caption(
+            "Today's relative strength (vs NIFTY 50, same lookback as the "
+            "6-month momentum score) for every tracked sector index — "
+            "separate from the Backtest page's sector bonus, this is just "
+            "for browsing which sectors are currently strong. Own button "
+            "since it needs its own ~35 index fetches on top of the "
+            "candles already fetched by Run screen.")
+        if st.button("Fetch current sector rankings"):
+            with st.spinner("Fetching sector membership + index history..."):
+                membership = su.get_sector_membership()
+                days = config.STRATEGY["history_days"]
+                sector_candles = su.fetch_sector_index_candles(days=days)
+                bench_sec = kite_client.benchmark_candles(days)
+                rank = su.sector_rs_asof(
+                    sector_candles, bench_sec, dt.date.today(),
+                    config.STRATEGY["sector_rs_lookback_days"])
+            st.session_state["sector_rank"] = rank
+            st.session_state["sector_rank_time"] = dt.datetime.now()
+        if "sector_rank" in st.session_state:
+            rt = st.session_state["sector_rank_time"]
+            st.caption(f"Last fetched: {rt:%d %b %Y %H:%M}")
+            st.dataframe(
+                st.session_state["sector_rank"].rename("Relative strength (pct pts)")
+                  .to_frame().style.format("{:.2f}"),
+                width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +605,69 @@ def page_backtest():
                         FUNDAMENTALS_HISTORY_CACHE)
             st.rerun()
 
+    use_sector = st.checkbox(
+        "Include sector relative-strength bonus", value=False,
+        help="Tilts ranking toward stocks in currently-outperforming "
+             "sectors, using each sector index's own real historical price "
+             "data (point-in-time, not today's NSE heatmap applied "
+             "retroactively) — see sector_universe.py. Needs sector data "
+             "built below first. Off by default: an earlier scoring "
+             "dimension built the same way (long-year breakout priority) "
+             "was A/B tested and found no edge, so treat this the same way "
+             "— verify with the A/B run below before trusting it.")
+    sector_weight = 1.0
+    if use_sector:
+        if os.path.exists(SECTOR_DATA_CACHE):
+            sec_cached = pd.read_pickle(SECTOR_DATA_CACHE)
+            age_hr = (dt.datetime.now() - sec_cached["run_time"]).total_seconds() / 3600
+            st.caption(f"📁 Sector data built {age_hr:.1f}h ago "
+                      f"({len(sec_cached['sector_candles'])} sector indices, "
+                      f"{len(sec_cached['sector_membership'])} symbols mapped).")
+        else:
+            st.warning("No sector data built yet — the bonus will have no "
+                      "effect until you build it.")
+        if st.button("Build/Refresh sector data"):
+            with st.spinner("Fetching sector membership + index history..."):
+                sector_membership = su.get_sector_membership(force_refresh=True)
+                sector_candles = su.fetch_sector_index_candles(
+                    days=int(years * 365) + 400 if range_mode == "Trailing years"
+                    else (dt.date.today() - start_date).days + 400)
+            os.makedirs("cache", exist_ok=True)
+            pd.to_pickle({"sector_membership": sector_membership,
+                         "sector_candles": sector_candles,
+                         "run_time": dt.datetime.now()}, SECTOR_DATA_CACHE)
+            st.rerun()
+        sector_weight = st.slider("Sector bonus weight", 0.0, 3.0, 1.0, 0.25,
+                                  help="0 = no effect (same as unchecked). "
+                                       "Higher = sector strength matters more "
+                                       "relative to the 4 existing technical "
+                                       "score terms.")
+
+    use_trailing = st.checkbox(
+        "Trail the stop up as a position gains (chandelier-style)",
+        value=False,
+        help="Ratchets each position's stop up to "
+             "highest_close_since_entry - multiple*ATR as it gains, never "
+             "back down — instead of leaving the stop fixed at entry for "
+             "the whole holding period. Existing winners already run "
+             "60-86 days on average and capture solid gains via the "
+             "rebalance exit; a fixed stop never locks in any of that "
+             "along the way, so a reversal can give back most of an open "
+             "profit before the stop or next month's rebalance catches "
+             "it. Verify with the A/B run below before trusting it.")
+    trailing_mult = 4.0
+    if use_trailing:
+        trailing_mult = st.slider(
+            "Trailing ATR multiple", 1.0, 8.0, 4.0, 0.25,
+            help="Distance below the running peak close, in ATRs. A real "
+                 "5-year sweep found this forms an inverted-U — too narrow "
+                 "(near the entry stop's own 2.5x) whipsaws out of "
+                 "winners early, too wide (6.0x+) barely trails at all — "
+                 "peaking at 4.0x (default here): CAGR 24.30% vs baseline "
+                 "22.51%, Sharpe 1.73 vs 1.50, max drawdown -14.37% vs "
+                 "-18.06%. Re-verify with the A/B run below on your own "
+                 "window before trusting it.")
+
     if "bt_result" not in st.session_state and os.path.exists(BACKTEST_CACHE):
         cached = pd.read_pickle(BACKTEST_CACHE)
         st.session_state["bt_result"] = cached["result"]
@@ -593,14 +686,28 @@ def page_backtest():
                 candles_bt, bench_bt = bt.load_candles_cached(
                     config.UNIVERSE, days, end_date=end_date)
             else:
-                candles_bt, bench_bt = bt.load_candles_cached(
-                    config.UNIVERSE, int(years * 365) + 400)
+                days = int(years * 365) + 400
+                candles_bt, bench_bt = bt.load_candles_cached(config.UNIVERSE, days)
         fundamentals_history = None
         if use_fundamentals and os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
             fundamentals_history = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)["history"]
+        run_cfg, sector_candles, sector_membership = None, None, None
+        if use_sector and os.path.exists(SECTOR_DATA_CACHE):
+            sec_data = pd.read_pickle(SECTOR_DATA_CACHE)
+            sector_candles = sec_data["sector_candles"]
+            sector_membership = sec_data["sector_membership"]
+            run_cfg = dict(config.STRATEGY)
+            run_cfg["sector_bonus_weight"] = sector_weight
+        if use_trailing:
+            run_cfg = run_cfg or dict(config.STRATEGY)
+            run_cfg["trailing_stop_enabled"] = True
+            run_cfg["trailing_atr_multiple"] = trailing_mult
         with st.spinner("Simulating..."):
-            res = bt.run_backtest(candles_bt, bench_bt, initial_capital=bt_capital,
-                                  fundamentals_history=fundamentals_history)
+            res = bt.run_backtest(candles_bt, bench_bt, run_cfg,
+                                  initial_capital=bt_capital,
+                                  fundamentals_history=fundamentals_history,
+                                  sector_candles=sector_candles,
+                                  sector_membership=sector_membership)
             run_time = dt.datetime.now()
             st.session_state["bt_result"] = res
             st.session_state["bt_bench"] = bench_bt
@@ -609,6 +716,109 @@ def page_backtest():
             os.makedirs("cache", exist_ok=True)
             pd.to_pickle({"result": res, "bench": bench_bt, "run_time": run_time},
                         BACKTEST_CACHE)
+
+    st.divider()
+    st.subheader("Sector A/B comparison")
+    st.caption("Runs the backtest twice with identical settings — once with "
+              "the sector bonus off (baseline), once with it on at the "
+              "chosen weight above — so you can see the actual effect "
+              "instead of assuming one.")
+    if st.button("Run A/B: baseline vs sector-aware", disabled=run_disabled
+                or not os.path.exists(SECTOR_DATA_CACHE)):
+        with st.spinner("Loading candles (cached daily, first run is slow)..."):
+            if range_mode == "Custom dates":
+                ab_days = (dt.date.today() - start_date).days + 400
+                candles_ab, bench_ab = bt.load_candles_cached(
+                    config.UNIVERSE, ab_days, end_date=end_date)
+            else:
+                candles_ab, bench_ab = bt.load_candles_cached(
+                    config.UNIVERSE, int(years * 365) + 400)
+        sec_data = pd.read_pickle(SECTOR_DATA_CACHE)
+        cfg_sector = dict(config.STRATEGY)
+        cfg_sector["sector_bonus_weight"] = sector_weight
+        with st.spinner("Simulating baseline..."):
+            res_baseline = bt.run_backtest(candles_ab, bench_ab,
+                                           initial_capital=bt_capital)
+        with st.spinner("Simulating sector-aware..."):
+            res_sector = bt.run_backtest(
+                candles_ab, bench_ab, cfg_sector, initial_capital=bt_capital,
+                sector_candles=sec_data["sector_candles"],
+                sector_membership=sec_data["sector_membership"])
+        st.session_state["bt_ab_baseline"] = res_baseline
+        st.session_state["bt_ab_sector"] = res_sector
+        st.session_state["bt_ab_bench"] = bench_ab
+
+    if "bt_ab_baseline" in st.session_state:
+        ab_base = st.session_state["bt_ab_baseline"]
+        ab_sector = st.session_state["bt_ab_sector"]
+        ab_bench = st.session_state["bt_ab_bench"]
+        eq_base = ab_base["equity_curve"]
+        eq_sector = ab_sector["equity_curve"]
+        nifty_ab = ab_bench["close"].reindex(eq_base.index).ffill()
+        ab_plot = pd.DataFrame({
+            "Baseline": eq_base / eq_base.iloc[0] * 100,
+            "Sector-aware": (eq_sector / eq_sector.iloc[0] * 100).reindex(eq_base.index).ffill(),
+            "NIFTY 50": nifty_ab / nifty_ab.iloc[0] * 100,
+        })
+        st.line_chart(ab_plot)
+        st.dataframe(pd.DataFrame({"Baseline": ab_base["metrics"],
+                                   "Sector-aware": ab_sector["metrics"]}),
+                    width="stretch")
+
+    st.divider()
+    st.subheader("Trailing stop A/B comparison")
+    st.caption("Runs the backtest twice with identical settings — once with "
+              "a fixed entry stop (baseline), once with the stop trailing "
+              "up at the chosen ATR multiple above — so you can see the "
+              "actual effect instead of assuming one.")
+    if st.button("Run A/B: baseline vs trailing-stop", disabled=run_disabled):
+        with st.spinner("Loading candles (cached daily, first run is slow)..."):
+            if range_mode == "Custom dates":
+                ts_days = (dt.date.today() - start_date).days + 400
+                candles_ts, bench_ts = bt.load_candles_cached(
+                    config.UNIVERSE, ts_days, end_date=end_date)
+            else:
+                candles_ts, bench_ts = bt.load_candles_cached(
+                    config.UNIVERSE, int(years * 365) + 400)
+        cfg_trailing = dict(config.STRATEGY)
+        cfg_trailing["trailing_stop_enabled"] = True
+        cfg_trailing["trailing_atr_multiple"] = trailing_mult
+        with st.spinner("Simulating baseline..."):
+            res_ts_baseline = bt.run_backtest(candles_ts, bench_ts,
+                                              initial_capital=bt_capital)
+        with st.spinner("Simulating trailing-stop..."):
+            res_ts_trailing = bt.run_backtest(candles_ts, bench_ts, cfg_trailing,
+                                              initial_capital=bt_capital)
+        st.session_state["bt_ts_baseline"] = res_ts_baseline
+        st.session_state["bt_ts_trailing"] = res_ts_trailing
+        st.session_state["bt_ts_bench"] = bench_ts
+
+    if "bt_ts_baseline" in st.session_state:
+        ts_base = st.session_state["bt_ts_baseline"]
+        ts_trailing = st.session_state["bt_ts_trailing"]
+        ts_bench = st.session_state["bt_ts_bench"]
+        eq_ts_base = ts_base["equity_curve"]
+        eq_ts_trailing = ts_trailing["equity_curve"]
+        nifty_ts = ts_bench["close"].reindex(eq_ts_base.index).ffill()
+        ts_plot = pd.DataFrame({
+            "Baseline": eq_ts_base / eq_ts_base.iloc[0] * 100,
+            "Trailing-stop": (eq_ts_trailing / eq_ts_trailing.iloc[0] * 100).reindex(eq_ts_base.index).ffill(),
+            "NIFTY 50": nifty_ts / nifty_ts.iloc[0] * 100,
+        })
+        st.line_chart(ts_plot)
+        st.dataframe(pd.DataFrame({"Baseline": ts_base["metrics"],
+                                   "Trailing-stop": ts_trailing["metrics"]}),
+                    width="stretch")
+
+        yp_ts_base = bt.yearly_performance(eq_ts_base, ts_bench, ts_base["trades"])
+        yp_ts_trailing = bt.yearly_performance(eq_ts_trailing, ts_bench, ts_trailing["trades"])
+        st.caption("Year-by-year Strategy % — baseline vs trailing-stop")
+        st.dataframe(pd.DataFrame({
+            "Baseline %": yp_ts_base["Strategy %"],
+            "Trailing-stop %": yp_ts_trailing["Strategy %"],
+            "NIFTY %": yp_ts_base["NIFTY %"],
+            "Difference": yp_ts_trailing["Strategy %"] - yp_ts_base["Strategy %"],
+        }), width="stretch")
 
     if "bt_result" not in st.session_state:
         st.info("Click **Run backtest** to simulate on real Kite data.")

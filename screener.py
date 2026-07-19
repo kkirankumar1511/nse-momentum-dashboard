@@ -87,6 +87,17 @@ def score(t: pd.DataFrame, cfg: dict = config.STRATEGY) -> pd.DataFrame:
         + 0.20 * _zscore(t["pct_52w_high"].astype(float))
         + 0.15 * _zscore(t["vol_expansion"].astype(float))
     ).round(3)
+
+    # Optional sector relative-strength tilt (see sector_universe.py). Off
+    # by default (sector_bonus_weight=0) -- only present when the caller
+    # attached a "sector_rs" column (backtest.rank_universe_asof / live
+    # screener.run_screen, both opt-in). Not renormalized against the 4
+    # terms above: only relative ranking (sort_values) matters, and this
+    # keeps weight=0 byte-identical to today's score.
+    if cfg.get("sector_bonus_weight", 0.0) and "sector_rs" in t.columns:
+        t["score"] += (cfg["sector_bonus_weight"]
+                       * _zscore(t["sector_rs"].astype(float)).fillna(0))
+
     return t.sort_values("score", ascending=False)
 
 
