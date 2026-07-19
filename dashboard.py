@@ -57,6 +57,7 @@ except Exception as e:
 EQUITY_LOG = os.path.join("cache", "equity_log.csv")
 SCREEN_CACHE = os.path.join("cache", "screen.pkl")
 VALUE_SCORE_CACHE = os.path.join("cache", "fno_value_scores.pkl")
+BACKTEST_CACHE = os.path.join("cache", "backtest_result.pkl")
 
 
 # ---------------------------------------------------------------------------
@@ -497,18 +498,37 @@ def page_backtest():
               "trip) but aren't broker-specific; use `--cost-bps` on the CLI "
               "if you want a more conservative run that includes them.")
 
+    if "bt_result" not in st.session_state and os.path.exists(BACKTEST_CACHE):
+        cached = pd.read_pickle(BACKTEST_CACHE)
+        st.session_state["bt_result"] = cached["result"]
+        st.session_state["bt_bench"] = cached["bench"]
+        st.session_state["bt_run_time"] = cached["run_time"]
+        st.session_state["bt_is_cached"] = True
+
     if st.button("Run backtest", type="primary"):
         with st.spinner("Loading candles (cached daily, first run is slow)..."):
             candles_bt, bench_bt = bt.load_candles_cached(
                 config.UNIVERSE, int(years * 365) + 400)
         with st.spinner("Simulating..."):
             res = bt.run_backtest(candles_bt, bench_bt, initial_capital=bt_capital)
+            run_time = dt.datetime.now()
             st.session_state["bt_result"] = res
             st.session_state["bt_bench"] = bench_bt
+            st.session_state["bt_run_time"] = run_time
+            st.session_state["bt_is_cached"] = False
+            os.makedirs("cache", exist_ok=True)
+            pd.to_pickle({"result": res, "bench": bench_bt, "run_time": run_time},
+                        BACKTEST_CACHE)
 
     if "bt_result" not in st.session_state:
         st.info("Click **Run backtest** to simulate on real Kite data.")
         return
+
+    run_time = st.session_state.get("bt_run_time")
+    cached_note = " 📁 (from cache — click 'Run backtest' to refresh)" \
+        if st.session_state.get("bt_is_cached") else ""
+    if run_time is not None:
+        st.caption(f"Last run: {run_time:%d %b %Y %H:%M}{cached_note}")
 
     res = st.session_state["bt_result"]
     eq = res["equity_curve"]
