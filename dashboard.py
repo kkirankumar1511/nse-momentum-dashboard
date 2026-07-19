@@ -58,6 +58,7 @@ EQUITY_LOG = os.path.join("cache", "equity_log.csv")
 SCREEN_CACHE = os.path.join("cache", "screen.pkl")
 VALUE_SCORE_CACHE = os.path.join("cache", "fno_value_scores.pkl")
 BACKTEST_CACHE = os.path.join("cache", "backtest_result.pkl")
+FUNDAMENTALS_HISTORY_CACHE = os.path.join("cache", "fundamentals_history.pkl")
 
 
 # ---------------------------------------------------------------------------
@@ -479,10 +480,13 @@ def page_backtest():
         "Replays the exact screener logic point-in-time with monthly "
         "rebalancing (any slot freed by a stop gets redeployed immediately, "
         "not just at the next rebalance), daily ATR-stop checks, and "
-        "transaction costs. Fundamental gates are off (historical ratios "
-        "can't be reconstructed without lookahead bias) and today's "
-        "universe implies some survivorship bias — treat parameter-"
-        "sensitivity comparisons as more reliable than absolute returns."
+        "transaction costs. The fundamental quality gate is off by default "
+        "and opt-in below — when enabled it's genuinely point-in-time (only "
+        "uses filings that were actually public as of each rebalance date, "
+        "via each filing's real broadcast timestamp), not lookahead. Today's "
+        "universe implies some survivorship bias regardless — treat "
+        "parameter-sensitivity comparisons as more reliable than absolute "
+        "returns."
     )
 
     range_mode = st.radio("Date range", ["Trailing years", "Custom dates"],
@@ -509,6 +513,34 @@ def page_backtest():
               "trip) but aren't broker-specific; use `--cost-bps` on the CLI "
               "if you want a more conservative run that includes them.")
 
+    use_fundamentals = st.checkbox(
+        "Include fundamental quality gate (point-in-time)", value=False,
+        help="Uses each filing's real broadcast timestamp to only count "
+             "what was actually public knowledge as of each rebalance date "
+             "— not today's fundamentals applied retroactively. Needs a "
+             "fundamentals history built below first (a one-time or "
+             "periodic scan across the universe, same cost as the "
+             "Fundamentals page's scan).")
+    if use_fundamentals:
+        if os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
+            hist_cached = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)
+            age_hr = (dt.datetime.now() - hist_cached["run_time"]).total_seconds() / 3600
+            st.caption(f"📁 Fundamentals history built {age_hr:.1f}h ago "
+                      f"({len(hist_cached['history'])} symbols).")
+        else:
+            st.warning("No fundamentals history built yet — the gate will "
+                      "have no effect until you build one.")
+        if st.button("Build/Refresh fundamentals history"):
+            bar = st.progress(0.0, text="Starting...")
+            history = fa.build_fundamentals_history(
+                config.UNIVERSE, n_years=5,
+                progress_cb=lambda s, f: bar.progress(f, text=s))
+            bar.empty()
+            os.makedirs("cache", exist_ok=True)
+            pd.to_pickle({"history": history, "run_time": dt.datetime.now()},
+                        FUNDAMENTALS_HISTORY_CACHE)
+            st.rerun()
+
     if "bt_result" not in st.session_state and os.path.exists(BACKTEST_CACHE):
         cached = pd.read_pickle(BACKTEST_CACHE)
         st.session_state["bt_result"] = cached["result"]
@@ -529,8 +561,12 @@ def page_backtest():
             else:
                 candles_bt, bench_bt = bt.load_candles_cached(
                     config.UNIVERSE, int(years * 365) + 400)
+        fundamentals_history = None
+        if use_fundamentals and os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
+            fundamentals_history = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)["history"]
         with st.spinner("Simulating..."):
-            res = bt.run_backtest(candles_bt, bench_bt, initial_capital=bt_capital)
+            res = bt.run_backtest(candles_bt, bench_bt, initial_capital=bt_capital,
+                                  fundamentals_history=fundamentals_history)
             run_time = dt.datetime.now()
             st.session_state["bt_result"] = res
             st.session_state["bt_bench"] = bench_bt

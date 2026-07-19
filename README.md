@@ -161,9 +161,15 @@ The app is a sidebar-navigated set of pages, not a flat row of tabs:
   transparently split into chunks.
 - GTT stop-losses are not guaranteed fills (they fire a limit order); gap-
   down risk remains.
-- Fundamental gates are disabled in the backtest (can't reconstruct
-  historical XBRL scores without lookahead bias) — live results with the
-  quality gate on will differ, usually fewer but higher-quality trades.
+- The fundamental quality gate is off by default in the backtest and opt-in
+  (Backtest page checkbox, or `run_backtest(fundamentals_history=...)`).
+  When enabled it's genuinely point-in-time — each filing's real broadcast
+  timestamp gates whether it counts as "known" as of a given rebalance date
+  — not lookahead. It doesn't universally improve results: in one real
+  3-year test it produced more trades and slightly lower risk-adjusted
+  returns than technical-only, since restricting the candidate pool to
+  quality-passing names thins it out and increases rebalance turnover.
+  Treat it as a real, tunable lever to test, not an assumed improvement.
 - Today's F&O universe is used throughout the backtest window, so stocks
   that fell out of eligibility are invisible (survivorship bias). Treat
   absolute backtest returns as optimistic; parameter-sensitivity comparisons
@@ -220,6 +226,29 @@ via NSE's endpoint for that name).
 *as-reported* financials straight from the filing, strictly better than
 scraping a ratios page: primary source, timestamped, carries the
 audited/unaudited flag, available the evening results drop.
+
+### Point-in-time fundamentals in the backtest (opt-in)
+
+Every NSE filing carries a real broadcast/publication timestamp distinct
+from the period it reports on (a "year ended 31-Mar-2024" result is
+typically not public until several weeks into April). `xbrl_parser.py`
+tags every annual row with this `known_as_of` timestamp, so the backtest
+can apply the fundamental gate *without* lookahead bias — only ever using
+what was actually knowable on each historical rebalance date.
+
+```bash
+# From Python, or via the Backtest page's "Build/Refresh fundamentals
+# history" button + "Include fundamental quality gate" checkbox:
+history = fundamentals_agent.build_fundamentals_history(config.UNIVERSE, n_years=5)
+res = backtest.run_backtest(candles, bench, fundamentals_history=history)
+```
+
+`build_fundamentals_history()` fetches each symbol's full annual history
+once (same cost as a Fundamentals-page scan); `score_asof(history, date)`
+then filters and scores purely in memory for any historical date, with no
+further network calls, at every rebalance. Caveats: PEG is never computed
+here (needs a live market price, which doesn't exist for a past date), and
+this doesn't universally improve results — see Notes & limitations above.
 
 ## Stage 1 live automation: propose, review, execute
 

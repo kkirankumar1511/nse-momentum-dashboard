@@ -462,6 +462,22 @@ def earnings_quality(df: pd.DataFrame) -> dict:
 # universe rather than only the LLM-shortlisted names.
 # ---------------------------------------------------------------------------
 
+def _parse_broadcast(s: str | None) -> dt.datetime | None:
+    """Parses NSE's filing-broadcast timestamp ('DD-Mon-YYYY HH:MM:SS') --
+    the actual publication moment, distinct from qe_Date/toDate (the period
+    END being reported on). Used to know when a figure became publicly
+    knowable, for point-in-time backtesting (see fundamentals_asof) -- a
+    filing for FY24 (year ended 31-Mar-2024) is typically not knowable until
+    weeks or months after that date. Returns None on missing/malformed input
+    rather than guessing, since fundamentals_asof treats None as "exclude"."""
+    if not s:
+        return None
+    try:
+        return dt.datetime.strptime(s, "%d-%b-%Y %H:%M:%S")
+    except ValueError:
+        return None
+
+
 def annual_balance_sheet(symbol: str, n_years: int = 3) -> list[dict]:
     """Parse the latest N annual (~12-month) filings for balance-sheet,
     cash-flow, and full-year P&L data — only available in Q4/year-end
@@ -553,6 +569,13 @@ def annual_balance_sheet(symbol: str, n_years: int = 3) -> list[dict]:
                 d = _try_parse(f)
                 if d:
                     d["consolidation_basis"] = basis
+                    # known_as_of must come from this SAME winning filing dict
+                    # `f`, not a different candidate for this qe -- otherwise a
+                    # restated filing's timestamp could attach to a different
+                    # filing's numbers. Used for point-in-time backtesting
+                    # (see fundamentals_asof): this figure isn't knowable
+                    # before its own broadcast date, regardless of qe_date.
+                    d["known_as_of"] = _parse_broadcast(f.get("broadcast_Date"))
                     break
         if not d:
             continue
@@ -632,13 +655,19 @@ def quarterly_summed_annual(symbol: str, n_years: int = 5) -> list[dict]:
 
     # Dedup: prefer the most-recently-broadcast filing per (toDate, basis) —
     # handles revisions without needing to parse a separate revision flag.
+    # Compares PARSED timestamps, not raw strings: NSE's "DD-Mon-YYYY
+    # HH:MM:SS" format does not sort correctly as a string (same class of
+    # bug as qe_Date's month-abbreviation ordering, see _qe_key below) --
+    # this was silently picking the wrong revision in some cases.
     best: dict[tuple[str, str], dict] = {}
     for f in filings:
         key = (f.get("toDate"), f.get("consolidated"))
         if key[0] is None or key[1] not in ("Consolidated", "Non-Consolidated"):
             continue
         cur = best.get(key)
-        if cur is None or (f.get("broadCastDate") or "") > (cur.get("broadCastDate") or ""):
+        f_bc = _parse_broadcast(f.get("broadCastDate")) or dt.datetime.min
+        cur_bc = _parse_broadcast(cur.get("broadCastDate")) or dt.datetime.min if cur else None
+        if cur is None or f_bc > cur_bc:
             best[key] = f
 
     by_fy: dict[tuple[str, str], dict[str, dict]] = {}
@@ -713,6 +742,14 @@ def quarterly_summed_annual(symbol: str, n_years: int = 5) -> list[dict]:
             merged["period_end"] = fy_end_date.isoformat()
             combined = _derive_ratios(merged)
             basis_used = basis
+            # The reconstructed year isn't knowable until the LAST of its 4
+            # quarters is filed -- and if even one quarter's broadcast date
+            # is missing/unparseable, we can't be sure when the full picture
+            # was actually complete, so the whole row is excluded (None)
+            # rather than guessed at (see fundamentals_asof).
+            bc_dates = [_parse_broadcast(quarters[qd].get("broadCastDate")) for qd in needed]
+            combined["known_as_of"] = (max(bc_dates)
+                                       if all(bc is not None for bc in bc_dates) else None)
             break
         if combined is None:
             continue
@@ -725,6 +762,29 @@ def quarterly_summed_annual(symbol: str, n_years: int = 5) -> list[dict]:
         if len(rows) >= n_years:
             break
     return rows
+
+
+def fundamentals_asof(bs_years: list[dict], date) -> list[dict]:
+    """Filters an already-fetched `bs_years` list (from annual_balance_sheet
+    or quarterly_summed_annual, or a combination) down to only the rows that
+    were publicly knowable as of `date` -- the core no-lookahead primitive
+    for backtesting with a fundamental gate.
+
+    A row with no known_as_of (missing/unparseable broadcast timestamp) is
+    excluded unconditionally, never guessed at. Same-day filings count as
+    known that day (filings land after market close, so this is at most
+    ~1 trading day of fuzziness relative to the multi-month gap this closes
+    -- a deliberate, documented choice, not an oversight).
+
+    Pure in-memory filtering, no network calls -- callers should fetch
+    bs_years ONCE per symbol (e.g. via fundamentals_agent.build_fundamentals_
+    history) and call this many times against it for different backtest
+    dates, rather than re-fetching per date.
+    """
+    cutoff = pd.Timestamp(date).normalize()
+    return [r for r in bs_years
+           if r.get("known_as_of") is not None
+           and pd.Timestamp(r["known_as_of"]).normalize() <= cutoff]
 
 
 def _bucket(value: float | None, thresholds: list[tuple[float, int]]) -> int | None:

@@ -11,11 +11,19 @@ Design goals:
     fills at the stop price, not the close.
 
 Known limitations (be honest with yourself about these):
-  * Fundamental gates are DISABLED in the backtest — we cannot reconstruct
-    what ROCE/D-E looked like on a past date from screener.in (survivorship/
-    lookahead bias). The backtest therefore tests the technical engine only;
-    live results with the quality gate on should differ (usually fewer,
-    higher-quality trades).
+  * Fundamental gate is OFF by default and OPT-IN when enabled. Point-in-time
+    scoring is real (not lookahead) -- run_backtest(fundamentals_history=...)
+    uses xbrl_parser's known_as_of tagging (fundamentals_agent.build_
+    fundamentals_history / score_asof) to only ever use filings that were
+    actually public as of each rebalance date. Caveats that remain even with
+    it on: PEG is unavailable (needs a live market price, which doesn't exist
+    for a historical date); years reconstructed from summed quarters (see
+    xbrl_parser.quarterly_summed_annual, needed once a symbol's history
+    exceeds NSE's ~2-year primary-endpoint retention) can be missing some
+    balance-sheet ratios, a pre-existing, documented limitation of that
+    reconstruction, not something this feature introduces; and a same-day
+    filing counts as "known" that day (~1 trading day of fuzziness, since
+    filings land after market close).
   * The universe itself is today's list — stocks that crashed out of the
     index are missing (survivorship bias). Treat absolute returns as
     optimistic; RELATIVE comparisons (parameter sensitivity) are what this
@@ -204,16 +212,25 @@ class Trade:
 
 
 def rank_universe_asof(candles: dict, bench: pd.DataFrame,
-                       date: pd.Timestamp, cfg: dict) -> pd.DataFrame:
+                       date: pd.Timestamp, cfg: dict,
+                       fundamentals_history: dict | None = None,
+                       score_cache: dict | None = None) -> pd.DataFrame:
     """Point-in-time ranking: identical pipeline to the live screener, fed
-    only data up to `date`. Fundamentals off (see module docstring)."""
+    only data up to `date`. Fundamental gate is off by default (fundamentals_
+    history=None reproduces that exactly); pass a fundamentals_history dict
+    (fundamentals_agent.build_fundamentals_history) to turn it on with a real
+    point-in-time score (fundamentals_agent.score_asof), not lookahead."""
     sliced = {s: df.loc[:date] for s, df in candles.items()
               if not df.empty and date in df.index}
     bench_slice = bench.loc[:date]
     tech = screener.build_technical_table(sliced, bench_slice)
     if tech.empty:
         return tech
-    gated = screener.apply_gates(tech, fundamentals=None)
+    fundamentals = None
+    if fundamentals_history is not None:
+        import fundamentals_agent
+        fundamentals = fundamentals_agent.score_asof(fundamentals_history, date, score_cache)
+    gated = screener.apply_gates(tech, fundamentals=fundamentals)
     return screener.score(gated, cfg)
 
 
@@ -223,7 +240,8 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                  cost_bps: float = 0.0,
                  rebalance: str = "MS",
                  warmup_days: int = 260,
-                 verbose: bool = False) -> dict:
+                 verbose: bool = False,
+                 fundamentals_history: dict | None = None) -> dict:
     """Monthly-rebalanced long-only backtest.
 
     cost_bps defaults to 0 -- Zerodha charges no brokerage on equity
@@ -231,6 +249,11 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     charges) still apply in reality (~5-7 bps round trip) and aren't
     broker-specific; pass a non-zero cost_bps (e.g. via --cost-bps on the
     CLI) to model them back in for a more conservative backtest.
+
+    fundamentals_history: optional, from fundamentals_agent.build_
+    fundamentals_history() -- turns on a real point-in-time fundamental
+    quality gate (see module docstring's Known limitations). None (default)
+    reproduces the original technical-only behavior exactly.
 
     Rules replayed exactly as the README workflow:
       entries : gate-passers fill any open slot the moment it's free -- at
@@ -244,6 +267,10 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     """
     cfg = dict(cfg or config.STRATEGY)
     cost = cost_bps / 10_000
+    # Created once per run (not module-level) so repeated backtests in one
+    # process (Streamlit reruns, multiple CLI invocations) never share stale
+    # state -- see fundamentals_agent.score_asof for the memoization key.
+    score_cache: dict = {}
 
     dates = bench.index.sort_values()
     dates = dates[warmup_days:]
@@ -301,7 +328,8 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         # 2) monthly rebalance: recompute the universe, drop trend/rank
         # failures, and refresh the standing watchlist (see step 2b).
         if date in rb_dates:
-            ranked = rank_universe_asof(candles, bench, date, cfg)
+            ranked = rank_universe_asof(candles, bench, date, cfg,
+                                       fundamentals_history, score_cache)
             if not ranked.empty:
                 candidates = ranked[ranked["all_gates"]]
                 keep_zone = set(candidates.head(cfg["max_positions"] * 2).index)
