@@ -485,12 +485,23 @@ def page_backtest():
         "sensitivity comparisons as more reliable than absolute returns."
     )
 
+    range_mode = st.radio("Date range", ["Trailing years", "Custom dates"],
+                          horizontal=True)
     b1, b2 = st.columns(2)
-    years = b1.slider("Years of history", 1.0, 5.0, 3.0, 0.5,
-                      help="Up to 5 years supported via chunked Kite fetches "
-                           "(Kite's historical API caps a single request at "
-                           "~2000 days).")
-    bt_capital = b2.number_input("Starting capital (₹)", value=1_000_000.0,
+    if range_mode == "Trailing years":
+        years = b1.slider("Years of history", 1.0, 5.0, 3.0, 0.5,
+                          help="Up to 5 years supported via chunked Kite "
+                               "fetches (Kite's historical API caps a single "
+                               "request at ~2000 days).")
+        start_date, end_date = None, None
+    else:
+        default_start = dt.date.today() - dt.timedelta(days=3 * 365)
+        start_date = b1.date_input("Start date", value=default_start,
+                                   max_value=dt.date.today())
+        end_date = b2.date_input("End date", value=dt.date.today(),
+                                 max_value=dt.date.today())
+        years = None
+    bt_capital = st.number_input("Starting capital (₹)", value=1_000_000.0,
                                  step=100000.0)
     st.caption("No per-trade cost is modeled — Zerodha charges no brokerage "
               "on equity delivery (CNC). Statutory costs (STT, stamp duty, "
@@ -505,10 +516,19 @@ def page_backtest():
         st.session_state["bt_run_time"] = cached["run_time"]
         st.session_state["bt_is_cached"] = True
 
-    if st.button("Run backtest", type="primary"):
+    run_disabled = range_mode == "Custom dates" and start_date >= end_date
+    if run_disabled:
+        st.error("Start date must be before end date.")
+
+    if st.button("Run backtest", type="primary", disabled=run_disabled):
         with st.spinner("Loading candles (cached daily, first run is slow)..."):
-            candles_bt, bench_bt = bt.load_candles_cached(
-                config.UNIVERSE, int(years * 365) + 400)
+            if range_mode == "Custom dates":
+                days = (dt.date.today() - start_date).days + 400
+                candles_bt, bench_bt = bt.load_candles_cached(
+                    config.UNIVERSE, days, end_date=end_date)
+            else:
+                candles_bt, bench_bt = bt.load_candles_cached(
+                    config.UNIVERSE, int(years * 365) + 400)
         with st.spinner("Simulating..."):
             res = bt.run_backtest(candles_bt, bench_bt, initial_capital=bt_capital)
             run_time = dt.datetime.now()

@@ -48,7 +48,8 @@ CACHE_DIR = "cache"
 # Data loading (Kite with on-disk daily cache, or synthetic)
 # ---------------------------------------------------------------------------
 
-def load_candles_cached(symbols: list[str], days: int) -> tuple[dict, pd.DataFrame]:
+def load_candles_cached(symbols: list[str], days: int,
+                        end_date: dt.date | None = None) -> tuple[dict, pd.DataFrame]:
     """Fetch from Kite, caching each symbol as CSV (refreshed once per day).
 
     The cache-hit check only verifies the file was written today — it says
@@ -59,11 +60,18 @@ def load_candles_cached(symbols: list[str], days: int) -> tuple[dict, pd.DataFra
     a prior 3-year run's cache silently gets reused in full for a 1-year
     request. Both are handled by trimming to the requested window every time,
     regardless of whether the row above it was a cache hit or a fresh fetch.
+
+    end_date: if given (and before today), simulate a specific historical
+    window instead of always running up to today. Kite is still fetched/
+    cached up to real today as usual (so the on-disk cache is reusable
+    across different end_date choices) -- this just trims the top off
+    afterwards, same as the existing bottom trim by `days`.
     """
     import kite_client
     os.makedirs(CACHE_DIR, exist_ok=True)
     today = dt.date.today().isoformat()
     cutoff = pd.Timestamp(dt.date.today() - dt.timedelta(days=days))
+    end_ts = pd.Timestamp(end_date) if end_date else None
 
     def _naive(frame: pd.DataFrame) -> pd.DataFrame:
         # Kite's timestamps are tz-aware (IST); cutoff above is naive.
@@ -92,7 +100,10 @@ def load_candles_cached(symbols: list[str], days: int) -> tuple[dict, pd.DataFra
             if not df.empty:
                 df.to_csv(path)
             import time; time.sleep(0.35)
-        out[sym] = df[df.index >= cutoff] if not df.empty else df
+        sym_df = df[df.index >= cutoff] if not df.empty else df
+        if end_ts is not None and not sym_df.empty:
+            sym_df = sym_df[sym_df.index <= end_ts]
+        out[sym] = sym_df
     bpath = os.path.join(CACHE_DIR, "_NIFTY.csv")
     bench = None
     if os.path.exists(bpath) and _stamp(bpath) == today:
@@ -103,6 +114,8 @@ def load_candles_cached(symbols: list[str], days: int) -> tuple[dict, pd.DataFra
         bench = _naive(kite_client.benchmark_candles(days))
         bench.to_csv(bpath)
     bench = bench[bench.index >= cutoff]
+    if end_ts is not None and not bench.empty:
+        bench = bench[bench.index <= end_ts]
     return out, bench
 
 
@@ -414,7 +427,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--synthetic", action="store_true",
                     help="run on synthetic data (no Kite needed)")
-    ap.add_argument("--years", type=float, default=3.0)
+    ap.add_argument("--years", type=float, default=3.0,
+                    help="trailing years from today (ignored if --start-date given)")
+    ap.add_argument("--start-date", type=str, default=None,
+                    help="YYYY-MM-DD -- simulate a specific historical window "
+                        "instead of trailing --years from today")
+    ap.add_argument("--end-date", type=str, default=None,
+                    help="YYYY-MM-DD, defaults to today -- only used with --start-date")
     ap.add_argument("--capital", type=float, default=1_000_000)
     ap.add_argument("--cost-bps", type=float, default=0.0,
                     help="statutory costs (STT, stamp duty, exchange/SEBI "
@@ -427,6 +446,12 @@ def main():
 
     if args.synthetic:
         candles, bench = make_synthetic_universe()
+    elif args.start_date:
+        start = dt.datetime.strptime(args.start_date, "%Y-%m-%d").date()
+        end = (dt.datetime.strptime(args.end_date, "%Y-%m-%d").date()
+              if args.end_date else dt.date.today())
+        days = (dt.date.today() - start).days + 400  # extra for indicator warmup
+        candles, bench = load_candles_cached(config.UNIVERSE, days, end_date=end)
     else:
         days = int(args.years * 365) + 400  # extra for indicator warmup
         candles, bench = load_candles_cached(config.UNIVERSE, days)
