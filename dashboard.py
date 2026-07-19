@@ -65,6 +65,33 @@ FUNDAMENTALS_HISTORY_CACHE = os.path.join("cache", "fundamentals_history.pkl")
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+def _pnl_color(val) -> str:
+    """Green for gains, red for losses -- used on every P&L-shaped column
+    (pnl, ret_pct, unrealized_*, Alpha %, ...) across the whole app so a
+    losing row is never just a plain number next to a winning one."""
+    if pd.isna(val):
+        return ""
+    if val > 0:
+        return "color: #16a34a; font-weight: 600"
+    if val < 0:
+        return "color: #dc2626; font-weight: 600"
+    return ""
+
+
+def pnl_style(df: pd.DataFrame, cols: list[str], fmt: dict | None = None,
+             na_rep: str = "—"):
+    """Applies _pnl_color to `cols` (only the ones actually present) on top
+    of an optional format dict -- the common pattern repeated across every
+    table in this app that shows a profit/loss figure."""
+    cols = [c for c in cols if c in df.columns]
+    styler = df.style
+    if fmt:
+        styler = styler.format(fmt, na_rep=na_rep)
+    if cols:
+        styler = styler.map(_pnl_color, subset=cols)
+    return styler
+
+
 def merged_holdings() -> pd.DataFrame:
     """Positions + holdings merged into one live table with current P&L.
     A same-day CNC buy can transiently appear in both Kite endpoints until it
@@ -151,8 +178,8 @@ def page_cockpit():
         st.caption("No open positions or holdings.")
     else:
         st.dataframe(
-            merged.sort_values("pnl", ascending=False)
-                .style.format({"avg_price": "{:.2f}", "ltp": "{:.2f}", "pnl": "{:,.0f}"}),
+            pnl_style(merged.sort_values("pnl", ascending=False), ["pnl"],
+                     {"avg_price": "{:.2f}", "ltp": "{:.2f}", "pnl": "{:,.0f}"}),
             width="stretch", hide_index=True)
 
 
@@ -360,8 +387,11 @@ def page_positions_trade():
         else:
             live = pos[pos["quantity"] != 0]
             st.dataframe(
-                live[["tradingsymbol", "quantity", "average_price",
-                      "last_price", "pnl", "product"]],
+                pnl_style(
+                    live[["tradingsymbol", "quantity", "average_price",
+                         "last_price", "pnl", "product"]],
+                    ["pnl"], {"average_price": "{:.2f}", "last_price": "{:.2f}",
+                             "pnl": "{:,.0f}"}),
                 width="stretch", hide_index=True)
             st.metric("Total position P&L", f"₹{live['pnl'].sum():,.0f}")
 
@@ -374,8 +404,12 @@ def page_positions_trade():
             hold = hold.copy()
             hold["pnl_pct"] = ((hold["last_price"] / hold["average_price"]) - 1) * 100
             st.dataframe(
-                hold[["tradingsymbol", "quantity", "average_price",
-                      "last_price", "pnl", "pnl_pct"]],
+                pnl_style(
+                    hold[["tradingsymbol", "quantity", "average_price",
+                         "last_price", "pnl", "pnl_pct"]],
+                    ["pnl", "pnl_pct"],
+                    {"average_price": "{:.2f}", "last_price": "{:.2f}",
+                     "pnl": "{:,.0f}", "pnl_pct": "{:.2f}"}),
                 width="stretch", hide_index=True)
             st.metric("Total holdings P&L", f"₹{hold['pnl'].sum():,.0f}")
 
@@ -604,10 +638,22 @@ def page_backtest():
     bc3.metric("Sharpe", res["metrics"]["Sharpe"])
     bc4.metric("Open positions", len(res["open_positions"]))
 
-    st.dataframe(pd.DataFrame({"Metric": res["metrics"]}), width="stretch")
+    st.dataframe(pd.DataFrame({"Value": res["metrics"]}), width="stretch")
 
     dd = (eq / eq.cummax() - 1) * 100
     st.area_chart(dd.rename("Drawdown %"))
+
+    st.subheader("Year-by-year performance")
+    yp = bt.yearly_performance(eq, bench_bt, res["trades"])
+    yc1, yc2 = st.columns([2, 3])
+    with yc1:
+        st.dataframe(
+            pnl_style(yp, ["Strategy %", "Alpha %"],
+                     {"Strategy %": "{:.2f}", "NIFTY %": "{:.2f}",
+                      "Alpha %": "{:.2f}", "Win rate %": "{:.1f}"}),
+            width="stretch")
+    with yc2:
+        st.bar_chart(yp[["Strategy %", "NIFTY %"]])
 
     if not res["open_positions"].empty:
         with st.expander(f"Open positions at period end ({len(res['open_positions'])})",
@@ -618,22 +664,50 @@ def page_backtest():
             op = res["open_positions"].copy()
             op["entry_date"] = pd.to_datetime(op["entry_date"]).dt.date
             st.dataframe(
-                op.sort_values("unrealized_pnl", ascending=False)
-                  .style.format({
-                      "entry_price": "{:.2f}", "current_price": "{:.2f}",
-                      "stop": "{:.2f}", "unrealized_pnl": "{:,.0f}",
-                      "unrealized_ret_pct": "{:.2f}",
-                  }),
+                pnl_style(
+                    op.sort_values("unrealized_pnl", ascending=False),
+                    ["unrealized_pnl", "unrealized_ret_pct"],
+                    {"entry_price": "{:.2f}", "current_price": "{:.2f}",
+                     "stop": "{:.2f}", "unrealized_pnl": "{:,.0f}",
+                     "unrealized_ret_pct": "{:.2f}"}),
                 width="stretch", hide_index=True)
 
-    with st.expander("All closed trades"):
+    with st.expander("All closed trades", expanded=True):
         tr = res["trades"].copy()
         if not tr.empty:
             tr["entry_date"] = pd.to_datetime(tr["entry_date"]).dt.date
             tr["exit_date"] = pd.to_datetime(tr["exit_date"]).dt.date
-            st.dataframe(tr.sort_values("entry_date", ascending=False),
-                        width="stretch", hide_index=True)
-            st.download_button("Download trades CSV", tr.to_csv(index=False),
+
+            f1, f2, f3 = st.columns(3)
+            with f1:
+                sym_filter = st.multiselect("Symbol", sorted(tr["symbol"].unique()),
+                                            key="tr_sym_filter")
+            with f2:
+                reason_filter = st.multiselect("Exit reason", sorted(tr["reason"].unique()),
+                                               key="tr_reason_filter")
+            with f3:
+                outcome_filter = st.selectbox("Outcome", ["All", "Wins only", "Losses only"],
+                                              key="tr_outcome_filter")
+
+            filtered = tr
+            if sym_filter:
+                filtered = filtered[filtered["symbol"].isin(sym_filter)]
+            if reason_filter:
+                filtered = filtered[filtered["reason"].isin(reason_filter)]
+            if outcome_filter == "Wins only":
+                filtered = filtered[filtered["pnl"] > 0]
+            elif outcome_filter == "Losses only":
+                filtered = filtered[filtered["pnl"] <= 0]
+
+            st.caption(f"Showing {len(filtered)} of {len(tr)} trades")
+            st.dataframe(
+                pnl_style(filtered.sort_values("entry_date", ascending=False),
+                         ["pnl", "ret_pct"],
+                         {"entry_price": "{:.2f}", "exit_price": "{:.2f}",
+                          "pnl": "{:,.0f}", "ret_pct": "{:.2f}"}),
+                width="stretch", hide_index=True)
+            st.download_button("Download trades CSV (filtered view)",
+                              filtered.to_csv(index=False),
                               "backtest_trades.csv")
 
 

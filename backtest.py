@@ -447,6 +447,45 @@ def compute_metrics(equity: pd.Series, trades: list[Trade],
     }
 
 
+def yearly_performance(equity: pd.Series, bench: pd.DataFrame,
+                       trades: pd.DataFrame) -> pd.DataFrame:
+    """Calendar-year breakdown of the equity curve vs NIFTY, plus each
+    year's trade count/win rate (by exit date -- a trade's P&L is realized
+    in the year it closes, not the year it opened). A year's starting value
+    is the prior trading day's close if the equity curve extends before it
+    (i.e. not the backtest's very first year), so a partial first/last
+    calendar year is still a fair like-for-like return, not inflated by
+    starting exactly at that year's first available price."""
+    nifty = bench["close"].reindex(equity.index).ffill()
+    rows = []
+    for yr in sorted(equity.index.year.unique()):
+        yr_eq = equity[equity.index.year == yr]
+        prior_eq = equity[equity.index < yr_eq.index[0]]
+        start_val = prior_eq.iloc[-1] if not prior_eq.empty else yr_eq.iloc[0]
+        strat_ret = (yr_eq.iloc[-1] / start_val - 1) * 100
+
+        yr_nifty = nifty[nifty.index.year == yr]
+        prior_nifty = nifty[nifty.index < yr_nifty.index[0]]
+        n_start = prior_nifty.iloc[-1] if not prior_nifty.empty else yr_nifty.iloc[0]
+        nifty_ret = (yr_nifty.iloc[-1] / n_start - 1) * 100
+
+        if not trades.empty:
+            yr_trades = trades[pd.to_datetime(trades["exit_date"]).dt.year == yr]
+        else:
+            yr_trades = trades
+        n_trades = len(yr_trades)
+        win_rate = (100 * (yr_trades["pnl"] > 0).sum() / n_trades) if n_trades else np.nan
+
+        rows.append({
+            "Year": yr, "Strategy %": round(strat_ret, 2),
+            "NIFTY %": round(nifty_ret, 2),
+            "Alpha %": round(strat_ret - nifty_ret, 2),
+            "Trades": n_trades,
+            "Win rate %": round(win_rate, 1) if n_trades else np.nan,
+        })
+    return pd.DataFrame(rows).set_index("Year")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
