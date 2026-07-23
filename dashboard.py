@@ -38,15 +38,95 @@ import state_db
 
 st.set_page_config(page_title="NSE Momentum Cockpit", layout="wide", page_icon="📈")
 
+def _redirect_to_kite_login(error: str | None = None) -> None:
+    """Auto-redirects the browser to Zerodha's real login + 2FA page --
+    same tab, no click needed (HTML meta-refresh, immediate). Since this
+    app's redirect URL is registered as this dashboard's own address,
+    completing login there lands back on this app with request_token in
+    its query params, which the block below auto-exchanges. A visible
+    fallback link is also shown in case a browser/extension blocks the
+    auto-redirect. `error` is only set for a genuine unexpected failure
+    (e.g. token exchange itself failing) -- a routine expired/missing
+    token redirects silently, no alarming red banner for something that
+    happens every single day by design."""
+    url = kite_client.login_url()
+    if error:
+        st.error(error)
+    else:
+        st.info("Kite session expired — redirecting to login...")
+    st.markdown(f'<meta http-equiv="refresh" content="0; url={url}">',
+               unsafe_allow_html=True)
+    st.caption("Opens Zerodha's real login + 2FA page. Nothing here ever "
+              "sees your password — only the one-time token Kite sends "
+              f"back after you log in. Not redirected automatically? "
+              f"[Click here]({url}).")
+    st.stop()
+
+
 # ---------------------------------------------------------------------------
-# Dashboard login gate -- runs before anything else, including the Kite
-# connection check below. Session-scoped only (st.session_state), not a
-# real credential store or account system. This app places real orders and
-# shows real fund balances, so DASHBOARD_USERNAME/DASHBOARD_PASSWORD should
-# be set in .env before this is ever reachable beyond your own machine --
-# left at the "Admin"/"Admin" placeholder default, a loud warning shows
-# after login until changed.
+# Kite request_token exchange -- MUST run before the dashboard login gate
+# below, not after. An external OAuth redirect (leaving to Zerodha's site
+# and back) tears down and recreates the browser's Streamlit session, which
+# resets st.session_state -- so if the dashboard login gate ran first, it
+# would always intercept the return trip and show the sign-in form again,
+# with the one-time request_token sitting unprocessed in the URL (and lost,
+# since it's single-use, the moment anything else consumes this page load).
+# Checking it here, first, means it gets exchanged immediately regardless
+# of dashboard-session state.
+#
+# Guarded on `not config.KITE_ACCESS_TOKEN` (a plain module attribute, alive
+# for the whole server process regardless of any browser/session churn) --
+# not just clearing query params -- because over an unstable connection
+# (mobile network hopping across a Tailscale tunnel) st.query_params.clear()
+# can fail to propagate to the browser's actual address bar before the next
+# interaction fires, leaving the same already-used request_token sitting in
+# the URL. Re-exchanging it would fail (Kite tokens are single-use) and
+# bounce back to Kite's login page -- this guard means that once we
+# genuinely have a token, a stray leftover request_token in the URL is
+# simply ignored instead of retried.
 # ---------------------------------------------------------------------------
+request_token = st.query_params.get("request_token")
+if request_token and not config.KITE_ACCESS_TOKEN:
+    try:
+        token = kite_client.exchange_request_token(request_token)
+        config.KITE_ACCESS_TOKEN = token
+        # Completing Kite's own login+2FA on Zerodha's site is at least as
+        # strong a proof of identity as this app's own password -- and by
+        # definition, only someone who'd already passed the dashboard login
+        # gate in some browser session could have reached the "Login to
+        # Kite" redirect in the first place. So a successful exchange here
+        # also authenticates this (fresh, redirect-reset) session directly,
+        # rather than depending on a cookie surviving the external round
+        # trip to prove the same thing less reliably.
+        st.session_state["dashboard_authenticated"] = True
+        st.query_params.clear()
+        st.rerun()
+    except Exception as e:
+        st.query_params.clear()
+        _redirect_to_kite_login(f"Token exchange failed (request_token is "
+                                f"single-use and may have already been used): {e}")
+elif request_token:
+    st.query_params.clear()
+
+# ---------------------------------------------------------------------------
+# Dashboard login gate. A real credential check backs it: state_db.
+# dashboard_auth stores a salted PBKDF2-HMAC-SHA256 hash, never the
+# password itself -- seeded once from config.DASHBOARD_USERNAME/PASSWORD
+# (which still default to the "Admin"/"Admin" placeholder in .env, but
+# only ever used to seed the hash on first run, never compared against
+# directly afterward). This app places real orders and shows real fund
+# balances, so change the password via the Cockpit's "Change dashboard
+# password" section before using this beyond your own machine -- a loud
+# warning shows until you do.
+#
+# Note this session resets on a full external page reload (leaving to
+# Kite's login page and back tears down and recreates it, Streamlit's
+# design, unrelated to cookies) -- see the request_token block above,
+# which re-authenticates that fresh session directly on a successful
+# exchange rather than depending on this form again.
+# ---------------------------------------------------------------------------
+state_db.ensure_dashboard_auth_seeded(config.DASHBOARD_USERNAME, config.DASHBOARD_PASSWORD)
+
 if not st.session_state.get("dashboard_authenticated", False):
     st.title("🔒 NSE Momentum Cockpit — sign in")
     with st.form("login_form"):
@@ -54,66 +134,35 @@ if not st.session_state.get("dashboard_authenticated", False):
         p = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Sign in", type="primary")
     if submitted:
-        if u == config.DASHBOARD_USERNAME and p == config.DASHBOARD_PASSWORD:
+        if state_db.verify_dashboard_login(u, p):
             st.session_state["dashboard_authenticated"] = True
             st.rerun()
         else:
             st.error("Incorrect username or password.")
     st.stop()
 
-if (config.DASHBOARD_USERNAME == "Admin" and config.DASHBOARD_PASSWORD == "Admin"):
+if state_db.is_using_default_dashboard_password(config.DASHBOARD_USERNAME, config.DASHBOARD_PASSWORD):
     st.warning(
         "⚠️ Using the default Admin/Admin login — this app places real "
-        "orders and shows real fund balances. Set `DASHBOARD_USERNAME` and "
-        "`DASHBOARD_PASSWORD` in `.env` before using this beyond your own "
-        "machine."
+        "orders and shows real fund balances. Change it in the Cockpit's "
+        "\"Change dashboard password\" section before using this beyond "
+        "your own machine."
     )
 
 # ---------------------------------------------------------------------------
-# Connection check (runs once per script execution, before any page) --
-# only reached after the dashboard login above succeeds. Shows the Kite
-# login button ONLY when the token is actually missing/expired; a still-
-# valid token falls straight through to the normal dashboard pages below,
-# no Kite redirect happens on every dashboard login.
+# Kite connection health check -- only reached after the dashboard login
+# above succeeds. Shows the Kite login redirect ONLY when the token is
+# actually missing/expired; a still-valid token falls straight through to
+# the normal dashboard pages below.
 # ---------------------------------------------------------------------------
-
-def _show_login_button(context: str = "") -> None:
-    """Renders a real Kite OAuth login button and stops the script. Clicking
-    it opens Zerodha's own login + 2FA page in a new tab (st.link_button
-    always opens a new tab) -- since this app's redirect URL is registered
-    as this dashboard's own address, completing login there lands back on
-    this app with request_token in that tab's query params, which the block
-    below auto-exchanges. Both tabs then share the fresh token (one Python
-    process serves every session), so either tab works from there."""
-    if context:
-        st.error(context)
-    st.link_button("🔑 Login to Kite", kite_client.login_url(), type="primary")
-    st.caption("Opens Zerodha's real login + 2FA page in a new tab. Nothing "
-              "here ever sees your password — only the one-time token Kite "
-              "sends back after you log in.")
-    st.stop()
-
-
-request_token = st.query_params.get("request_token")
-if request_token:
-    try:
-        token = kite_client.exchange_request_token(request_token)
-        config.KITE_ACCESS_TOKEN = token
-        st.query_params.clear()
-        st.rerun()
-    except Exception as e:
-        st.query_params.clear()
-        _show_login_button(f"Token exchange failed (request_token is single-use "
-                           f"and may have already been used): {e}")
-
 if not config.KITE_ACCESS_TOKEN:
-    _show_login_button()
+    _redirect_to_kite_login()
 
 try:
     margins = kite_client.get_margins()
     available_cash = margins["equity"]["available"]["live_balance"]
-except Exception as e:
-    _show_login_button(f"Kite connection failed (token may have expired): {e}")
+except Exception:
+    _redirect_to_kite_login()
 
 SCREEN_CACHE = os.path.join("cache", "screen.pkl")
 VALUE_SCORE_CACHE = os.path.join("cache", "fno_value_scores.pkl")
@@ -282,6 +331,49 @@ def page_cockpit():
                      {"avg_price": "{:.2f}", "ltp": "{:.2f}", "pnl": "{:,.0f}",
                       "current_stop": "{:.2f}"}, na_rep="—"),
             width="stretch", hide_index=True)
+
+    st.divider()
+    with st.expander("🔑 Change dashboard password"):
+        st.caption("Stored as a salted hash in state.db — the password "
+                  "itself is never saved anywhere, not even here.")
+        with st.form("change_password_form"):
+            new_user = st.text_input("Username", value=config.DASHBOARD_USERNAME)
+            new_pw = st.text_input("New password", type="password")
+            confirm_pw = st.text_input("Confirm new password", type="password")
+            change_submitted = st.form_submit_button("Update credentials")
+        if change_submitted:
+            if not new_user or not new_pw:
+                st.error("Username and password can't be empty.")
+            elif new_pw != confirm_pw:
+                st.error("Passwords don't match.")
+            else:
+                state_db.update_dashboard_password(new_user, new_pw)
+                st.success("Credentials updated — use the new username/password "
+                          "next time you sign in.")
+
+    with st.expander("🔑 Kite API settings"):
+        st.caption("Stored in state.db, not .env — only needed if you "
+                  "regenerate keys in the Kite developer console. Unlike "
+                  "the dashboard password, these are kept plaintext (Kite's "
+                  "own login flow needs the real api_secret value back), "
+                  "so this is a convenience move, not a security upgrade.")
+        masked_key = (config.KITE_API_KEY[:4] + "…" + config.KITE_API_KEY[-4:]
+                     if len(config.KITE_API_KEY) > 8 else "(not set)")
+        st.caption(f"Current API key: `{masked_key}`")
+        with st.form("kite_api_settings_form"):
+            new_api_key = st.text_input("New API key (leave blank to keep current)")
+            new_api_secret = st.text_input("New API secret (leave blank to keep current)",
+                                           type="password")
+            api_submitted = st.form_submit_button("Update Kite API credentials")
+        if api_submitted:
+            if not new_api_key and not new_api_secret:
+                st.error("Enter at least one value to update.")
+            else:
+                state_db.update_kite_api_credentials(
+                    new_api_key or config.KITE_API_KEY,
+                    new_api_secret or config.KITE_API_SECRET)
+                st.success("Kite API credentials updated — restart the "
+                          "dashboard for this process to pick them up.")
 
 
 # ---------------------------------------------------------------------------

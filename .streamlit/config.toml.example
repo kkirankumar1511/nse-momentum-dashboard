@@ -1,0 +1,8 @@
+# Optional -- only needed for HTTPS remote access (e.g. over Tailscale).
+# Copy to .streamlit/config.toml and fill in your own paths/hostname.
+# Not required for local-only use at http://127.0.0.1:8501.
+
+[server]
+sslCertFile = ".streamlit/certs/your-device.your-tailnet.ts.net.crt"
+sslKeyFile = ".streamlit/certs/your-device.your-tailnet.ts.net.key"
+headless = true

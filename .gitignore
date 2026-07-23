@@ -1,5 +1,7 @@
 # Secrets
 .env
+.streamlit/certs/
+.streamlit/config.toml
 
 # Local tooling state
 .claude/

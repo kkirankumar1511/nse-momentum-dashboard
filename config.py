@@ -1,8 +1,15 @@
 """
-Central configuration. All secrets come from environment variables / .env file.
-NEVER hardcode API keys in this file.
+Central configuration.
 
-Create a `.env` file next to this one:
+Kite Connect credentials (api_key/api_secret/access_token) and the
+dashboard login live in cache/state.db (see state_db.py) -- .env is only
+used to BOOTSTRAP them once, the first time this app runs with an empty
+database. After that first run, updating .env does nothing for these
+values; use the dashboard's own settings forms (Cockpit's "Change
+dashboard password" / "Kite API settings") instead, since the DB is the
+live source of truth from then on.
+
+Create a `.env` file next to this one (only needed for that first run):
 
     KITE_API_KEY=your_kite_api_key
     KITE_API_SECRET=your_kite_api_secret
@@ -14,17 +21,24 @@ Create a `.env` file next to this one:
 import os
 from dotenv import load_dotenv
 
+import state_db
+
 load_dotenv()
 
-KITE_API_KEY = os.getenv("KITE_API_KEY", "")
-KITE_API_SECRET = os.getenv("KITE_API_SECRET", "")
-KITE_ACCESS_TOKEN = os.getenv("KITE_ACCESS_TOKEN", "")
+state_db.ensure_kite_credentials_seeded(
+    os.getenv("KITE_API_KEY", ""), os.getenv("KITE_API_SECRET", ""),
+    os.getenv("KITE_ACCESS_TOKEN", ""))
+_kite_creds = state_db.get_kite_credentials()
+
+KITE_API_KEY = _kite_creds["api_key"]
+KITE_API_SECRET = _kite_creds["api_secret"]
+KITE_ACCESS_TOKEN = _kite_creds["access_token"] or ""
 
 # Dashboard login gate (dashboard.py) -- placeholders on purpose, not a real
 # credential store. This app places real orders and shows real fund
-# balances, so change these in .env before exposing it beyond your own
-# machine -- "Admin"/"Admin" is one of the most commonly attacked default
-# credential pairs that exists.
+# balances, so change these via the Cockpit's "Change dashboard password"
+# section before exposing it beyond your own machine -- "Admin"/"Admin" is
+# one of the most commonly attacked default credential pairs that exists.
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "Admin")
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "Admin")
 

@@ -17,7 +17,9 @@ run with no console).
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import os
+import secrets
 import sqlite3
 
 import pandas as pd
@@ -83,6 +85,31 @@ CREATE TABLE IF NOT EXISTS rebalance_stop_updates (
     run_id INTEGER REFERENCES rebalance_runs(id),
     symbol TEXT, qty INTEGER, current_stop REAL, recommended_stop REAL,
     gtt_trigger_id INTEGER
+);
+
+-- Dashboard login gate. Singleton row, password stored as a salted hash
+-- (PBKDF2-HMAC-SHA256) -- never in plaintext, unlike the .env value this
+-- replaces.
+CREATE TABLE IF NOT EXISTS dashboard_auth (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    username TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    salt TEXT NOT NULL
+);
+
+-- Kite Connect credentials. Singleton row. api_key/api_secret are stored
+-- plaintext -- unlike dashboard_auth's password, these must be recoverable
+-- (Kite's OAuth exchange needs the real api_secret value), so this is a
+-- consolidation move, not a security upgrade, for those two. access_token
+-- is a better fit for a DB than .env ever was: it's genuinely frequent-
+-- changing live state (expires ~daily), same category as everything else
+-- in this file.
+CREATE TABLE IF NOT EXISTS kite_credentials (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    api_key TEXT NOT NULL,
+    api_secret TEXT NOT NULL,
+    access_token TEXT,
+    access_token_updated_at TEXT
 );
 """
 
@@ -320,3 +347,125 @@ def get_last_rebalance_run() -> dict | None:
         "sells": sells, "buys": buys, "stop_updates": stop_updates,
         "open_slots": run["open_slots"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Dashboard login gate -- replaces plaintext DASHBOARD_USERNAME/PASSWORD in
+# .env with a salted hash stored here. The password itself is never stored,
+# only PBKDF2-HMAC-SHA256(password, salt, 200_000 rounds) -- a standard,
+# NIST-recommended construction available in the stdlib (hashlib), no new
+# dependency needed.
+# ---------------------------------------------------------------------------
+
+def _hash_password(password: str, salt: bytes) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000).hex()
+
+
+def ensure_dashboard_auth_seeded(default_username: str, default_password: str) -> None:
+    """First-run only: seeds the singleton row from the given defaults
+    (typically config.DASHBOARD_USERNAME/PASSWORD, themselves defaulting to
+    the Admin/Admin placeholder) -- hashed immediately, never held in
+    plaintext past this call. No-ops once a row already exists, so this is
+    safe to call on every dashboard load."""
+    conn = get_conn()
+    row = conn.execute("SELECT 1 FROM dashboard_auth WHERE id = 1").fetchone()
+    if row is None:
+        salt = secrets.token_bytes(16)
+        conn.execute(
+            "INSERT INTO dashboard_auth (id, username, password_hash, salt) "
+            "VALUES (1, ?, ?, ?)",
+            (default_username, _hash_password(default_password, salt), salt.hex()))
+        conn.commit()
+    conn.close()
+
+
+def verify_dashboard_login(username: str, password: str) -> bool:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM dashboard_auth WHERE id = 1").fetchone()
+    conn.close()
+    if row is None:
+        return False
+    salt = bytes.fromhex(row["salt"])
+    return username == row["username"] and _hash_password(password, salt) == row["password_hash"]
+
+
+def update_dashboard_password(username: str, new_password: str) -> None:
+    """Overwrites the singleton row -- used by the dashboard's own
+    change-password form, so a password can be changed without touching
+    .env or restarting the process."""
+    conn = get_conn()
+    salt = secrets.token_bytes(16)
+    conn.execute(
+        "UPDATE dashboard_auth SET username = ?, password_hash = ?, salt = ? "
+        "WHERE id = 1",
+        (username, _hash_password(new_password, salt), salt.hex()))
+    conn.commit()
+    conn.close()
+
+
+def is_using_default_dashboard_password(default_username: str, default_password: str) -> bool:
+    """For the loud on-screen warning -- true only while still on the
+    seeded Admin/Admin-style default, false the moment it's ever changed."""
+    return verify_dashboard_login(default_username, default_password)
+
+
+# ---------------------------------------------------------------------------
+# Kite Connect credentials -- replaces KITE_API_KEY/KITE_API_SECRET/
+# KITE_ACCESS_TOKEN in .env. api_key/api_secret stay plaintext (must be
+# recoverable, unlike a password); access_token is genuinely a better fit
+# here than .env ever was, since it's frequently-changing live state
+# (expires roughly daily), the same category as everything else in this
+# file.
+# ---------------------------------------------------------------------------
+
+def ensure_kite_credentials_seeded(api_key: str, api_secret: str,
+                                   access_token: str = "") -> None:
+    """First-run only: seeds from whatever's currently in .env (config.py's
+    fallback values). No-ops once a row exists, so this never clobbers a
+    token/key that's since been updated through the DB directly."""
+    conn = get_conn()
+    row = conn.execute("SELECT 1 FROM kite_credentials WHERE id = 1").fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO kite_credentials (id, api_key, api_secret, "
+            "access_token, access_token_updated_at) VALUES (1, ?, ?, ?, ?)",
+            (api_key, api_secret, access_token,
+             dt.datetime.now().isoformat() if access_token else None))
+        conn.commit()
+    conn.close()
+
+
+def get_kite_credentials() -> dict:
+    """Returns {"api_key", "api_secret", "access_token", ...} or all-empty
+    if nothing has been seeded yet (fresh install, no .env values either)."""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM kite_credentials WHERE id = 1").fetchone()
+    conn.close()
+    if row is None:
+        return {"api_key": "", "api_secret": "", "access_token": "",
+               "access_token_updated_at": None}
+    return dict(row)
+
+
+def save_kite_access_token(token: str) -> None:
+    """Called after a successful OAuth exchange -- see
+    kite_client.exchange_request_token(). Only updates the token, leaves
+    api_key/api_secret untouched."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE kite_credentials SET access_token = ?, "
+        "access_token_updated_at = ? WHERE id = 1",
+        (token, dt.datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def update_kite_api_credentials(api_key: str, api_secret: str) -> None:
+    """Used by the dashboard's Kite API settings form, for whenever the
+    user regenerates keys in the Kite developer console."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE kite_credentials SET api_key = ?, api_secret = ? WHERE id = 1",
+        (api_key, api_secret))
+    conn.commit()
+    conn.close()

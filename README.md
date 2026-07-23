@@ -99,13 +99,31 @@ cp .env.example .env        # then fill in your keys
 KITE_API_KEY=...
 KITE_API_SECRET=...
 KITE_ACCESS_TOKEN=          # filled by the daily login step below
+DASHBOARD_USERNAME=...      # optional -- defaults to "Admin"
+DASHBOARD_PASSWORD=...      # optional -- defaults to "Admin"
 ```
+
+**`.env` only bootstraps these once.** The first time the app runs against
+an empty `cache/state.db`, these values get seeded into the database (Kite
+credentials plaintext since the OAuth exchange needs the real
+`api_secret` back; the dashboard password as a salted PBKDF2 hash, never
+the password itself) — after that, `state_db.py` is the live source of
+truth, and editing `.env` again does nothing. Update credentials going
+forward through the dashboard itself: Cockpit's **"Kite API settings"**
+expander (if you ever regenerate keys in the developer console) and
+**"Change dashboard password"** expander.
 
 You need a **Kite Connect** developer app (₹2000/month from Zerodha,
 https://developers.kite.trade). Set the redirect URL to anything you control
-(even `http://127.0.0.1`).
+(even `http://127.0.0.1` — see the Live automation section below for the
+one exception to that: it does have to be HTTPS everywhere except exactly
+`127.0.0.1`).
 
 ### Daily login (Kite tokens expire every morning)
+
+Easiest: open the dashboard — if the token's missing or expired, it
+auto-redirects you straight to Kite's real login + 2FA page and exchanges
+the returned token automatically, no copy-pasting. Or via CLI:
 
 ```bash
 python kite_client.py login            # prints login URL — open it, log in
@@ -117,6 +135,21 @@ python kite_client.py token <request_token_from_redirect_url>
 ```bash
 streamlit run dashboard.py
 ```
+
+First launch asks you to sign in (dashboard credentials, not Kite) —
+defaults to `Admin`/`Admin`, change it via Cockpit's "Change dashboard
+password" section before using this beyond your own machine.
+
+**Remote access (optional)**: to reach the dashboard from your phone
+instead of just `127.0.0.1`, Kite requires HTTPS for any non-loopback
+address. A private network tool like [Tailscale](https://tailscale.com)
+works well for this — it gives your machine a stable private address
+reachable from your own enrolled devices only, and its built-in "HTTPS
+Certificates" feature (`tailscale cert <your-device>.<tailnet>.ts.net`)
+issues a real, publicly-trusted certificate for that private address at
+no cost. Copy `.streamlit/config.toml.example` to `.streamlit/config.toml`
+and point `sslCertFile`/`sslKeyFile` at the cert Tailscale generates, then
+register that same `https://` address as your Kite app's Redirect URL.
 
 ## Using it
 

@@ -7,7 +7,9 @@ positions/holdings, order placement and square-off.
 Daily flow:
   1. Run `python kite_client.py login` -> prints login URL.
   2. Open URL, log in, copy `request_token` from the redirect URL.
-  3. Run `python kite_client.py token <request_token>` -> saves access token to .env.
+  3. Run `python kite_client.py token <request_token>` -> saves access token
+     to cache/state.db (see state_db.py) -- or use the dashboard's own
+     "Login to Kite" button, which does this automatically.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import pandas as pd
 from kiteconnect import KiteConnect
 
 import config
+import state_db
 
 
 def get_kite() -> KiteConnect:
@@ -52,27 +55,9 @@ def exchange_request_token(request_token: str) -> str:
     kite = KiteConnect(api_key=config.KITE_API_KEY)
     session = kite.generate_session(request_token, api_secret=config.KITE_API_SECRET)
     token = session["access_token"]
-    _update_env("KITE_ACCESS_TOKEN", token)
-    print("Access token saved to .env (valid until ~6 AM next day).")
+    state_db.save_kite_access_token(token)
+    print("Access token saved to cache/state.db (valid until ~6 AM next day).")
     return token
-
-
-def _update_env(key: str, value: str, path: str = ".env") -> None:
-    lines, found = [], False
-    try:
-        with open(path) as f:
-            for line in f:
-                if line.startswith(key + "="):
-                    lines.append(f"{key}={value}\n")
-                    found = True
-                else:
-                    lines.append(line)
-    except FileNotFoundError:
-        pass
-    if not found:
-        lines.append(f"{key}={value}\n")
-    with open(path, "w") as f:
-        f.writelines(lines)
 
 
 # ---------------------------------------------------------------------------
