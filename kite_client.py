@@ -34,10 +34,18 @@ def get_kite() -> KiteConnect:
 # Auth helpers
 # ---------------------------------------------------------------------------
 
-def print_login_url() -> None:
+def login_url() -> str:
+    """The official Kite Connect OAuth login URL -- redirects to Zerodha's
+    own login + 2FA page, then back to this app's registered redirect URL
+    with a one-time request_token. No credentials of any kind touch this
+    codebase; the actual login always happens on Zerodha's own page."""
     kite = KiteConnect(api_key=config.KITE_API_KEY)
+    return kite.login_url()
+
+
+def print_login_url() -> None:
     print("Open this URL, log in, then copy request_token from redirect URL:")
-    print(kite.login_url())
+    print(login_url())
 
 
 def exchange_request_token(request_token: str) -> str:
@@ -249,6 +257,37 @@ def place_gtt_stoploss(symbol: str, qty: int, trigger_price: float,
             "product": kite.PRODUCT_CNC,
             "order_type": kite.ORDER_TYPE_LIMIT,
             "price": round(trigger_price * 0.995, 1),
+        }],
+    )["trigger_id"]
+
+
+def get_active_gtts() -> pd.DataFrame:
+    """Kite's own live GTT list -- source of truth for "does this holding
+    actually have a stop-loss right now," not just our local state file
+    (see live_rebalance.py's position-state tracking)."""
+    kite = get_kite()
+    return pd.DataFrame(kite.get_gtts())
+
+
+def modify_gtt_trigger(trigger_id: int, symbol: str, qty: int,
+                       new_trigger_price: float, last_price: float) -> int:
+    """Raise an existing GTT's trigger price -- mirrors place_gtt_stoploss's
+    order shape exactly, just targeting an existing trigger_id instead of
+    creating a new one."""
+    kite = get_kite()
+    return kite.modify_gtt(
+        trigger_id=trigger_id,
+        trigger_type=kite.GTT_TYPE_SINGLE,
+        tradingsymbol=symbol,
+        exchange=kite.EXCHANGE_NSE,
+        trigger_values=[round(new_trigger_price, 1)],
+        last_price=last_price,
+        orders=[{
+            "transaction_type": kite.TRANSACTION_TYPE_SELL,
+            "quantity": int(qty),
+            "product": kite.PRODUCT_CNC,
+            "order_type": kite.ORDER_TYPE_LIMIT,
+            "price": round(new_trigger_price * 0.995, 1),
         }],
     )["trigger_id"]
 

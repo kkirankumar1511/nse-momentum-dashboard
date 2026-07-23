@@ -263,7 +263,7 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
         tech["sector_rs"] = [
             sector_universe.stock_sector_rs(sym, sector_membership, sector_rank)
             for sym in tech.index]
-    gated = screener.apply_gates(tech, fundamentals=fundamentals)
+    gated = screener.apply_gates(tech, fundamentals=fundamentals, cfg=cfg)
     return screener.score(gated, cfg)
 
 

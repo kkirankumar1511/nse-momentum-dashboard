@@ -44,7 +44,8 @@ def build_technical_table(candles: dict[str, pd.DataFrame],
 
 
 def apply_gates(tech: pd.DataFrame,
-                fundamentals: pd.DataFrame | None = None) -> pd.DataFrame:
+                fundamentals: pd.DataFrame | None = None,
+                cfg: dict = config.STRATEGY) -> pd.DataFrame:
     """fundamentals: fundamentals_agent.fno_value_scan() output — indexed by
     symbol, with a 'total_score' column (0-100, sector-aware: value_score/
     bank_score/nbfc_score/etc, computed from primary-source XBRL — see
@@ -52,8 +53,17 @@ def apply_gates(tech: pd.DataFrame,
     quality gate rather than being excluded, matching this gate's behavior
     before it switched away from screener.in scraping — no data blocking a
     stock from an otherwise-valid technical setup was never the intent.
+
+    cfg: previously hardcoded to config.STRATEGY internally, silently
+    ignoring any custom cfg a caller passed to run_backtest()/run_screen()
+    -- every gate threshold here (near_high_threshold, rsi_min/max,
+    min_fundamental_score) was unaffected by a custom cfg override until
+    this parameter was added. Only visible once a gate threshold was
+    actually varied away from its global default in a custom cfg (a
+    since-discarded experimental beta gate first exercised this) --
+    score()'s weights were never affected, since score() already took cfg
+    correctly.
     """
-    cfg = config.STRATEGY
     t = tech.copy()
 
     t["trend_ok"] = t["above_ema50"] & t["above_ema200"] & t["ema50_rising"]

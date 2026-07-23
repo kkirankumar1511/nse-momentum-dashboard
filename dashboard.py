@@ -34,28 +34,87 @@ import kite_client
 import live_rebalance as lr
 import screener
 import sector_universe as su
+import state_db
 
 st.set_page_config(page_title="NSE Momentum Cockpit", layout="wide", page_icon="📈")
 
 # ---------------------------------------------------------------------------
-# Connection check (runs once per script execution, before any page)
+# Dashboard login gate -- runs before anything else, including the Kite
+# connection check below. Session-scoped only (st.session_state), not a
+# real credential store or account system. This app places real orders and
+# shows real fund balances, so DASHBOARD_USERNAME/DASHBOARD_PASSWORD should
+# be set in .env before this is ever reachable beyond your own machine --
+# left at the "Admin"/"Admin" placeholder default, a loud warning shows
+# after login until changed.
 # ---------------------------------------------------------------------------
-if not config.KITE_ACCESS_TOKEN:
-    st.error(
-        "No Kite access token found. Run `python kite_client.py login`, "
-        "complete login, then `python kite_client.py token <request_token>` "
-        "and restart this app."
-    )
+if not st.session_state.get("dashboard_authenticated", False):
+    st.title("🔒 NSE Momentum Cockpit — sign in")
+    with st.form("login_form"):
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in", type="primary")
+    if submitted:
+        if u == config.DASHBOARD_USERNAME and p == config.DASHBOARD_PASSWORD:
+            st.session_state["dashboard_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect username or password.")
     st.stop()
+
+if (config.DASHBOARD_USERNAME == "Admin" and config.DASHBOARD_PASSWORD == "Admin"):
+    st.warning(
+        "⚠️ Using the default Admin/Admin login — this app places real "
+        "orders and shows real fund balances. Set `DASHBOARD_USERNAME` and "
+        "`DASHBOARD_PASSWORD` in `.env` before using this beyond your own "
+        "machine."
+    )
+
+# ---------------------------------------------------------------------------
+# Connection check (runs once per script execution, before any page) --
+# only reached after the dashboard login above succeeds. Shows the Kite
+# login button ONLY when the token is actually missing/expired; a still-
+# valid token falls straight through to the normal dashboard pages below,
+# no Kite redirect happens on every dashboard login.
+# ---------------------------------------------------------------------------
+
+def _show_login_button(context: str = "") -> None:
+    """Renders a real Kite OAuth login button and stops the script. Clicking
+    it opens Zerodha's own login + 2FA page in a new tab (st.link_button
+    always opens a new tab) -- since this app's redirect URL is registered
+    as this dashboard's own address, completing login there lands back on
+    this app with request_token in that tab's query params, which the block
+    below auto-exchanges. Both tabs then share the fresh token (one Python
+    process serves every session), so either tab works from there."""
+    if context:
+        st.error(context)
+    st.link_button("🔑 Login to Kite", kite_client.login_url(), type="primary")
+    st.caption("Opens Zerodha's real login + 2FA page in a new tab. Nothing "
+              "here ever sees your password — only the one-time token Kite "
+              "sends back after you log in.")
+    st.stop()
+
+
+request_token = st.query_params.get("request_token")
+if request_token:
+    try:
+        token = kite_client.exchange_request_token(request_token)
+        config.KITE_ACCESS_TOKEN = token
+        st.query_params.clear()
+        st.rerun()
+    except Exception as e:
+        st.query_params.clear()
+        _show_login_button(f"Token exchange failed (request_token is single-use "
+                           f"and may have already been used): {e}")
+
+if not config.KITE_ACCESS_TOKEN:
+    _show_login_button()
 
 try:
     margins = kite_client.get_margins()
     available_cash = margins["equity"]["available"]["live_balance"]
 except Exception as e:
-    st.error(f"Kite connection failed (token may have expired): {e}")
-    st.stop()
+    _show_login_button(f"Kite connection failed (token may have expired): {e}")
 
-EQUITY_LOG = os.path.join("cache", "equity_log.csv")
 SCREEN_CACHE = os.path.join("cache", "screen.pkl")
 VALUE_SCORE_CACHE = os.path.join("cache", "fno_value_scores.pkl")
 BACKTEST_CACHE = os.path.join("cache", "backtest_result.pkl")
@@ -116,20 +175,21 @@ def merged_holdings() -> pd.DataFrame:
 
 
 def log_equity_snapshot(value: float) -> pd.DataFrame:
-    """Upserts today's portfolio value into a local CSV log, so the Cockpit
-    can chart account growth over time -- Kite has no such history endpoint
-    for a specific strategy's slice of the account."""
-    os.makedirs("cache", exist_ok=True)
-    today = dt.date.today().isoformat()
-    if os.path.exists(EQUITY_LOG):
-        log = pd.read_csv(EQUITY_LOG)
-    else:
-        log = pd.DataFrame(columns=["date", "value"])
-    log = log[log["date"] != today]
-    log = pd.concat([log, pd.DataFrame([{"date": today, "value": value}])],
-                    ignore_index=True)
-    log.to_csv(EQUITY_LOG, index=False)
-    return log
+    """Upserts today's portfolio value, so the Cockpit can chart account
+    growth over time -- Kite has no such history endpoint for a specific
+    strategy's slice of the account. See state_db.py."""
+    return state_db.log_equity_snapshot(value)
+
+
+def capture_initial_capital(available_cash: float) -> float | None:
+    """Auto-captures "initial capital" from Kite's own available cash the
+    first time it's non-zero -- there's no such concept in Kite's margins()
+    response itself (confirmed by inspection: it only reports today's
+    cash/collateral/utilised snapshot, nothing about deposit history), so
+    this is the one-time capture the user asked for ("if I added the fund
+    in Kite, that becomes my initial fund"). Written once; never
+    overwritten by later deposits or drawdowns. See state_db.py."""
+    return state_db.capture_initial_capital(available_cash)
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +206,7 @@ def page_cockpit():
     portfolio_value = available_cash + holdings_value
 
     log = log_equity_snapshot(portfolio_value)
+    initial_capital = capture_initial_capital(available_cash)
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Available cash", f"₹{available_cash:,.0f}")
@@ -153,21 +214,48 @@ def page_cockpit():
     k3.metric("Total P&L (unrealized)", f"₹{total_pnl:,.0f}")
     k4.metric("Open positions", f"{len(merged)} / {config.STRATEGY['max_positions']}")
 
+    k5, k6 = st.columns(2)
+    if initial_capital:
+        overall_pnl = portfolio_value - initial_capital
+        overall_pct = overall_pnl / initial_capital * 100
+        k5.metric("Initial capital", f"₹{initial_capital:,.0f}")
+        k6.metric("Overall return", f"₹{overall_pnl:,.0f}",
+                 f"{overall_pct:+.1f}%")
+    else:
+        k5.metric("Initial capital", "—")
+        k6.metric("Overall return", "—")
+        st.caption("Initial capital captures automatically the first time "
+                  "available cash is non-zero — fund the account to start "
+                  "tracking overall return.")
+
     if len(log) > 1:
         st.line_chart(log.set_index("date")["value"].rename("Portfolio value (₹)"))
     else:
         st.caption("Portfolio value is logged once a day when you open this page — "
                   "the chart builds up over time as you keep using the dashboard.")
 
+    with st.expander("Full funds breakdown (from Kite margins API)"):
+        try:
+            m = kite_client.get_margins()["equity"]
+            fc1, fc2 = st.columns(2)
+            fc1.write("**Available**")
+            fc1.json(m["available"])
+            fc2.write("**Utilised**")
+            fc2.json(m["utilised"])
+        except Exception as e:
+            st.warning(f"Could not fetch funds breakdown: {e}")
+
     st.divider()
     st.subheader("Action needed today")
-    if os.path.exists(lr.PROPOSAL_CACHE):
-        prop = pd.read_pickle(lr.PROPOSAL_CACHE)
+    prop = state_db.get_last_rebalance_run()
+    if prop is not None:
         age_hr = (dt.datetime.now() - prop["run_time"]).total_seconds() / 3600
-        n_sell, n_buy = len(prop["sells"]), len(prop["buys"])
-        if n_sell or n_buy:
-            st.warning(f"**{n_sell} sell(s), {n_buy} buy(s) proposed** "
-                      f"(scan run {age_hr:.1f}h ago).")
+        n_sell = len(prop["sells"])
+        n_buy = len(prop["buys"])
+        n_stop = len(prop.get("stop_updates", pd.DataFrame()))
+        if n_sell or n_buy or n_stop:
+            st.warning(f"**{n_sell} sell(s), {n_buy} buy(s), {n_stop} stop "
+                      f"update(s) proposed** (scan run {age_hr:.1f}h ago).")
         else:
             st.success(f"No action needed (scan run {age_hr:.1f}h ago).")
     else:
@@ -179,9 +267,20 @@ def page_cockpit():
     if merged.empty:
         st.caption("No open positions or holdings.")
     else:
+        state = state_db.reconciled_positions(set(merged["symbol"]))
+        merged["entry_date"] = merged["symbol"].map(
+            lambda s: state.get(s, {}).get("entry_date", "—"))
+        merged["days_held"] = merged["symbol"].map(
+            lambda s: (dt.date.today() - dt.date.fromisoformat(state[s]["entry_date"])).days
+            if s in state else None)
+        merged["current_stop"] = merged["symbol"].map(
+            lambda s: state.get(s, {}).get("current_stop"))
+        merged["gtt_active"] = merged["symbol"].map(
+            lambda s: "✅" if state.get(s, {}).get("gtt_trigger_id") else "❌")
         st.dataframe(
             pnl_style(merged.sort_values("pnl", ascending=False), ["pnl"],
-                     {"avg_price": "{:.2f}", "ltp": "{:.2f}", "pnl": "{:,.0f}"}),
+                     {"avg_price": "{:.2f}", "ltp": "{:.2f}", "pnl": "{:,.0f}",
+                      "current_stop": "{:.2f}"}, na_rep="—"),
             width="stretch", hide_index=True)
 
 
@@ -315,15 +414,22 @@ def page_live_rebalance():
     st.caption(
         "Runs the exact same screener pipeline as Screener/Backtest, diffs "
         "it against your actual Kite holdings, and proposes sells (closed "
-        "below 200 EMA, or dropped out of the top-ranked zone) and buys "
-        "(open slots, sized off your real available cash). Stop-losses "
-        "aren't covered here — if you placed a GTT at entry, your broker "
-        "already enforces it intraday without this needing to run. Can "
-        "also be scheduled externally via `python live_rebalance.py`."
+        "below 200 EMA, or dropped out of the top-ranked zone), buys (open "
+        "slots, sized off your real available cash), and trailing-stop "
+        "updates (see below) — your broker enforces the GTT itself "
+        "intraday, this only recommends raising it. Can also be scheduled "
+        "externally via `python live_rebalance.py`."
     )
 
-    if "rebalance_proposal" not in st.session_state and os.path.exists(lr.PROPOSAL_CACHE):
-        st.session_state["rebalance_proposal"] = pd.read_pickle(lr.PROPOSAL_CACHE)
+    if "rebalance_proposal" not in st.session_state:
+        last_run = state_db.get_last_rebalance_run()
+        if last_run is not None:
+            # holdings is never persisted (see state_db.get_last_rebalance_run
+            # -- it's a live snapshot, not historical), so always re-fetch it
+            # fresh here regardless of when the underlying proposal ran.
+            last_run["holdings"] = lr.get_live_holdings().reset_index().rename(
+                columns={"tradingsymbol": "symbol"})
+            st.session_state["rebalance_proposal"] = last_run
 
     if st.button("Run today's scan", type="primary"):
         bar = st.progress(0.0, text="Starting...")
@@ -369,9 +475,14 @@ def page_live_rebalance():
 
     st.subheader(f"🟢 Proposed buys ({len(result['buys'])})")
     if not result["buys"].empty:
+        st.caption("`fundamental_score`/`fundamental_rubric` are shown for "
+                  "your own extra confirmation, not as a filter — the "
+                  "candidate list above is already gated on technicals "
+                  "(+ fundamentals, if `min_fundamental_score` applies).")
         st.dataframe(
             result["buys"].style.format(
-                {"price": "{:.2f}", "stop": "{:.2f}", "score": "{:.2f}"}),
+                {"price": "{:.2f}", "stop": "{:.2f}", "score": "{:.2f}",
+                 "fundamental_score": "{:.1f}"}, na_rep="—"),
             width="stretch", hide_index=True)
         place_gtt = st.checkbox("Also place a GTT stop-loss for each buy",
                                 value=True, key="rebal_gtt")
@@ -383,18 +494,84 @@ def page_live_rebalance():
             for _, r in result["buys"].iterrows():
                 try:
                     oid = kite_client.place_order(r["symbol"], int(r["qty"]), "BUY")
-                    msg = f"✅ {r['symbol']}: order {oid}"
-                    if place_gtt:
+                except Exception as e:
+                    log.append(f"❌ {r['symbol']}: BUY FAILED — {e}")
+                    continue
+                msg = f"✅ {r['symbol']}: order {oid}"
+                gtt_id = None
+                if place_gtt:
+                    try:
                         gtt_id = kite_client.place_gtt_stoploss(
                             r["symbol"], int(r["qty"]), r["stop"], r["price"])
                         msg += f", GTT {gtt_id} @ ₹{r['stop']:.1f}"
-                    log.append(msg)
+                    except Exception as e:
+                        msg += (f" — ⚠️ BUY SUCCEEDED but GTT FAILED: {e} "
+                               "(no stop-loss in place — check Unprotected "
+                               "holdings below)")
+                # Recorded even when the GTT failed (gtt_id=None) so the
+                # unprotected-holdings check below can flag it -- a bought
+                # position always needs trailing-stop bookkeeping started,
+                # whether or not its GTT actually got placed.
+                state_db.record_new_position(r["symbol"], float(r["price"]),
+                                             int(r["qty"]), float(r["stop"]), gtt_id)
+                log.append(msg)
+            for line in log:
+                st.write(line)
+    else:
+        st.caption("No open slots, or no candidates today.")
+
+    st.subheader(f"🔼 Recommended stop updates ({len(result.get('stop_updates', pd.DataFrame()))})")
+    stop_updates = result.get("stop_updates", pd.DataFrame())
+    if not stop_updates.empty:
+        st.caption("The trailing stop only ever moves up (never back down) "
+                  "as a position gains — see README's Trailing stop section. "
+                  "Nothing is modified until you confirm below.")
+        st.dataframe(
+            stop_updates.style.format({"current_stop": "{:.2f}", "recommended_stop": "{:.2f}"}),
+            width="stretch", hide_index=True)
+        confirm_stops = st.checkbox(
+            "I confirm I want to raise ALL these GTT stop-losses",
+            key="confirm_stop_updates")
+        if st.button("Apply stop updates", disabled=not confirm_stops):
+            log = []
+            for _, r in stop_updates.iterrows():
+                if pd.isna(r["gtt_trigger_id"]):
+                    log.append(f"⚠️ {r['symbol']}: no active GTT to update — "
+                              "place one manually first (Trade tab).")
+                    continue
+                try:
+                    ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
+                    kite_client.modify_gtt_trigger(
+                        int(r["gtt_trigger_id"]), r["symbol"], int(r["qty"]),
+                        r["recommended_stop"], ltp)
+                    log.append(f"✅ {r['symbol']}: stop raised to "
+                              f"₹{r['recommended_stop']:.2f}")
                 except Exception as e:
                     log.append(f"❌ {r['symbol']}: FAILED — {e}")
             for line in log:
                 st.write(line)
     else:
-        st.caption("No open slots, or no candidates today.")
+        st.caption("No trailing-stop increases recommended today.")
+
+    st.subheader("⚠️ Unprotected holdings")
+    try:
+        active_gtts = kite_client.get_active_gtts()
+        gtt_symbols = set()
+        if not active_gtts.empty and "condition" in active_gtts.columns:
+            for cond in active_gtts["condition"]:
+                sym = cond.get("tradingsymbol") if isinstance(cond, dict) else None
+                if sym:
+                    gtt_symbols.add(sym)
+        unprotected = [sym for sym in result["holdings"]["symbol"]
+                      if sym not in gtt_symbols]
+        if unprotected:
+            st.error(f"{len(unprotected)} holding(s) with **no active GTT "
+                    f"stop-loss**: {', '.join(unprotected)}. Place one "
+                    "manually in the Trade tab.")
+        else:
+            st.caption("Every current holding has an active GTT stop-loss.")
+    except Exception as e:
+        st.warning(f"Could not check GTT coverage: {e}")
 
     with st.expander("Current holdings snapshot used for this proposal"):
         st.dataframe(result["holdings"].style.format({"average_price": "{:.2f}"}),
@@ -526,12 +703,24 @@ def page_positions_trade():
         try:
             oid = kite_client.place_order(symbol, qty, side,
                                           order_type=order_type, price=limit_price)
-            st.success(f"Order placed: {oid}")
-            if place_gtt and side == "BUY":
-                gtt_id = kite_client.place_gtt_stoploss(symbol, qty, stop, ltp)
-                st.success(f"GTT stop-loss placed: trigger {gtt_id} at ₹{stop:,.1f}")
         except Exception as e:
             st.error(f"Order failed: {e}")
+        else:
+            st.success(f"Order placed: {oid}")
+            if side == "BUY":
+                gtt_id = None
+                if place_gtt:
+                    try:
+                        gtt_id = kite_client.place_gtt_stoploss(symbol, qty, stop, ltp)
+                        st.success(f"GTT stop-loss placed: trigger {gtt_id} at ₹{stop:,.1f}")
+                    except Exception as e:
+                        st.warning(f"⚠️ Buy succeeded but GTT stop-loss FAILED: {e} "
+                                  "(no stop-loss in place — check Live Rebalance's "
+                                  "Unprotected holdings section)")
+                # Recorded even when the GTT failed (gtt_id=None), same
+                # reasoning as the Live Rebalance buy flow.
+                state_db.record_new_position(symbol, float(ltp), int(qty),
+                                             float(stop), gtt_id)
 
 
 # ---------------------------------------------------------------------------

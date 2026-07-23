@@ -123,9 +123,14 @@ streamlit run dashboard.py
 The app is a sidebar-navigated set of pages, not a flat row of tabs:
 
 1. **🏠 Cockpit** — everything that matters at a glance: available cash,
-   portfolio value, unrealized P&L, open positions vs your cap, a locally
-   logged portfolio-value chart (one snapshot per day you open the app), and
-   whether the last rebalance scan proposed any action.
+   portfolio value, unrealized P&L, open positions vs your cap, **initial
+   capital and overall return** (auto-captured from Kite's available cash
+   the first time it's non-zero — see below), a **full funds breakdown**
+   expander (Kite's complete `margins()` response, not just available cash),
+   a locally logged portfolio-value chart (one snapshot per day you open the
+   app), whether the last rebalance scan proposed any action, and a
+   holdings table enriched with each position's entry date, days held,
+   current trailing-stop level, and GTT status (✅/❌).
 2. **🔍 Screener** — the full ranked universe (every gate-passer, not just
    what fits your open slots), plus a candlestick chart with EMA50/EMA200
    for any symbol.
@@ -300,13 +305,21 @@ all better simultaneously, on essentially unchanged profit factor (2.23 vs
 +50.47% (down to +39.80%, still 4.5x NIFTY's +8.80% that year).
 
 Shipped with `trailing_atr_multiple` defaulting to **4.0** (the identified
-sweet spot) for whenever the feature is turned on — `trailing_stop_enabled`
-itself still defaults to **off**, same as every other opt-in feature here.
-This is one 5-year window on today's F&O universe (survivorship bias
+sweet spot). Unlike every other factor tried in this section,
+`trailing_stop_enabled` now defaults to **True** — this is the one
+experimental feature from this round that earned a spot in the production
+default strategy ("Baseline + Trailing 4.0x"), everything else here stays
+off. This is one 5-year window on today's F&O universe (survivorship bias
 applies, see Known limitations in `backtest.py`) — re-run the **🧪
 Backtest** page's "Run A/B: baseline vs trailing-stop" button on your own
 window before trusting it, and note the peak's exact location may shift
 with a different period.
+
+A beta scoring bonus/gate (tilting or hard-filtering toward higher-beta
+stocks) was also tried and discarded — same "helps in chop, hurts in
+trend" pattern as the sector bonus at every weight tested, and a hard
+beta>1 filter was worse still (CAGR 24.60%→20.25%, Sharpe 1.75→1.41, max
+drawdown -14.43%→-18.99%). Not kept.
 
 ## Fundamentals: primary-source XBRL value score
 
@@ -378,6 +391,8 @@ placing an order itself. It proposes:
   the 200 EMA, or dropped out of the top-ranked zone).
 - **Buys**: open slots after those sells, filled from gate-passers sized off
   your real available cash.
+- **Stop updates**: recommended trailing-stop increases for currently held
+  positions (see below) — proposal-only, same as sells/buys.
 
 Run it from the **📡 Live Rebalance** page (with inline, confirmation-gated
 execution buttons) or headless on a schedule:
@@ -386,5 +401,64 @@ execution buttons) or headless on a schedule:
 python live_rebalance.py   # prints the proposal, saves it to cache/, places nothing
 ```
 
-Stop-losses aren't covered by this job — if you placed a GTT at entry, your
-broker already enforces it intraday without this needing to run.
+Proposed buys also show `fundamental_score`/`fundamental_rubric` alongside
+the technical `score` — informational context for your own extra
+confirmation, not an additional filter (the candidate list is already
+gated on `min_fundamental_score` inside `screener.apply_gates`).
+
+### Live trailing-stop updates (opt-in, approval-gated)
+
+The backtest's trailing stop (`backtest.py` step 1b) only ever existed as
+in-memory bookkeeping inside one simulation run — live, a GTT stop-loss was
+placed once at entry and never revisited. `live_rebalance.py` now tracks
+each held position's `entry_date`/`highest_close`/`current_stop` in
+`cache/live_position_state.json` (created the moment a buy + GTT succeed,
+in both the Live Rebalance page and the Trade tab) and recomputes the
+trailing stop daily using the **exact same formula** as the backtest
+(`highest_close_since_entry - trailing_atr_multiple*ATR`, ratchets up
+only) — so live and backtest logic can't quietly drift apart.
+
+This state file is a cache of *derived* state, never a source of truth: a
+GTT can close a position without any of this app's code running, so every
+read reconciles against your actual Kite holdings first and prunes stale
+entries.
+
+Recommended increases show up as a **"🔼 Recommended stop updates"** section
+on the Live Rebalance page — same confirmation-gated pattern as sells/buys,
+nothing modifies a live GTT until you explicitly check the box and click
+**Apply stop updates** (`kite_client.modify_gtt_trigger`). An
+**"⚠️ Unprotected holdings"** check cross-references your holdings against
+Kite's own live GTT list (`kite_client.get_active_gtts`) and flags anything
+with no active stop-loss — this also catches the case where a buy succeeds
+but its GTT placement fails (previously reported as a single misleading
+`❌ FAILED` for the whole order; now split into a distinct warning).
+
+### Scheduled scan (opt-in, execution stays manual)
+
+The scan itself — not execution — runs automatically on a Windows Task
+Scheduler entry (`NSE-Momentum-DailyRebalanceScan`), weekdays at 4:00 PM
+IST, right after market close, so a fresh proposal is always waiting the
+next time you open the dashboard instead of needing you to click **Run
+today's scan** yourself. It only ever calls `propose_rebalance()` — the
+exact same function the dashboard button calls — and execution still
+requires the dashboard's per-batch confirm checkbox + button, exactly as
+before. Nothing about *placing* an order is automated.
+
+Every run (success or failure) appends a timestamped block to
+`cache/live_rebalance_log.txt` — check this first if a day's proposal
+looks stale, since a headless scheduled run has no console to watch.
+
+```powershell
+# Inspect / modify / remove the scheduled task:
+Get-ScheduledTask -TaskName "NSE-Momentum-DailyRebalanceScan"
+Get-ScheduledTaskInfo -TaskName "NSE-Momentum-DailyRebalanceScan"   # last/next run time, last result
+Unregister-ScheduledTask -TaskName "NSE-Momentum-DailyRebalanceScan" -Confirm:$false   # remove
+```
+
+**Important caveat**: Kite Connect access tokens expire daily and require
+a manual login each morning (`python kite_client.py login`, then `python
+kite_client.py token <request_token>`) — this is a constraint of
+Zerodha's Connect API itself, not something this scheduled task can work
+around. If the token has expired by 4 PM, the scan fails gracefully and
+logs the failure (see `live_rebalance.py`'s `main()`) rather than crashing
+silently — check the log if a day's run seems to be missing.

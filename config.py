@@ -7,6 +7,8 @@ Create a `.env` file next to this one:
     KITE_API_KEY=your_kite_api_key
     KITE_API_SECRET=your_kite_api_secret
     KITE_ACCESS_TOKEN=            # filled daily after login flow
+    DASHBOARD_USERNAME=your_username     # optional -- defaults to "Admin"
+    DASHBOARD_PASSWORD=your_password     # optional -- defaults to "Admin"
 """
 
 import os
@@ -17,6 +19,14 @@ load_dotenv()
 KITE_API_KEY = os.getenv("KITE_API_KEY", "")
 KITE_API_SECRET = os.getenv("KITE_API_SECRET", "")
 KITE_ACCESS_TOKEN = os.getenv("KITE_ACCESS_TOKEN", "")
+
+# Dashboard login gate (dashboard.py) -- placeholders on purpose, not a real
+# credential store. This app places real orders and shows real fund
+# balances, so change these in .env before exposing it beyond your own
+# machine -- "Admin"/"Admin" is one of the most commonly attacked default
+# credential pairs that exists.
+DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "Admin")
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "Admin")
 
 # ---------------------------------------------------------------------------
 # Universe: NSE F&O-eligible stocks only (~210 names), fetched live from

@@ -24,10 +24,45 @@ import os
 import pandas as pd
 
 import config
+import indicators
 import kite_client
 import screener
+import state_db
 
-PROPOSAL_CACHE = os.path.join("cache", "rebalance_proposal.pkl")
+LOG_PATH = os.path.join("cache", "live_rebalance_log.txt")
+
+
+def compute_stop_updates(held_symbols: set[str], cfg: dict) -> list[dict]:
+    """Recomputes each held position's trailing stop using the exact same
+    formula as backtest.py's step 1b (highest_close_since_entry -
+    trailing_atr_multiple*ATR, ratchet up only) -- so live and backtest
+    logic can never quietly drift apart. Proposal-only: nothing is
+    modified here, this only returns candidate updates for the dashboard's
+    explicit-approval flow. highest_close/current_stop are persisted back
+    to state_db regardless of whether anything ratchets this run, since
+    that bookkeeping needs to continue every day."""
+    positions = state_db.reconciled_positions(held_symbols)
+    updates = []
+    for sym, pos in positions.items():
+        try:
+            df = kite_client.fetch_daily_candles(sym, days=300)
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        today_close = float(df["close"].iloc[-1])
+        highest_close = max(pos["highest_close"], today_close)
+        atr_now = float(indicators.atr(df, cfg["atr_period"]).iloc[-1])
+        new_stop = highest_close - cfg["trailing_atr_multiple"] * atr_now
+        if new_stop > pos["current_stop"]:
+            updates.append({
+                "symbol": sym, "qty": pos["qty"],
+                "current_stop": round(pos["current_stop"], 2),
+                "recommended_stop": round(new_stop, 2),
+                "gtt_trigger_id": pos.get("gtt_trigger_id"),
+            })
+        state_db.update_position_stop(sym, highest_close, new_stop)
+    return updates
 
 
 def get_live_holdings() -> pd.DataFrame:
@@ -112,48 +147,82 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
             qty = screener.position_size(available_cash, price, stop, cfg)
             if qty <= 0:
                 continue
+            fscore = row.get("fundamental_score")
             buys.append({
                 "symbol": sym, "qty": qty, "price": round(price, 2),
                 "stop": round(stop, 2), "score": float(row["score"]),
+                "fundamental_score": None if pd.isna(fscore) else round(float(fscore), 1),
+                "fundamental_rubric": row.get("fundamental_rubric"),
             })
     buys_df = pd.DataFrame(buys)
+
+    # ---- Trailing-stop updates: recommend, never modify a live GTT here.
+    # Uses currently ACTUALLY held symbols, not "still_held" (which already
+    # subtracts today's proposed-but-not-yet-executed sells) -- a position
+    # you haven't gotten around to selling yet still needs its stop tracked.
+    report("Checking trailing-stop levels...", 0.97)
+    stop_updates = compute_stop_updates(set(held.index), cfg)
+    stop_updates_df = pd.DataFrame(stop_updates)
 
     report("Done", 1.0)
     result = {
         "run_time": dt.datetime.now(),
         "sells": sells_df,
         "buys": buys_df,
+        "stop_updates": stop_updates_df,
         "holdings": held.reset_index().rename(columns={"tradingsymbol": "symbol"}),
         "open_slots": open_slots,
     }
-    os.makedirs("cache", exist_ok=True)
-    pd.to_pickle(result, PROPOSAL_CACHE)
+    state_db.save_rebalance_run(result)
     return result
 
 
 def main():
+    """Run headless, e.g. from Windows Task Scheduler -- see README's
+    "Scheduled scan" section. Every run appends a timestamped block to
+    LOG_PATH regardless of outcome (including a Kite-auth failure), since a
+    scheduled run has no console to watch -- this is the only record of
+    whether today's run happened and what it found."""
+    os.makedirs("cache", exist_ok=True)
+    log_lines = [f"\n{'=' * 60}\n{dt.datetime.now():%d %b %Y %H:%M:%S}\n{'=' * 60}"]
+
+    def log(msg=""):
+        print(msg)
+        log_lines.append(msg)
+
     try:
         margins = kite_client.get_margins()
         available_cash = margins["equity"]["available"]["live_balance"]
     except Exception as e:
-        print(f"Kite connection failed (token may have expired): {e}")
+        log(f"FAILED -- Kite connection failed (token may have expired): {e}")
+        log("Refresh the token (python kite_client.py login / token <request_token>) "
+           "before the next scheduled run, or run manually from the dashboard.")
+        state_db.save_rebalance_failure(str(e))
+        with open(LOG_PATH, "a") as f:
+            f.write("\n".join(log_lines) + "\n")
         return
 
     def cb(stage, frac):
-        print(f"[{frac * 100:5.1f}%] {stage}")
+        pass  # progress bar text is meaningless in a headless/logged run
 
     result = propose_rebalance(available_cash, progress_cb=cb)
 
-    print(f"\n=== Rebalance proposal ({result['run_time']:%d %b %Y %H:%M}) ===")
-    print(f"Open slots: {result['open_slots']}")
-    print("\n-- Proposed SELLS --")
-    print(result["sells"].to_string(index=False) if not result["sells"].empty
-         else "(none)")
-    print("\n-- Proposed BUYS --")
-    print(result["buys"].to_string(index=False) if not result["buys"].empty
-         else "(none)")
-    print(f"\nSaved: {PROPOSAL_CACHE}")
-    print("Nothing was placed -- review and execute manually in the Trade tab.")
+    log(f"Rebalance proposal ({result['run_time']:%d %b %Y %H:%M})")
+    log(f"Open slots: {result['open_slots']}")
+    log("\n-- Proposed SELLS --")
+    log(result["sells"].to_string(index=False) if not result["sells"].empty
+       else "(none)")
+    log("\n-- Proposed BUYS --")
+    log(result["buys"].to_string(index=False) if not result["buys"].empty
+       else "(none)")
+    log("\n-- Recommended stop updates (trailing stop) --")
+    log(result["stop_updates"].to_string(index=False) if not result["stop_updates"].empty
+       else "(none)")
+    log(f"\nSaved to {state_db.DB_PATH}")
+    log("Nothing was placed or modified -- review and execute/apply manually "
+       "in the dashboard's Live Rebalance page or the Trade tab.")
+    with open(LOG_PATH, "a") as f:
+        f.write("\n".join(log_lines) + "\n")
 
 
 if __name__ == "__main__":
