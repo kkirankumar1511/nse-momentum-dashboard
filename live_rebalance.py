@@ -41,7 +41,9 @@ def compute_stop_updates(held_symbols: set[str], cfg: dict) -> list[dict]:
     explicit-approval flow. highest_close/current_stop are persisted back
     to state_db regardless of whether anything ratchets this run, since
     that bookkeeping needs to continue every day."""
-    positions = state_db.reconciled_positions(held_symbols)
+    stale = state_db.get_stale_open_symbols(held_symbols)
+    exit_prices = kite_client.get_ltp(stale) if stale else {}
+    positions = state_db.reconciled_positions(held_symbols, exit_prices)
     updates = []
     for sym, pos in positions.items():
         try:
@@ -87,6 +89,27 @@ def get_live_holdings() -> pd.DataFrame:
         quantity=("quantity", "sum"), cost=("cost", "sum"))
     grouped["average_price"] = grouped["cost"] / grouped["quantity"]
     return grouped[["quantity", "average_price"]]
+
+
+def _holdings_value(held: pd.DataFrame, ranked: pd.DataFrame) -> float:
+    """Current mark-to-market value of held positions -- held's own
+    average_price is COST basis, not current price, so this isn't just
+    (quantity * average_price). Reuses ranked's already-fetched price where
+    the held symbol appears there (the common case); falls back to a fresh
+    LTP fetch only for the rest (delisted from F&O, gate failures, etc.),
+    and to cost basis as a last resort if even that fails."""
+    if held.empty:
+        return 0.0
+    prices = {sym: float(ranked.loc[sym, "price"])
+             for sym in held.index if sym in ranked.index}
+    missing = [sym for sym in held.index if sym not in prices]
+    if missing:
+        try:
+            prices.update(kite_client.get_ltp(missing))
+        except Exception:
+            pass
+    return float(sum(held.loc[sym, "quantity"] * prices.get(sym, held.loc[sym, "average_price"])
+                     for sym in held.index))
 
 
 def propose_rebalance(available_cash: float, cfg: dict | None = None,
@@ -135,6 +158,14 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     still_held = set(held.index) - sold_syms
     open_slots = max(cfg["max_positions"] - len(still_held), 0)
 
+    # Equal-weight capital allocation, not the risk-based screener.position_size()
+    # backtest.py uses: per-trade capital = total account equity / max_positions
+    # (so it scales with your capital and max_positions setting directly), capped
+    # by what's actually left in cash divided across the slots still to fill this
+    # run -- see screener.capital_position_size()'s docstring for the full reasoning.
+    total_equity = available_cash + _holdings_value(held, ranked)
+    remaining_cash = available_cash
+
     buys = []
     if open_slots > 0:
         for sym, row in candidates.iterrows():
@@ -144,9 +175,12 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
                 continue
             price = float(row["price"])
             stop = float(row["suggested_stop"])
-            qty = screener.position_size(available_cash, price, stop, cfg)
+            slots_remaining = open_slots - len(buys)
+            qty = screener.capital_position_size(
+                total_equity, remaining_cash, price, slots_remaining, cfg["max_positions"])
             if qty <= 0:
                 continue
+            remaining_cash -= qty * price
             fscore = row.get("fundamental_score")
             buys.append({
                 "symbol": sym, "qty": qty, "price": round(price, 2),

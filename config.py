@@ -71,9 +71,15 @@ UNIVERSE = _fno.get_fno_universe(verbose=False)
 BENCHMARK = "NSE:NIFTY 50"   # for relative strength
 
 # ---------------------------------------------------------------------------
-# Strategy parameters (see README for the research behind each)
+# Strategy parameters (see README for the research behind each).
+#
+# _STRATEGY_DEFAULTS below is only the SEED/fallback -- state_db.strategy_config
+# is the live source of truth from first run onward (same pattern as Kite
+# credentials above), editable from the dashboard's Admin page without a code
+# change or restart. Change the research defaults themselves here; change your
+# own live values from the Admin page.
 # ---------------------------------------------------------------------------
-STRATEGY = {
+_STRATEGY_DEFAULTS = {
     # Momentum lookbacks (Jegadeesh & Titman 1993: 3-12m formation works for
     # 3-6m holding; we skip the most recent week to dodge short-term reversal)
     "mom_lookback_days_short": 63,     # ~3 months
@@ -130,4 +136,16 @@ STRATEGY = {
     "sector_rs_lookback_days": 126,    # matches mom_lookback_days_long
 
     "history_days": 1200,              # calendar days of candles to fetch
+
+    # Equal-weight capital allocation (screener.capital_position_size) vs.
+    # the risk-based sizing above (screener.position_size, what backtest.py
+    # uses when this is off). False reproduces the original behavior exactly
+    # -- opt-in until an A/B backtest earns it a spot as the default, same
+    # pattern as sector_bonus_weight/trailing_stop_enabled. live_rebalance.py
+    # always uses capital_position_size regardless of this flag (a live/UX
+    # decision made independently -- see its own module for why); this flag
+    # only controls backtest.py's simulation, for comparing the two.
+    "capital_equal_weight_sizing": False,
 }
+
+STRATEGY = state_db.get_strategy_config(_STRATEGY_DEFAULTS)

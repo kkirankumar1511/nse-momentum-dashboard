@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import os
 import secrets
 import sqlite3
@@ -55,6 +56,19 @@ CREATE TABLE IF NOT EXISTS fund_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     initial_capital REAL NOT NULL,
     captured_date TEXT NOT NULL
+);
+
+-- Every deposit/withdrawal, dated -- Kite's API has no visibility into
+-- bank transfers, so this is manually logged (Admin page). The old
+-- fund_state singleton row above is superseded by this (a proper ledger
+-- lets XIRR account for deposit timing, not just a single starting
+-- amount) -- see _migrate_fund_state_to_cash_flow, which carries that row
+-- forward as this ledger's first entry rather than losing it.
+CREATE TABLE IF NOT EXISTS cash_flows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    amount REAL NOT NULL,
+    note TEXT
 );
 
 CREATE TABLE IF NOT EXISTS equity_log (
@@ -97,6 +111,17 @@ CREATE TABLE IF NOT EXISTS dashboard_auth (
     salt TEXT NOT NULL
 );
 
+-- Strategy parameters (config.STRATEGY), editable from the dashboard's
+-- Admin page instead of only via a config.py code edit + restart. One row
+-- per key, value JSON-encoded so int/float/bool/str all round-trip cleanly
+-- through a single TEXT column. Seeded once from config.py's in-code
+-- defaults (see get_strategy_config) -- after that, the DB is the live
+-- source of truth, same pattern as kite_credentials/dashboard_auth above.
+CREATE TABLE IF NOT EXISTS strategy_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 -- Kite Connect credentials. Singleton row. api_key/api_secret are stored
 -- plaintext -- unlike dashboard_auth's password, these must be recoverable
 -- (Kite's OAuth exchange needs the real api_secret value), so this is a
@@ -134,6 +159,8 @@ def get_conn(db_path: str | None = None) -> sqlite3.Connection:
     conn.executescript(_SCHEMA)
     conn.commit()
     _migrate_equity_log_once(conn)
+    _migrate_fund_state_to_cash_flow(conn)
+    _migrate_positions_schema(conn)
     return conn
 
 
@@ -151,6 +178,37 @@ def _migrate_equity_log_once(conn: sqlite3.Connection) -> None:
     for _, row in legacy.iterrows():
         conn.execute("INSERT OR IGNORE INTO equity_log (date, value) VALUES (?, ?)",
                     (row["date"], float(row["value"])))
+    conn.commit()
+
+
+def _migrate_fund_state_to_cash_flow(conn: sqlite3.Connection) -> None:
+    """One-time carry-over of the old fund_state singleton row (initial
+    capital, auto-captured once) as the first cash_flows ledger entry --
+    preserves the original captured date/amount instead of losing it when
+    the ledger takes over. No-ops once cash_flows already has rows, or if
+    fund_state was never populated."""
+    existing = conn.execute("SELECT COUNT(*) FROM cash_flows").fetchone()[0]
+    if existing:
+        return
+    row = conn.execute("SELECT * FROM fund_state WHERE id = 1").fetchone()
+    if row is None:
+        return
+    conn.execute(
+        "INSERT INTO cash_flows (date, amount, note) VALUES (?, ?, ?)",
+        (row["captured_date"], row["initial_capital"],
+         "Migrated from initial capital auto-capture"))
+    conn.commit()
+
+
+def _migrate_positions_schema(conn: sqlite3.Connection) -> None:
+    """Adds exit_price/realized_pnl columns to an already-existing positions
+    table -- CREATE TABLE IF NOT EXISTS above doesn't touch a table that
+    already exists, so new columns need this explicit, idempotent check."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(positions)")}
+    if "exit_price" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN exit_price REAL")
+    if "realized_pnl" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN realized_pnl REAL")
     conn.commit()
 
 
@@ -174,27 +232,66 @@ def record_new_position(symbol: str, entry_price: float, qty: int,
     conn.close()
 
 
-def reconciled_positions(held_symbols: set[str]) -> dict[str, dict]:
+def get_stale_open_symbols(held_symbols: set[str]) -> list[str]:
+    """Open positions no longer in held_symbols -- about to be closed on the
+    next reconciled_positions() call. Callers fetch an LTP for these first
+    (e.g. via kite_client.get_ltp()) so reconciled_positions() can record a
+    realized exit price -- state_db.py itself can't call kite_client (it
+    would be a circular import, since kite_client already imports state_db)."""
+    conn = get_conn()
+    open_rows = conn.execute(
+        "SELECT symbol FROM positions WHERE status = 'open'").fetchall()
+    conn.close()
+    return [r["symbol"] for r in open_rows if r["symbol"] not in held_symbols]
+
+
+def reconciled_positions(held_symbols: set[str],
+                         exit_prices: dict[str, float] | None = None) -> dict[str, dict]:
     """Marks any 'open' row whose symbol isn't in held_symbols as 'closed'
     (closed_date=today) instead of deleting -- a GTT can close a position
     without any of this app's code running, so every read reconciles
     against real Kite holdings first; history is preserved rather than
     silently dropped. Returns the remaining open positions, keyed by
-    symbol, same dict shape the old JSON version returned."""
+    symbol, same dict shape the old JSON version returned.
+
+    exit_prices, if supplied (keyed by symbol, from get_stale_open_symbols()
+    + a fresh LTP fetch), also records exit_price and
+    realized_pnl = (exit_price - entry_price) * qty on the closing row --
+    Kite's API only exposes today's trades/orders, no historical realized-
+    P&L endpoint, so this LTP-at-detection-time approximation is this app's
+    own reconstruction of it. Left null if no price was supplied for a
+    given symbol (caller chose to skip the extra LTP call)."""
+    exit_prices = exit_prices or {}
     conn = get_conn()
     open_rows = conn.execute(
         "SELECT * FROM positions WHERE status = 'open'").fetchall()
     today = dt.date.today().isoformat()
     for row in open_rows:
         if row["symbol"] not in held_symbols:
+            exit_price = exit_prices.get(row["symbol"])
+            realized_pnl = ((exit_price - row["entry_price"]) * row["qty"]
+                           if exit_price is not None else None)
             conn.execute(
-                "UPDATE positions SET status = 'closed', closed_date = ? "
-                "WHERE id = ?", (today, row["id"]))
+                "UPDATE positions SET status = 'closed', closed_date = ?, "
+                "exit_price = ?, realized_pnl = ? WHERE id = ?",
+                (today, exit_price, realized_pnl, row["id"]))
     conn.commit()
     remaining = conn.execute(
         "SELECT * FROM positions WHERE status = 'open'").fetchall()
     conn.close()
     return {r["symbol"]: dict(r) for r in remaining}
+
+
+def get_realized_pnl() -> float:
+    """SUM(realized_pnl) over all closed positions -- null entries (closed
+    without a supplied exit price) don't contribute, same as SQL SUM's
+    normal NULL handling."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT SUM(realized_pnl) AS total FROM positions "
+        "WHERE status = 'closed'").fetchone()
+    conn.close()
+    return float(row["total"]) if row["total"] is not None else 0.0
 
 
 def update_position_stop(symbol: str, highest_close: float, new_stop: float,
@@ -230,28 +327,81 @@ def get_open_positions() -> dict[str, dict]:
     return {r["symbol"]: dict(r) for r in rows}
 
 
+def upsert_manual_position(symbol: str, entry_price: float, qty: int,
+                           stop: float, gtt_trigger_id: int | None) -> None:
+    """Used when placing a stop-loss for a position this app didn't itself
+    open (e.g. bought directly on Kite, outside the Live Rebalance/manual-
+    order flows) -- creates a new open position row if none exists yet
+    (using Kite's own real entry_price/qty for that symbol), or just updates
+    the current_stop/gtt_trigger_id if one already does (e.g. re-placing a
+    GTT that expired or was cancelled). Either way, the position becomes
+    fully known to reconciled_positions()/get_open_positions() afterward, so
+    future trailing-stop updates pick it up like any other position."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id FROM positions WHERE symbol = ? AND status = 'open'",
+        (symbol,)).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO positions (symbol, entry_date, entry_price, qty, "
+            "highest_close, current_stop, gtt_trigger_id, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
+            (symbol, dt.date.today().isoformat(), entry_price, qty,
+             entry_price, stop, gtt_trigger_id))
+    else:
+        conn.execute(
+            "UPDATE positions SET current_stop = ?, gtt_trigger_id = ?, "
+            "updated_at = datetime('now') WHERE id = ?",
+            (stop, gtt_trigger_id, row["id"]))
+    conn.commit()
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
-# Fund state (initial capital)
+# Cash-flow ledger -- every deposit/withdrawal, dated. Supersedes the old
+# fund_state singleton row (see _migrate_fund_state_to_cash_flow): a proper
+# ledger lets XIRR account for deposit timing, not just a single starting
+# amount, matching the user's stated plan to add money monthly.
 # ---------------------------------------------------------------------------
 
-def capture_initial_capital(available_cash: float) -> float | None:
-    """Auto-captures "initial capital" from Kite's own available cash the
-    first time it's non-zero. Written once (singleton row); never
-    overwritten by later deposits or drawdowns."""
+def record_cash_flow(date: str, amount: float, note: str = "") -> None:
+    """Manual entry -- called from the Admin page's deposit/withdrawal
+    form. amount is positive for a deposit, negative for a withdrawal.
+    Kite's API has no visibility into bank transfers, so this can't be
+    automated beyond the very first entry (see
+    ensure_first_cash_flow_captured)."""
     conn = get_conn()
-    row = conn.execute("SELECT initial_capital FROM fund_state WHERE id = 1").fetchone()
-    if row is not None:
-        conn.close()
-        return row["initial_capital"]
-    if available_cash > 0:
-        conn.execute(
-            "INSERT INTO fund_state (id, initial_capital, captured_date) "
-            "VALUES (1, ?, ?)", (available_cash, dt.date.today().isoformat()))
-        conn.commit()
-        conn.close()
-        return available_cash
+    conn.execute(
+        "INSERT INTO cash_flows (date, amount, note) VALUES (?, ?, ?)",
+        (date, amount, note))
+    conn.commit()
     conn.close()
-    return None
+
+
+def get_cash_flows() -> pd.DataFrame:
+    """Full ledger, oldest first -- feeds the XIRR calc and the Admin
+    page's audit-trail table."""
+    conn = get_conn()
+    log = pd.read_sql(
+        "SELECT date, amount, note FROM cash_flows ORDER BY date, id", conn)
+    conn.close()
+    return log
+
+
+def ensure_first_cash_flow_captured(available_cash: float) -> None:
+    """Auto-captures the very first deposit from Kite's own available cash,
+    the first time it's non-zero and the ledger is still empty -- same
+    first-time-only behavior capture_initial_capital used to provide, so
+    the user isn't required to manually log money already sitting in the
+    account. Every deposit after this one is manual (Admin page), per the
+    user's plan to add money monthly."""
+    conn = get_conn()
+    existing = conn.execute("SELECT COUNT(*) FROM cash_flows").fetchone()[0]
+    conn.close()
+    if existing or available_cash <= 0:
+        return
+    record_cash_flow(dt.date.today().isoformat(), available_cash,
+                     "Auto-captured initial available cash")
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +557,44 @@ def is_using_default_dashboard_password(default_username: str, default_password:
     """For the loud on-screen warning -- true only while still on the
     seeded Admin/Admin-style default, false the moment it's ever changed."""
     return verify_dashboard_login(default_username, default_password)
+
+
+# ---------------------------------------------------------------------------
+# Strategy configuration -- config.STRATEGY, editable from the Admin page
+# instead of only via a code edit + restart.
+# ---------------------------------------------------------------------------
+
+def get_strategy_config(defaults: dict) -> dict:
+    """Returns the live strategy config, DB values taking precedence over
+    `defaults` key by key. Self-healing like every other table here: any
+    key in `defaults` missing from the DB (first run, or a new parameter
+    added to config.py after the DB already existed) gets seeded from
+    `defaults` and returned as-is -- so adding a new STRATEGY key later
+    doesn't require a manual migration, only a code change to config.py."""
+    conn = get_conn()
+    rows = conn.execute("SELECT key, value FROM strategy_config").fetchall()
+    stored = {r["key"]: json.loads(r["value"]) for r in rows}
+    missing = {k: v for k, v in defaults.items() if k not in stored}
+    if missing:
+        conn.executemany(
+            "INSERT INTO strategy_config (key, value) VALUES (?, ?)",
+            [(k, json.dumps(v)) for k, v in missing.items()])
+        conn.commit()
+    conn.close()
+    return {**defaults, **stored, **missing}
+
+
+def update_strategy_config(updates: dict) -> None:
+    """Upserts the given {key: value} pairs -- used by the Admin page's
+    strategy settings form. Only ever called with keys that already exist
+    (from a form pre-filled by get_strategy_config), but INSERT OR REPLACE
+    handles a brand-new key just as well."""
+    conn = get_conn()
+    conn.executemany(
+        "INSERT OR REPLACE INTO strategy_config (key, value) VALUES (?, ?)",
+        [(k, json.dumps(v)) for k, v in updates.items()])
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------

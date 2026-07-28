@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nse-momentum-dashboard"
+version = "0.1.0"
+description = "NSE calendar-entry momentum trading dashboard, live rebalance automation, and Windows service wrapper"
+requires-python = ">=3.10"
+dependencies = [
+    "kiteconnect>=5.0.1",
+    "streamlit>=1.35.0",
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    "plotly>=5.20.0",
+    "pywin32; sys_platform == 'win32'",
+]
+
+# `trading-app install|start|stop|restart|status|remove` -- see trading_service.py.
+# Only meaningful on Windows (the service wrapper is pywin32-based); on other
+# platforms this entry point installs but its commands will fail at runtime.
+[project.scripts]
+trading-app = "trading_service:main"
+
+# Flat module layout (no src/ package directory) -- every top-level .py file
+# here is importable as-is once this project is installed (`pip install -e .`),
+# same as running scripts directly out of this directory today. Listed
+# explicitly rather than using setuptools' package auto-discovery, since
+# there's no package directory for it to find.
+[tool.setuptools]
+py-modules = [
+    "backtest",
+    "config",
+    "dashboard",
+    "fno_universe",
+    "fundamentals_agent",
+    "indicators",
+    "kite_client",
+    "live_rebalance",
+    "nse_api",
+    "screener",
+    "sector_universe",
+    "state_db",
+    "xbrl_parser",
+    "trading_service",
+]

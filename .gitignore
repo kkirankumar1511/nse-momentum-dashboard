@@ -9,6 +9,7 @@
 # Python
 __pycache__/
 *.pyc
+*.egg-info/
 
 # Generated data / caches (NSE/Kite fetches, fundamentals scans, backtest output)
 cache/

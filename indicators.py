@@ -5,6 +5,8 @@ dependency so it runs anywhere.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import numpy as np
 import pandas as pd
 
@@ -104,3 +106,49 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict) -> dict:
         "atr_pct": atr_now / price * 100,
         "suggested_stop": price - cfg["atr_stop_multiple"] * atr_now,
     }
+
+
+def xirr(cash_flows: list[tuple[dt.date, float]]) -> float | None:
+    """Annualized rate of return for irregularly-timed cash flows -- the
+    correct generalization of CAGR (reduces to plain CAGR when there's a
+    single initial deposit, stays accurate once monthly top-ups start,
+    unlike a naive CAGR calc which assumes one lump sum). Convention:
+    negative amounts are money going in (deposits), positive amounts are
+    money coming out (today's portfolio value, treated as a hypothetical
+    liquidation).
+
+    Solves for the rate r making NPV == 0 via Newton-Raphson:
+        sum(amount_i / (1 + r) ** (days_i / 365)) == 0
+    Pure Python/math -- no scipy or numpy_financial dependency, consistent
+    with this module's existing pattern of hand-rolled indicators.
+
+    Returns None if there are fewer than 2 cash flows (nothing to
+    annualize) or if Newton-Raphson fails to converge (e.g. all flows have
+    the same sign, so no rate can zero the NPV)."""
+    if len(cash_flows) < 2:
+        return None
+
+    t0 = cash_flows[0][0]
+    years = [(d - t0).days / 365.0 for d, _ in cash_flows]
+    amounts = [a for _, a in cash_flows]
+
+    def npv(rate: float) -> float:
+        return sum(a / (1 + rate) ** y for a, y in zip(amounts, years))
+
+    def dnpv(rate: float) -> float:
+        return sum(-y * a / (1 + rate) ** (y + 1)
+                  for a, y in zip(amounts, years) if y > 0)
+
+    rate = 0.1
+    for _ in range(100):
+        f = npv(rate)
+        df_ = dnpv(rate)
+        if df_ == 0:
+            return None
+        new_rate = rate - f / df_
+        if new_rate <= -1:
+            new_rate = (rate - 1) / 2  # halve the step toward the -1 boundary
+        if abs(new_rate - rate) < 1e-9:
+            return new_rate
+        rate = new_rate
+    return None

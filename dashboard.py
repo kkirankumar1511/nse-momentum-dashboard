@@ -4,14 +4,17 @@ NSE Calendar-Entry Momentum Cockpit (Streamlit)
 Run:  streamlit run dashboard.py
 
 Pages (sidebar navigation):
-  Cockpit           - everything that matters at a glance: cash, portfolio
-                      value, P&L, open positions, today's pending actions
+  Overview          - everything that matters at a glance: cash, portfolio
+                      value, realized/unrealized P&L, XIRR, open positions,
+                      today's pending actions
   Screener          - full ranked universe (all gate-passers, not just what
                       fits your open slots), plus a symbol chart
   Live Rebalance    - run the daily scan, review proposed sells/buys, execute
   Positions & Trade - live holdings/positions, square-off, manual order entry
   Backtest          - calendar-entry engine on real Kite data, 1-5 years
   Fundamentals      - primary-source XBRL value score, all F&O stocks
+  Admin             - dashboard password, Kite API settings, deposit/
+                      withdrawal ledger
 
 Single strategy: calendar-entry momentum (buy the instant a slot opens,
 monthly rebalance + daily stop checks). No AI/LLM anywhere in this app.
@@ -34,6 +37,39 @@ import kite_client
 import live_rebalance as lr
 import screener
 import sector_universe as su
+
+
+# Windows' asyncio ProactorEventLoop logs a spurious traceback whenever a
+# client's TCP connection resets mid-request (e.g. a mobile browser over
+# Tailscale losing signal) -- _call_connection_lost's socket.shutdown() raises
+# ConnectionResetError on a socket the peer already reset. It's cosmetic
+# noise, not a crash (Streamlit/Tornado already handles a disconnected client
+# through its own websocket layer).
+#
+# A per-loop exception handler (asyncio.get_event_loop().set_exception_
+# handler(...)) does NOT work here: Streamlit re-executes this script inside
+# a per-session ScriptRunner worker thread, not the thread that owns the
+# actual server event loop where the connection-lost callback fires --
+# asyncio.get_event_loop() in that worker thread either raises RuntimeError
+# (Python 3.12+, no loop set for a non-main thread) or, if it didn't, would
+# still only patch a throwaway loop nobody's connections use. Patching the
+# transport class method directly works regardless of which thread applies
+# it, since the class is one shared object across every thread. Guarded by
+# a sentinel attribute so re-running this script (every Streamlit rerun)
+# doesn't stack another wrapper on top of the last one.
+if os.name == "nt":
+    from asyncio.proactor_events import _ProactorBasePipeTransport
+    if not getattr(_ProactorBasePipeTransport, "_connection_reset_silenced", False):
+        _orig_call_connection_lost = _ProactorBasePipeTransport._call_connection_lost
+
+        def _call_connection_lost_quietly(self, exc=None):
+            try:
+                _orig_call_connection_lost(self, exc)
+            except ConnectionResetError:
+                pass
+
+        _ProactorBasePipeTransport._call_connection_lost = _call_connection_lost_quietly
+        _ProactorBasePipeTransport._connection_reset_silenced = True
 import state_db
 
 st.set_page_config(page_title="NSE Momentum Cockpit", layout="wide", page_icon="📈")
@@ -74,22 +110,37 @@ def _redirect_to_kite_login(error: str | None = None) -> None:
 # Checking it here, first, means it gets exchanged immediately regardless
 # of dashboard-session state.
 #
-# Guarded on `not config.KITE_ACCESS_TOKEN` (a plain module attribute, alive
-# for the whole server process regardless of any browser/session churn) --
-# not just clearing query params -- because over an unstable connection
-# (mobile network hopping across a Tailscale tunnel) st.query_params.clear()
-# can fail to propagate to the browser's actual address bar before the next
-# interaction fires, leaving the same already-used request_token sitting in
-# the URL. Re-exchanging it would fail (Kite tokens are single-use) and
-# bounce back to Kite's login page -- this guard means that once we
-# genuinely have a token, a stray leftover request_token in the URL is
-# simply ignored instead of retried.
+# Guarded on session_state["_kite_token_exchanged_for"] == request_token,
+# NOT on `not config.KITE_ACCESS_TOKEN` (a prior version's guard) -- that
+# earlier guard broke the very first time this server process stayed alive
+# across Kite's daily token expiry (~6 AM): config.KITE_ACCESS_TOKEN held
+# yesterday's now-expired token, still a non-empty string, so `not
+# config.KITE_ACCESS_TOKEN` was False and a genuinely fresh request_token
+# from a brand-new login got silently discarded without ever being
+# exchanged -- landing back on this app's own sign-in form with no valid
+# Kite session, looking like a broken redirect.
+#
+# Which specific token was already exchanged stays in session_state, and an
+# external OAuth redirect (leaving to Zerodha and back) tears down and
+# recreates st.session_state anyway -- so a genuinely new request_token from
+# a fresh Kite login always arrives in a fresh session_state with no
+# matching "_kite_token_exchanged_for" entry, and gets exchanged regardless
+# of whatever's cached in config.KITE_ACCESS_TOKEN.
+# What this guard still protects against: the same already-used
+# request_token lingering in the URL within the SAME session (over an
+# unstable mobile/Tailscale connection, st.query_params.clear() can fail to
+# propagate to the browser's actual address bar before the next
+# interaction fires) -- that case DOES still have the matching session_state
+# entry from the successful exchange moments earlier, so it's correctly
+# skipped instead of retried (Kite tokens are single-use; retrying would
+# fail and bounce back to Kite's login page for no reason).
 # ---------------------------------------------------------------------------
 request_token = st.query_params.get("request_token")
-if request_token and not config.KITE_ACCESS_TOKEN:
+if request_token and request_token != st.session_state.get("_kite_token_exchanged_for"):
     try:
         token = kite_client.exchange_request_token(request_token)
         config.KITE_ACCESS_TOKEN = token
+        st.session_state["_kite_token_exchanged_for"] = request_token
         # Completing Kite's own login+2FA on Zerodha's site is at least as
         # strong a proof of identity as this app's own password -- and by
         # definition, only someone who'd already passed the dashboard login
@@ -140,14 +191,6 @@ if not st.session_state.get("dashboard_authenticated", False):
         else:
             st.error("Incorrect username or password.")
     st.stop()
-
-if state_db.is_using_default_dashboard_password(config.DASHBOARD_USERNAME, config.DASHBOARD_PASSWORD):
-    st.warning(
-        "⚠️ Using the default Admin/Admin login — this app places real "
-        "orders and shows real fund balances. Change it in the Cockpit's "
-        "\"Change dashboard password\" section before using this beyond "
-        "your own machine."
-    )
 
 # ---------------------------------------------------------------------------
 # Kite connection health check -- only reached after the dashboard login
@@ -230,52 +273,91 @@ def log_equity_snapshot(value: float) -> pd.DataFrame:
     return state_db.log_equity_snapshot(value)
 
 
-def capture_initial_capital(available_cash: float) -> float | None:
-    """Auto-captures "initial capital" from Kite's own available cash the
-    first time it's non-zero -- there's no such concept in Kite's margins()
-    response itself (confirmed by inspection: it only reports today's
-    cash/collateral/utilised snapshot, nothing about deposit history), so
-    this is the one-time capture the user asked for ("if I added the fund
-    in Kite, that becomes my initial fund"). Written once; never
-    overwritten by later deposits or drawdowns. See state_db.py."""
-    return state_db.capture_initial_capital(available_cash)
+def _annualized_returns(portfolio_value: float,
+                        equity_log: pd.DataFrame) -> tuple[float | None, float | None]:
+    """Returns (current_year_xirr, overall_xirr) as fractions (0.12 = 12%),
+    or None for either if there isn't enough data yet to annualize.
+
+    Overall XIRR: the full cash_flows ledger (deposits negative, i.e. money
+    going in; withdrawals positive) plus today's portfolio value as a final,
+    hypothetical-liquidation cash flow.
+
+    Current-year XIRR mirrors backtest.py's yearly_performance() pattern
+    (the prior available snapshot's value as this year's start value, not
+    inflated by starting exactly at the first snapshot of a partial year):
+    the equity_log's last value before this year, or the earliest snapshot
+    this year if the log doesn't go back further, seeds the series alongside
+    this year's cash flows and today's value."""
+    cash_flows = state_db.get_cash_flows()
+    today = dt.date.today()
+    year_start = dt.date(today.year, 1, 1)
+
+    overall_series = [(dt.date.fromisoformat(r["date"]), -float(r["amount"]))
+                      for _, r in cash_flows.iterrows()]
+    overall_series.append((today, portfolio_value))
+    overall = indicators.xirr(sorted(overall_series))
+
+    start_date = start_value = None
+    if not equity_log.empty:
+        log = equity_log.copy()
+        log["date"] = pd.to_datetime(log["date"]).dt.date
+        before_year = log[log["date"] < year_start]
+        if not before_year.empty:
+            start_date = before_year.iloc[-1]["date"]
+            start_value = float(before_year.iloc[-1]["value"])
+        else:
+            start_date = log["date"].iloc[0]
+            start_value = float(log["value"].iloc[0])
+
+    current_year = None
+    if start_date is not None and start_date < today:
+        this_year_series = [(start_date, -start_value)]
+        for _, r in cash_flows.iterrows():
+            d = dt.date.fromisoformat(r["date"])
+            if start_date < d <= today:
+                this_year_series.append((d, -float(r["amount"])))
+        this_year_series.append((today, portfolio_value))
+        current_year = indicators.xirr(sorted(this_year_series))
+
+    return current_year, overall
 
 
 # ---------------------------------------------------------------------------
-# Page: Cockpit
+# Page: Overview
 # ---------------------------------------------------------------------------
 
 def page_cockpit():
-    st.subheader("🏠 Cockpit")
+    st.subheader("🏠 Overview")
     st.caption("Calendar-entry momentum system — everything that matters, at a glance.")
 
     merged = merged_holdings()
     holdings_value = float((merged["qty"] * merged["ltp"]).sum()) if not merged.empty else 0.0
-    total_pnl = float(merged["pnl"].sum()) if not merged.empty else 0.0
+    unrealized_pnl = float(merged["pnl"].sum()) if not merged.empty else 0.0
     portfolio_value = available_cash + holdings_value
 
     log = log_equity_snapshot(portfolio_value)
-    initial_capital = capture_initial_capital(available_cash)
+    state_db.ensure_first_cash_flow_captured(available_cash)
+    realized_pnl = state_db.get_realized_pnl()
+    total_pnl = realized_pnl + unrealized_pnl
+    current_xirr, overall_xirr = _annualized_returns(portfolio_value, log)
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Available cash", f"₹{available_cash:,.0f}")
     k2.metric("Portfolio value", f"₹{portfolio_value:,.0f}")
-    k3.metric("Total P&L (unrealized)", f"₹{total_pnl:,.0f}")
+    k3.metric("Total P&L", f"₹{total_pnl:,.0f}")
     k4.metric("Open positions", f"{len(merged)} / {config.STRATEGY['max_positions']}")
 
-    k5, k6 = st.columns(2)
-    if initial_capital:
-        overall_pnl = portfolio_value - initial_capital
-        overall_pct = overall_pnl / initial_capital * 100
-        k5.metric("Initial capital", f"₹{initial_capital:,.0f}")
-        k6.metric("Overall return", f"₹{overall_pnl:,.0f}",
-                 f"{overall_pct:+.1f}%")
-    else:
-        k5.metric("Initial capital", "—")
-        k6.metric("Overall return", "—")
-        st.caption("Initial capital captures automatically the first time "
-                  "available cash is non-zero — fund the account to start "
-                  "tracking overall return.")
+    k5, k6, k7, k8 = st.columns(4)
+    k5.metric("Realized P&L", f"₹{realized_pnl:,.0f}")
+    k6.metric("Unrealized P&L", f"₹{unrealized_pnl:,.0f}")
+    k7.metric("Annualized return (XIRR) — this year",
+             f"{current_xirr * 100:+.1f}%" if current_xirr is not None else "—")
+    k8.metric("Annualized return (XIRR) — overall",
+             f"{overall_xirr * 100:+.1f}%" if overall_xirr is not None else "—")
+    if overall_xirr is None:
+        st.caption("XIRR needs at least one logged deposit and one portfolio "
+                  "value snapshot — log a deposit on the Admin page (or fund "
+                  "the account) to start tracking annualized return.")
 
     if len(log) > 1:
         st.line_chart(log.set_index("date")["value"].rename("Portfolio value (₹)"))
@@ -284,13 +366,27 @@ def page_cockpit():
                   "the chart builds up over time as you keep using the dashboard.")
 
     with st.expander("Full funds breakdown (from Kite margins API)"):
+        def _breakdown_table(section: dict) -> pd.DataFrame:
+            rows = []
+            for k, v in section.items():
+                try:
+                    v = f"{float(v):,.2f}"
+                except (TypeError, ValueError):
+                    v = str(v)
+                rows.append({"Metric": k.replace("_", " ").title(), "Value": v})
+            return pd.DataFrame(rows)
+
         try:
             m = kite_client.get_margins()["equity"]
             fc1, fc2 = st.columns(2)
-            fc1.write("**Available**")
-            fc1.json(m["available"])
-            fc2.write("**Utilised**")
-            fc2.json(m["utilised"])
+            with fc1:
+                st.write("**Available**")
+                st.dataframe(_breakdown_table(m["available"]),
+                            width="stretch", hide_index=True)
+            with fc2:
+                st.write("**Utilised**")
+                st.dataframe(_breakdown_table(m["utilised"]),
+                            width="stretch", hide_index=True)
         except Exception as e:
             st.warning(f"Could not fetch funds breakdown: {e}")
 
@@ -316,7 +412,10 @@ def page_cockpit():
     if merged.empty:
         st.caption("No open positions or holdings.")
     else:
-        state = state_db.reconciled_positions(set(merged["symbol"]))
+        held = set(merged["symbol"])
+        stale = state_db.get_stale_open_symbols(held)
+        exit_prices = kite_client.get_ltp(stale) if stale else {}
+        state = state_db.reconciled_positions(held, exit_prices)
         merged["entry_date"] = merged["symbol"].map(
             lambda s: state.get(s, {}).get("entry_date", "—"))
         merged["days_held"] = merged["symbol"].map(
@@ -331,6 +430,153 @@ def page_cockpit():
                      {"avg_price": "{:.2f}", "ltp": "{:.2f}", "pnl": "{:,.0f}",
                       "current_stop": "{:.2f}"}, na_rep="—"),
             width="stretch", hide_index=True)
+
+# ---------------------------------------------------------------------------
+# Page: Admin
+# ---------------------------------------------------------------------------
+
+def page_admin():
+    st.subheader("⚙️ Admin")
+    st.caption("Dashboard/Kite settings, the deposit/withdrawal ledger used "
+              "for XIRR, and strategy configuration.")
+
+    if state_db.is_using_default_dashboard_password(config.DASHBOARD_USERNAME, config.DASHBOARD_PASSWORD):
+        st.warning(
+            "⚠️ Using the default Admin/Admin login — this app places real "
+            "orders and shows real fund balances. Change it in the "
+            "\"Change dashboard password\" section below before using this "
+            "beyond your own machine."
+        )
+
+    st.subheader("💰 Deposits / withdrawals")
+    st.caption("Kite's API has no visibility into bank transfers, so each "
+              "deposit/withdrawal is logged here manually — this ledger is "
+              "what makes the Overview page's XIRR figures accurate once "
+              "you start adding money over time, instead of just a single "
+              "starting-capital snapshot.")
+    with st.form("cash_flow_form"):
+        cf_date = st.date_input("Date", value=dt.date.today())
+        cf_amount = st.number_input(
+            "Amount (₹) — positive for a deposit, negative for a withdrawal",
+            step=1000.0, format="%.2f")
+        cf_note = st.text_input("Note (optional)")
+        cf_submitted = st.form_submit_button("Log cash flow")
+    if cf_submitted:
+        if cf_amount == 0:
+            st.error("Amount can't be zero.")
+        else:
+            state_db.record_cash_flow(cf_date.isoformat(), float(cf_amount), cf_note)
+            st.success("Logged.")
+            st.rerun()
+
+    ledger = state_db.get_cash_flows()
+    if ledger.empty:
+        st.caption("No cash flows logged yet.")
+    else:
+        st.dataframe(
+            ledger.sort_values("date", ascending=False).style.format({"amount": "{:,.0f}"}),
+            width="stretch", hide_index=True)
+
+    st.divider()
+    st.subheader("🎯 Strategy configuration")
+    st.caption("Stored in state.db (`strategy_config` table) — takes effect "
+              "immediately for this dashboard process (no restart needed), "
+              "and for the next scheduled/manual rebalance scan. See the "
+              "README for the research behind each default.")
+    cfg = config.STRATEGY
+    with st.form("strategy_config_form"):
+        st.markdown("**Portfolio & risk**")
+        c1, c2, c3 = st.columns(3)
+        max_positions = c1.number_input(
+            "Portfolio size (max open positions)", min_value=1, max_value=50,
+            value=int(cfg["max_positions"]), step=1)
+        risk_per_trade_pct = c2.number_input(
+            "Risk per trade (% of capital)", min_value=0.1, max_value=10.0,
+            value=float(cfg["risk_per_trade_pct"]), step=0.1)
+        atr_stop_multiple = c3.number_input(
+            "Initial stop (× ATR)", min_value=0.5, max_value=10.0,
+            value=float(cfg["atr_stop_multiple"]), step=0.1)
+
+        st.markdown("**Trailing stop**")
+        c4, c5 = st.columns(2)
+        trailing_stop_enabled = c4.checkbox(
+            "Enabled", value=bool(cfg["trailing_stop_enabled"]))
+        trailing_atr_multiple = c5.number_input(
+            "Trailing stop (× ATR)", min_value=0.5, max_value=10.0,
+            value=float(cfg["trailing_atr_multiple"]), step=0.1)
+
+        st.markdown("**Momentum & trend**")
+        c6, c7, c8 = st.columns(3)
+        mom_lookback_days_short = c6.number_input(
+            "Momentum lookback — short (days)", min_value=5, max_value=252,
+            value=int(cfg["mom_lookback_days_short"]), step=1)
+        mom_lookback_days_long = c7.number_input(
+            "Momentum lookback — long (days)", min_value=5, max_value=504,
+            value=int(cfg["mom_lookback_days_long"]), step=1)
+        skip_recent_days = c8.number_input(
+            "Skip most recent (days)", min_value=0, max_value=30,
+            value=int(cfg["skip_recent_days"]), step=1)
+        c9, c10, c11 = st.columns(3)
+        near_high_threshold = c9.number_input(
+            "52-week-high proximity (%)", min_value=50.0, max_value=100.0,
+            value=float(cfg["near_high_threshold"]) * 100, step=1.0,
+            help="Price must be at least this % of its 52-week high to qualify.")
+        ema_fast = c10.number_input(
+            "EMA (fast)", min_value=5, max_value=100,
+            value=int(cfg["ema_fast"]), step=1)
+        ema_slow = c11.number_input(
+            "EMA (slow)", min_value=50, max_value=400,
+            value=int(cfg["ema_slow"]), step=1)
+
+        st.markdown("**RSI & volume**")
+        c12, c13, c14 = st.columns(3)
+        rsi_min = c12.number_input(
+            "RSI min", min_value=0, max_value=100, value=int(cfg["rsi_min"]), step=1)
+        rsi_max = c13.number_input(
+            "RSI max", min_value=0, max_value=100, value=int(cfg["rsi_max"]), step=1)
+        volume_expansion_min = c14.number_input(
+            "Min volume expansion (20d/60d)", min_value=0.0, max_value=5.0,
+            value=float(cfg["volume_expansion_min"]), step=0.1)
+
+        st.markdown("**Fundamental gate & sector bonus (opt-in features)**")
+        c15, c16, c17 = st.columns(3)
+        min_fundamental_score = c15.number_input(
+            "Min fundamental score (0-100)", min_value=0.0, max_value=100.0,
+            value=float(cfg["min_fundamental_score"]), step=1.0)
+        sector_bonus_weight = c16.number_input(
+            "Sector bonus weight", min_value=0.0, max_value=1.0,
+            value=float(cfg["sector_bonus_weight"]), step=0.05,
+            help="0 = off. Backtested to underperform as of this default; "
+                 "see README's Sector relative-strength section.")
+        history_days = c17.number_input(
+            "Candle history fetched (days)", min_value=300, max_value=3000,
+            value=int(cfg["history_days"]), step=100)
+
+        strategy_submitted = st.form_submit_button("Save strategy settings", type="primary")
+
+    if strategy_submitted:
+        updates = {
+            "max_positions": int(max_positions),
+            "risk_per_trade_pct": float(risk_per_trade_pct),
+            "atr_stop_multiple": float(atr_stop_multiple),
+            "trailing_stop_enabled": bool(trailing_stop_enabled),
+            "trailing_atr_multiple": float(trailing_atr_multiple),
+            "mom_lookback_days_short": int(mom_lookback_days_short),
+            "mom_lookback_days_long": int(mom_lookback_days_long),
+            "skip_recent_days": int(skip_recent_days),
+            "near_high_threshold": float(near_high_threshold) / 100,
+            "ema_fast": int(ema_fast),
+            "ema_slow": int(ema_slow),
+            "rsi_min": int(rsi_min),
+            "rsi_max": int(rsi_max),
+            "volume_expansion_min": float(volume_expansion_min),
+            "min_fundamental_score": float(min_fundamental_score),
+            "sector_bonus_weight": float(sector_bonus_weight),
+            "history_days": int(history_days),
+        }
+        state_db.update_strategy_config(updates)
+        config.STRATEGY.update(updates)  # live for this process -- no restart needed
+        st.success("Strategy settings saved — in effect immediately.")
 
     st.divider()
     with st.expander("🔑 Change dashboard password"):
@@ -676,15 +922,24 @@ def page_live_rebalance():
 
 def page_positions_trade():
     st.subheader("💼 Positions, Holdings & Trade")
+    cfg = config.STRATEGY
 
-    left, right = st.columns(2)
-    with left:
+    refresh_choice = st.selectbox(
+        "Auto-refresh positions/holdings from Kite", ["Off", "10s", "30s", "1m", "5m"],
+        index=2, key="pt_refresh_interval",
+        help="Only the positions/holdings tables below refresh on this timer -- "
+             "the rest of this page (square-off, orders, trade forms) isn't "
+             "affected, so nothing you're typing gets reset by it.")
+    run_every = None if refresh_choice == "Off" else refresh_choice
+
+    @st.fragment(run_every=run_every)
+    def _live_positions_holdings():
         st.markdown("**Open positions**")
-        pos = kite_client.get_positions()
-        if pos.empty or (pos.get("quantity") == 0).all():
+        live_pos = kite_client.get_positions()
+        if live_pos.empty or (live_pos.get("quantity") == 0).all():
             st.caption("No open positions.")
         else:
-            live = pos[pos["quantity"] != 0]
+            live = live_pos[live_pos["quantity"] != 0]
             st.dataframe(
                 pnl_style(
                     live[["tradingsymbol", "quantity", "average_price",
@@ -694,23 +949,34 @@ def page_positions_trade():
                 width="stretch", hide_index=True)
             st.metric("Total position P&L", f"₹{live['pnl'].sum():,.0f}")
 
-    with right:
         st.markdown("**Holdings (CNC)**")
-        hold = kite_client.get_holdings()
-        if hold.empty:
+        live_hold = kite_client.get_holdings()
+        if live_hold.empty:
             st.caption("No holdings.")
         else:
-            hold = hold.copy()
-            hold["pnl_pct"] = ((hold["last_price"] / hold["average_price"]) - 1) * 100
+            live_hold = live_hold.copy()
+            live_hold["pnl_pct"] = ((live_hold["last_price"] / live_hold["average_price"]) - 1) * 100
             st.dataframe(
                 pnl_style(
-                    hold[["tradingsymbol", "quantity", "average_price",
-                         "last_price", "pnl", "pnl_pct"]],
+                    live_hold[["tradingsymbol", "quantity", "average_price",
+                              "last_price", "pnl", "pnl_pct"]],
                     ["pnl", "pnl_pct"],
                     {"average_price": "{:.2f}", "last_price": "{:.2f}",
                      "pnl": "{:,.0f}", "pnl_pct": "{:.2f}"}),
                 width="stretch", hide_index=True)
-            st.metric("Total holdings P&L", f"₹{hold['pnl'].sum():,.0f}")
+            st.metric("Total holdings P&L", f"₹{live_hold['pnl'].sum():,.0f}")
+
+        st.caption(f"Last refreshed {dt.datetime.now():%H:%M:%S}"
+                  + (f" · auto-refreshing every {refresh_choice}" if run_every else ""))
+
+    _live_positions_holdings()
+
+    # Separate fetch for the sections below (square-off, stop-loss, orders) --
+    # these don't live inside the auto-refreshing fragment above, since their
+    # widgets/forms shouldn't get reset every refresh tick; a second cheap
+    # positions/holdings call here keeps them independent of that cadence.
+    pos = kite_client.get_positions()
+    hold = kite_client.get_holdings()
 
     st.divider()
     st.subheader("Square off a position")
@@ -735,6 +1001,70 @@ def page_positions_trade():
         st.caption("Nothing to square off.")
 
     st.divider()
+    st.subheader("🛑 Place stop-loss for an existing position")
+    st.caption("For positions bought outside this app's own buy flow (e.g. "
+              "placed directly on Kite) -- computes the same ATR-based stop "
+              "this app always uses, places a GTT, and backfills this app's "
+              "own bookkeeping (entry price/qty read from Kite's real "
+              "holdings) so future trailing-stop updates pick it up too.")
+
+    try:
+        active_gtts = kite_client.get_active_gtts()
+        gtt_symbols = set()
+        if not active_gtts.empty and "condition" in active_gtts.columns:
+            for cond in active_gtts["condition"]:
+                gsym = cond.get("tradingsymbol") if isinstance(cond, dict) else None
+                if gsym:
+                    gtt_symbols.add(gsym)
+    except Exception as e:
+        st.warning(f"Could not check existing GTTs: {e}")
+        gtt_symbols = set()
+
+    unprotected_syms = [s for s in all_syms if s not in gtt_symbols]
+
+    if not unprotected_syms:
+        st.caption("Every current position/holding already has an active GTT.")
+    else:
+        sl_symbol = st.selectbox("Symbol", unprotected_syms, key="manual_sl_symbol")
+
+        sl_qty, sl_avg_price = 0, 0.0
+        if not pos.empty and sl_symbol in pos["tradingsymbol"].values:
+            r = pos[pos["tradingsymbol"] == sl_symbol].iloc[0]
+            sl_qty, sl_avg_price = int(r["quantity"]), float(r["average_price"])
+        elif not hold.empty and sl_symbol in hold["tradingsymbol"].values:
+            r = hold[hold["tradingsymbol"] == sl_symbol].iloc[0]
+            sl_qty, sl_avg_price = int(r["quantity"]), float(r["average_price"])
+
+        try:
+            sl_ltp = kite_client.get_ltp([sl_symbol])[sl_symbol]
+            sl_df = kite_client.fetch_daily_candles(sl_symbol, days=120)
+            sl_atr = float(indicators.atr(sl_df, cfg["atr_period"]).iloc[-1])
+            sl_stop = sl_ltp - cfg["atr_stop_multiple"] * sl_atr
+        except Exception as e:
+            st.warning(f"Couldn't fetch live data: {e}")
+            sl_ltp, sl_stop = 0.0, 0.0
+
+        slc1, slc2, slc3 = st.columns(3)
+        slc1.metric("Quantity", sl_qty)
+        slc2.metric("LTP", f"₹{sl_ltp:,.2f}")
+        slc3.metric("ATR stop", f"₹{sl_stop:,.2f}",
+                   help=f"{cfg['atr_stop_multiple']}× ATR({cfg['atr_period']}) below LTP")
+
+        sl_confirm = st.checkbox("I confirm this GTT stop-loss", key="manual_sl_confirm")
+        if st.button("Place stop-loss", type="primary",
+                    disabled=not sl_confirm or sl_qty == 0 or sl_stop <= 0,
+                    key="manual_sl_place"):
+            try:
+                gtt_id = kite_client.place_gtt_stoploss(sl_symbol, sl_qty, sl_stop, sl_ltp)
+            except Exception as e:
+                st.error(f"GTT placement failed: {e}")
+            else:
+                state_db.upsert_manual_position(sl_symbol, sl_avg_price, sl_qty,
+                                                sl_stop, gtt_id)
+                st.success(f"GTT stop-loss placed: trigger {gtt_id} at ₹{sl_stop:,.1f}")
+                st.rerun()
+
+    st.divider()
     st.subheader("Today's orders")
     orders = kite_client.get_orders()
     if not orders.empty:
@@ -749,7 +1079,6 @@ def page_positions_trade():
     st.subheader("Place a manual order")
     st.caption("Sizing uses your ATR stop so every position risks the same % of capital.")
 
-    cfg = config.STRATEGY
     col1, col2, col3 = st.columns(3)
     with col1:
         symbol = st.selectbox("Symbol", config.UNIVERSE, key="trade_symbol")
@@ -1381,12 +1710,13 @@ def page_fundamentals():
 # Navigation
 # ---------------------------------------------------------------------------
 
-page_cockpit_p = st.Page(page_cockpit, title="Cockpit", icon="🏠", default=True)
+page_cockpit_p = st.Page(page_cockpit, title="Overview", icon="🏠", default=True)
 page_screener_p = st.Page(page_screener, title="Screener", icon="🔍")
 page_live_rebalance_p = st.Page(page_live_rebalance, title="Live Rebalance", icon="📡")
 page_positions_trade_p = st.Page(page_positions_trade, title="Positions & Trade", icon="💼")
 page_backtest_p = st.Page(page_backtest, title="Backtest", icon="🧪")
 page_fundamentals_p = st.Page(page_fundamentals, title="Fundamentals", icon="📊")
+page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
 
 with st.sidebar:
     st.metric("Available cash", f"₹{available_cash:,.0f}")
@@ -1394,5 +1724,6 @@ with st.sidebar:
               f"{dt.date.today():%d %b %Y}")
 
 nav = st.navigation([page_cockpit_p, page_screener_p, page_live_rebalance_p,
-                    page_positions_trade_p, page_backtest_p, page_fundamentals_p])
+                    page_positions_trade_p, page_backtest_p, page_fundamentals_p,
+                    page_admin_p])
 nav.run()

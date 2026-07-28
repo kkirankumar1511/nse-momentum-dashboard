@@ -495,3 +495,48 @@ Zerodha's Connect API itself, not something this scheduled task can work
 around. If the token has expired by 4 PM, the scan fails gracefully and
 logs the failure (see `live_rebalance.py`'s `main()`) rather than crashing
 silently — check the log if a day's run seems to be missing.
+
+## Running everything as a Windows service (recommended over a manual terminal)
+
+The whole app — dashboard + daily rebalance scan — can run as one Windows
+service instead of a `streamlit run dashboard.py` terminal you have to keep
+open: it starts automatically on machine reboot, and is controlled with one
+command from anywhere (`trading-app ...`, no venv activation needed).
+
+First, install the project itself (once):
+
+```powershell
+pip install -e .
+```
+
+This registers the `trading-app` command (via `trading_service.py`) and
+pulls in `pywin32`. Everything below needs an **Administrator** command
+prompt or PowerShell window (standard for any Windows service):
+
+```powershell
+trading-app install     # registers the service, sets auto-start on boot
+trading-app start       # or: net start NSEMomentumTradingApp
+trading-app status      # service state + is the dashboard port listening + last scan time
+trading-app stop        # or: net stop NSEMomentumTradingApp
+trading-app restart
+trading-app remove      # unregisters the service entirely
+```
+
+Internally the service:
+- launches `streamlit run dashboard.py` as a child process (auto-restarted
+  if it ever crashes), and
+- runs the exact same daily rebalance scan (`python live_rebalance.py`) at
+  4:00 PM IST on weekdays, logged to `cache/service_log.txt` /
+  `cache/service_rebalance_stdout.txt` / `cache/service_dashboard_stdout.txt`
+  since a service has no visible console to watch.
+
+**This duplicates the standalone `NSE-Momentum-DailyRebalanceScan` Task
+Scheduler entry above** — once the service is installed and running, remove
+that task so the scan doesn't run twice a day:
+
+```powershell
+Unregister-ScheduledTask -TaskName "NSE-Momentum-DailyRebalanceScan" -Confirm:$false
+```
+
+To opt out of auto-start-on-boot, pass `--startup` *before* the verb (pywin32's
+argument parser requires options first): `trading-app --startup manual install`.

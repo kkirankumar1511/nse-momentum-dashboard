@@ -132,13 +132,32 @@ def load_candles_cached(symbols: list[str], days: int,
         out[sym] = sym_df
     bpath = os.path.join(CACHE_DIR, "_NIFTY.csv")
     bench = None
-    if os.path.exists(bpath) and _stamp(bpath) == today:
+    cached_bench = None
+    if os.path.exists(bpath):
         cached_bench = _naive(pd.read_csv(bpath, index_col=0, parse_dates=True))
-        if not cached_bench.empty and cached_bench.index.min() <= cutoff:
+        is_fresh = _stamp(bpath) == today
+        covers_range = not cached_bench.empty and cached_bench.index.min() <= cutoff
+        if is_fresh and covers_range:
             bench = cached_bench
     if bench is None:
-        bench = _naive(kite_client.benchmark_candles(days))
-        bench.to_csv(bpath)
+        # Same retry + stale-cache-fallback resilience the per-symbol loop
+        # above already has -- this was previously a bare call with no
+        # fallback, so a single flaky/expired-token moment killed the whole
+        # multi-hour data load even though every symbol's own fetch already
+        # tolerated exactly that.
+        import time
+        for attempt in range(3):
+            try:
+                bench = _naive(kite_client.benchmark_candles(days))
+                bench.to_csv(bpath)
+                break
+            except Exception as e:
+                if attempt == 2:
+                    print(f"[warn] NIFTY benchmark: fetch failed after 3 attempts "
+                         f"({e}); using stale cache if any, else empty")
+                    bench = cached_bench if cached_bench is not None else pd.DataFrame()
+                else:
+                    time.sleep(2)
     bench = bench[bench.index >= cutoff]
     if end_ts is not None and not bench.empty:
         bench = bench[bench.index <= end_ts]
@@ -350,7 +369,12 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         equity_now = cash + sum(
             p.qty * float(candles[s].loc[date, "close"])
             for s, p in positions.items() if date in candles[s].index)
-        qty = screener.position_size(equity_now, price, stop, cfg)
+        if cfg.get("capital_equal_weight_sizing", False):
+            open_slots_remaining = cfg["max_positions"] - len(positions)
+            qty = screener.capital_position_size(
+                equity_now, cash, price, open_slots_remaining, cfg["max_positions"])
+        else:
+            qty = screener.position_size(equity_now, price, stop, cfg)
         qty = min(qty, int(cash / (price * (1 + cost))))
         if qty <= 0:
             return

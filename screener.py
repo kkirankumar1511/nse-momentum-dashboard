@@ -114,10 +114,39 @@ def score(t: pd.DataFrame, cfg: dict = config.STRATEGY) -> pd.DataFrame:
 def position_size(capital: float, price: float, stop: float,
                   cfg: dict = config.STRATEGY) -> int:
     """Volatility-based sizing: risk `risk_per_trade_pct` of capital between
-    entry and ATR stop."""
+    entry and ATR stop. Used by backtest.py (kept as-is for continuity with
+    the documented sweeps in the README -- changing it would change every
+    historical backtest number) and the Positions & Trade page's manual
+    order-entry suggestion. live_rebalance.py's automated proposal uses
+    capital_position_size() below instead -- see there for why."""
     risk_amount = capital * cfg["risk_per_trade_pct"] / 100
     per_share_risk = max(price - stop, 0.01)
     return max(int(risk_amount / per_share_risk), 0)
+
+
+def capital_position_size(total_equity: float, remaining_cash: float, price: float,
+                          open_slots_remaining: int, max_positions: int) -> int:
+    """Equal-weight capital allocation: each of up to max_positions slots
+    gets roughly total_equity / max_positions, so per-trade capital scales
+    with account size and your configured position count directly -- unlike
+    position_size() above, which sizes off a fixed risk-% and can come out
+    arbitrarily small on a modest account (e.g. 20k capital, 0.5% risk, a
+    ATR stop far from entry -> 1-2 share positions that don't grow with your
+    capital or max_positions setting).
+
+    Capped at min(total_equity / max_positions, remaining_cash /
+    open_slots_remaining) -- the first term is the per-trade concentration
+    limit (so a smaller max_positions or bigger account raises the per-trade
+    budget, and capital already tied up in existing holdings is excluded via
+    total_equity vs. remaining_cash); the second divides what's actually
+    left in cash across the slots still to be filled THIS run, so filling
+    several slots in one rebalance doesn't let an early candidate claim all
+    of it."""
+    if open_slots_remaining <= 0 or price <= 0:
+        return 0
+    max_capital_per_position = total_equity / max_positions
+    per_slot_budget = min(max_capital_per_position, remaining_cash / open_slots_remaining)
+    return max(int(per_slot_budget / price), 0)
 
 
 def run_screen(with_fundamentals: bool = True,
