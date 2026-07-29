@@ -603,11 +603,13 @@ def page_admin():
         fundamental_gate_enabled = st.checkbox(
             "Filter candidates on fundamental score (Live Rebalance + Screener)",
             value=bool(cfg["fundamental_gate_enabled"]),
-            help="Off by default: the fundamental score still shows for every "
-                 "candidate wherever fundamentals data is fetched, for your own "
-                 "reference, but doesn't remove anything from 'all gates' unless "
-                 "this is on — keeps live trading matching the technical-only "
-                 "backtest that actually validated this strategy.")
+            help="On by default (5-year A/B, equal-weight sizing, "
+                 "max_positions=10): trades ~2pp CAGR for a real ~4pp max "
+                 "drawdown reduction (-28.65%->-24.47%) — see config.py's "
+                 "comment for the full year-by-year breakdown. The "
+                 "fundamental score still shows for every candidate "
+                 "wherever fundamentals data is fetched regardless of this "
+                 "toggle, for your own reference.")
         c15, c16, c17 = st.columns(3)
         min_fundamental_score = c15.number_input(
             "Min fundamental score (0-100)", min_value=0.0, max_value=100.0,

@@ -136,13 +136,17 @@ _STRATEGY_DEFAULTS = {
     # fundamentals_agent.fno_value_scan(). 50 is a rough "average-or-better
     # across profitability, health, and growth" bar — tune to taste.
     "min_fundamental_score": 50.0,
-    # Off by default: the fundamental score is always shown (Screener, Live
-    # Rebalance) whenever fundamentals data is available, for your own
-    # reference, but doesn't filter live/backtest candidates unless this is
-    # on -- keeps live trading matching the technical-only backtest that
-    # actually validated this strategy, rather than silently gating on a
-    # dimension never tested for. See screener.apply_gates()'s docstring.
-    "fundamental_gate_enabled": False,
+    # Turned on after a 5-year A/B backtest (equal-weight capital sizing --
+    # matches live_rebalance.py's actual sizing -- max_positions=10): a real
+    # trade-off, not a clean win -- CAGR 44.66%->42.72%, Sharpe 1.62->1.60,
+    # profit factor 2.15->2.07, but max drawdown improves -28.65%->-24.47%.
+    # Wins 3 of 6 calendar years (2021/2022/2025, the calmer ones), loses in
+    # the two blowout years 2023/2024 and 2026 YTD. Kept on for the
+    # drawdown reduction -- re-run the A/B yourself before flipping back.
+    # The fundamental score is always shown (Screener, Live Rebalance)
+    # whenever fundamentals data is available, regardless of this flag --
+    # see screener.apply_gates()'s docstring.
+    "fundamental_gate_enabled": True,
 
     # Sector relative-strength bonus (see sector_universe.py): tilts ranking
     # toward stocks in currently-outperforming sectors. 0 = off, matching
