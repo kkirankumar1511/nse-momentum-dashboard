@@ -1,0 +1,15 @@
+[Unit]
+Description=NSE Momentum Dashboard (Streamlit)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nseapp
+WorkingDirectory=/opt/nse-momentum-dashboard
+ExecStart=/opt/nse-momentum-dashboard/.venv/bin/streamlit run dashboard.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

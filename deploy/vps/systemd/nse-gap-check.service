@@ -1,0 +1,8 @@
+[Unit]
+Description=NSE morning gap-down safety check (places a real market sell -- see live_rebalance.check_gap_down_stops)
+
+[Service]
+Type=oneshot
+User=nseapp
+WorkingDirectory=/opt/nse-momentum-dashboard
+ExecStart=/opt/nse-momentum-dashboard/.venv/bin/python live_rebalance.py --gap-check

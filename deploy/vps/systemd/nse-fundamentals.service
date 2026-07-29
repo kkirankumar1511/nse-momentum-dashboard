@@ -1,0 +1,8 @@
+[Unit]
+Description=NSE weekly fundamentals refresh
+
+[Service]
+Type=oneshot
+User=nseapp
+WorkingDirectory=/opt/nse-momentum-dashboard
+ExecStart=/opt/nse-momentum-dashboard/.venv/bin/python fundamentals_agent.py

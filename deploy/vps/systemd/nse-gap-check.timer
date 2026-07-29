@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the gap-down safety check daily at 09:16 (weekdays, shortly after NSE's 09:15 open)
+
+[Timer]
+OnCalendar=Mon..Fri 09:16
+Persistent=false
+Unit=nse-gap-check.service
+
+[Install]
+WantedBy=timers.target

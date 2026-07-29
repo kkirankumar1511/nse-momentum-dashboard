@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the NSE rebalance scan daily at 16:00 (weekdays)
+
+[Timer]
+OnCalendar=Mon..Fri 16:00
+Persistent=false
+Unit=nse-rebalance.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,6 @@
+# These run on Linux (the VPS) regardless of what OS commits them -- force
+# LF line endings so a CRLF-converting Windows checkout (core.autocrlf=true)
+# never breaks a shebang line or a systemd unit file's parsing on the VPS.
+*.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf

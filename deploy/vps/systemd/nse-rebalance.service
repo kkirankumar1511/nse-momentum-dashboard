@@ -1,0 +1,8 @@
+[Unit]
+Description=NSE daily rebalance scan (proposal only -- never places an order)
+
+[Service]
+Type=oneshot
+User=nseapp
+WorkingDirectory=/opt/nse-momentum-dashboard
+ExecStart=/opt/nse-momentum-dashboard/.venv/bin/python live_rebalance.py
