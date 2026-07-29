@@ -29,7 +29,7 @@ BACKUP_DIR="$APP_DIR/backups"
 # Either paste the "age1..." public key string directly here, or point at a
 # file containing it (one recipient per line) via AGE_RECIPIENT_FILE --
 # only ONE of the two is needed.
-AGE_RECIPIENT=""
+AGE_RECIPIENT="age1cgffllrwxhep70zrsld2guf5f4jpmkw6sehz8756d5nlwfzl0qrsu57qnn"
 AGE_RECIPIENT_FILE="$BACKUP_DIR/age_recipient.txt"
 RETENTION_DAYS=14
 LOG_FILE="$BACKUP_DIR/backup.log"

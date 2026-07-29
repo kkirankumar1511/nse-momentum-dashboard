@@ -23,10 +23,10 @@
 #      backup_db.sh cron job (e.g. 30-60 min later):
 #        schtasks /create /tn "NSE Backup Pull" /tr "powershell.exe -File \"E:\trading-workspace\nse-momentum-dashboard\deploy\backup\pull_backup.ps1\"" /sc daily /st 00:30
 
-$VpsHost = "<vps-tailscale-ip-or-hostname>"
-$VpsUser = "<ssh-username>"
+$VpsHost = "100.117.150.114"
+$VpsUser = "root"
 $RemoteBackupDir = "/opt/nse-momentum-dashboard/backups"
-$LocalBackupDir = "E:\trading-backups\nse-momentum-dashboard"
+$LocalBackupDir = "D:\trading-db-backup"
 $RetentionDays = 60
 
 New-Item -ItemType Directory -Force -Path $LocalBackupDir | Out-Null
