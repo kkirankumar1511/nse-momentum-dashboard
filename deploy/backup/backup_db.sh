@@ -9,7 +9,7 @@
 # see pull_backup.ps1) can. Old encrypted backups are rotated out locally;
 # the home PC pulls them down daily and keeps its own longer retention.
 #
-# Setup (once, after the VPS is active):
+# Setup (done 2026-07-29 -- keeping this for reference/re-setup on another box):
 #   sudo apt install age sqlite3
 #   age-keygen -o /tmp/key.txt        # generates a keypair
 #   grep 'public key' /tmp/key.txt    # copy the "age1..." line into
@@ -18,8 +18,11 @@
 #   scp /tmp/key.txt <home-pc>:...    # move the PRIVATE key off this VPS
 #   rm /tmp/key.txt                   # then delete it here -- this VPS
 #                                     # should never retain the private key
-#   crontab -e
-#     30 23 * * * /opt/nse-momentum-dashboard/deploy/backup/backup_db.sh >> /opt/nse-momentum-dashboard/backups/cron.log 2>&1
+#   crontab -u nseapp -e
+#     45 16 * * * /opt/nse-momentum-dashboard/deploy/backup/backup_db.sh >> /opt/nse-momentum-dashboard/backups/cron.log 2>&1
+# 16:45 IST -- comfortably after the 16:00 rebalance scan finishes, before
+# the Windows side's 17:00 pull (deploy/backup/pull_backup.ps1), timed to
+# the user's laptop actually being on then rather than overnight.
 
 set -euo pipefail
 
