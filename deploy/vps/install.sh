@@ -36,10 +36,22 @@ if ! id -u "$APP_USER" >/dev/null 2>&1; then
 fi
 
 echo "== Cloning repository =="
-if [ ! -d "$APP_DIR" ]; then
-    git clone -b "$BRANCH" "$REPO_URL" "$APP_DIR"
+# ALL git operations run as $APP_USER, never root -- running git as root
+# against a directory owned by a different user trips Git's "dubious
+# ownership" safety check (a real CVE-2022-24765 mitigation) on every
+# re-run after the first, since the chown below hands the directory to
+# $APP_USER. Pre-create+chown the (possibly not-yet-existing) directory
+# first so a non-root user can clone into it at all -- /opt itself isn't
+# writable by a non-root user.
+mkdir -p "$APP_DIR"
+chown "$APP_USER:$APP_USER" "$APP_DIR"
+git config --global --add safe.directory "$APP_DIR"  # belt-and-suspenders for any manual root git use later
+if [ -d "$APP_DIR/.git" ]; then
+    sudo -u "$APP_USER" git -C "$APP_DIR" fetch
+    sudo -u "$APP_USER" git -C "$APP_DIR" checkout "$BRANCH"
+    sudo -u "$APP_USER" git -C "$APP_DIR" pull
 else
-    (cd "$APP_DIR" && git fetch && git checkout "$BRANCH" && git pull)
+    sudo -u "$APP_USER" git clone -b "$BRANCH" "$REPO_URL" "$APP_DIR"
 fi
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
