@@ -13,6 +13,8 @@ contain: xbrl_parser.value_score / bank_score / nbfc_score / etc.
 
 from __future__ import annotations
 
+import datetime as dt
+import os
 import time
 
 import pandas as pd
@@ -20,6 +22,8 @@ import pandas as pd
 import config
 import nse_api
 import xbrl_parser
+
+VALUE_SCORE_CACHE = os.path.join("cache", "fno_value_scores.pkl")
 
 
 def fno_value_scan(symbols: list[str] | None = None, n_years: int = 3,
@@ -193,3 +197,25 @@ def flatten_for_export(df: pd.DataFrame) -> pd.DataFrame:
         out["missing_pillars"] = out["missing_pillars"].apply(
             lambda v: ", ".join(v) if isinstance(v, list) else v)
     return out
+
+
+def main():
+    """Headless weekly refresh -- e.g. from trading_service.py's scheduler.
+    Rescans the full F&O universe and overwrites cache/fno_value_scores.pkl,
+    the same cache the dashboard's Fundamentals page and Screener/Live
+    Rebalance's fundamental-score display read from. Fundamentals filings
+    change quarterly at most, so a weekly refresh is already generous --
+    this just keeps the cache from going stale for months at a time between
+    manual Fundamentals-page runs."""
+    print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Starting weekly fundamentals scan "
+         f"({len(config.UNIVERSE)} symbols)...")
+    result = fno_value_scan(config.UNIVERSE)
+    os.makedirs("cache", exist_ok=True)
+    result.to_pickle(VALUE_SCORE_CACHE)
+    scored = result["total_score"].notna().sum() if "total_score" in result.columns else 0
+    print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Done -- {scored}/{len(result)} "
+         f"scored, saved to {VALUE_SCORE_CACHE}")
+
+
+if __name__ == "__main__":
+    main()

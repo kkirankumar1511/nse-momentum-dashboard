@@ -63,6 +63,17 @@ def apply_gates(tech: pd.DataFrame,
     since-discarded experimental beta gate first exercised this) --
     score()'s weights were never affected, since score() already took cfg
     correctly.
+
+    cfg["fundamental_gate_enabled"] (False by default) decouples SHOWING the
+    fundamental score from FILTERING on it -- whenever fundamentals data is
+    given, fundamental_score/fundamental_rubric are always attached (for
+    display/manual reference, e.g. in the Screener and Live Rebalance
+    tables), but they only affect quality_ok/all_gates when this flag is on.
+    Live Rebalance always fetches fundamentals (so the score is visible
+    there for your own confirmation) but this defaults to off so it doesn't
+    silently filter live candidates on a dimension the backtest that
+    actually validated this strategy never gated on -- flip it on in Admin
+    if you want live trading to filter on fundamentals too.
     """
     t = tech.copy()
 
@@ -70,17 +81,22 @@ def apply_gates(tech: pd.DataFrame,
     t["near_high_ok"] = t["pct_52w_high"] >= cfg["near_high_threshold"]
     t["rsi_ok"] = t["rsi"].between(cfg["rsi_min"], cfg["rsi_max"])
 
+    gate_enabled = cfg.get("fundamental_gate_enabled", False)
     if fundamentals is not None and not fundamentals.empty:
         fund = fundamentals.reindex(t.index)
         t["fundamental_score"] = fund["total_score"]
         t["fundamental_rubric"] = fund.get("rubric")
         min_score = cfg["min_fundamental_score"]
-        t["quality_ok"] = (t["fundamental_score"].isna()
-                           | (t["fundamental_score"] >= min_score))
-        t["quality_fails"] = t.apply(
-            lambda r: "" if r["quality_ok"] else
-            f"fundamental score {r['fundamental_score']:.0f} < {min_score:.0f}",
-            axis=1)
+        if gate_enabled:
+            t["quality_ok"] = (t["fundamental_score"].isna()
+                              | (t["fundamental_score"] >= min_score))
+            t["quality_fails"] = t.apply(
+                lambda r: "" if r["quality_ok"] else
+                f"fundamental score {r['fundamental_score']:.0f} < {min_score:.0f}",
+                axis=1)
+        else:
+            t["quality_ok"] = True
+            t["quality_fails"] = ""
     else:
         t["quality_ok"] = True
         t["quality_fails"] = ""

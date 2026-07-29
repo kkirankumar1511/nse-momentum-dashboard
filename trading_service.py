@@ -1,8 +1,9 @@
 """
 Windows service wrapper bundling the whole NSE momentum trading app -- the
-Streamlit dashboard (always-on, auto-restarted if it crashes) and the daily
-rebalance scan (run internally on a schedule) -- behind one service,
-controlled with a single command:
+Streamlit dashboard (always-on, auto-restarted if it crashes) and three
+scheduled jobs (daily rebalance scan, daily morning gap-down safety check,
+weekly fundamentals refresh) -- behind one service, controlled with a
+single command:
 
     trading-app install     # registers the service, sets auto-start on boot
     trading-app start       # or: net start NSEMomentumTradingApp
@@ -53,6 +54,8 @@ CACHE_DIR = os.path.join(PROJECT_DIR, "cache")
 LOG_PATH = os.path.join(CACHE_DIR, "service_log.txt")
 
 REBALANCE_HOUR, REBALANCE_MINUTE = 16, 0  # matches the Task Scheduler entry this replaces
+GAP_CHECK_HOUR, GAP_CHECK_MINUTE = 9, 16  # shortly after NSE's 09:15 open
+FUNDAMENTALS_WEEKDAY, FUNDAMENTALS_HOUR, FUNDAMENTALS_MINUTE = 0, 8, 0  # Monday 08:00 (weekday() Mon=0)
 DASHBOARD_PORT = 8501
 
 
@@ -70,23 +73,28 @@ def _log(msg: str) -> None:
 class TradingAppService(win32serviceutil.ServiceFramework):
     _svc_name_ = "NSEMomentumTradingApp"
     _svc_display_name_ = "NSE Momentum Trading App"
-    _svc_description_ = ("Runs the NSE momentum Streamlit dashboard and the "
-                         "daily 4 PM rebalance scan on a schedule.")
+    _svc_description_ = ("Runs the NSE momentum Streamlit dashboard, the daily "
+                         "4 PM rebalance scan, the 9:16 AM gap-down safety "
+                         "check, and a weekly fundamentals refresh.")
 
     def __init__(self, args):
         super().__init__(args)
         self.stop_event = win32event.CreateEvent(None, 1, 0, None)
         self.running = True
         self.dashboard_proc: subprocess.Popen | None = None
-        self.rebalance_proc: subprocess.Popen | None = None
-        self._last_rebalance_date: dt.date | None = None
+        # Only one of the three scheduled jobs ever runs at a time (they're
+        # triggered sequentially from the same scheduler thread, at
+        # well-separated times of day) -- one slot for whichever is
+        # currently in flight is enough for SvcStop to be able to terminate it.
+        self._current_scheduled_proc: subprocess.Popen | None = None
+        self._last_run_date: dict[str, dt.date] = {}
 
     def SvcStop(self):
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
         _log("Stop requested.")
         self.running = False
         win32event.SetEvent(self.stop_event)
-        for proc in (self.dashboard_proc, self.rebalance_proc):
+        for proc in (self.dashboard_proc, self._current_scheduled_proc):
             if proc and proc.poll() is None:
                 proc.terminate()
 
@@ -120,24 +128,65 @@ class TradingAppService(win32serviceutil.ServiceFramework):
                 if self.running:
                     self._start_dashboard()
 
+    def _is_due(self, key: str, now: dt.datetime, weekday: int | None,
+               hour: int, minute: int) -> bool:
+        """weekday=None means every weekday (Mon-Fri); a specific weekday
+        (Monday=0) restricts to just that day, for the weekly fundamentals
+        job. `minute >= minute` (not `==`) so a job still fires if the exact
+        target minute is missed between 30s poll ticks; _last_run_date
+        guards against firing twice in the same day once it has."""
+        if weekday is None:
+            if now.weekday() >= 5:
+                return False
+        elif now.weekday() != weekday:
+            return False
+        if now.hour != hour or now.minute < minute:
+            return False
+        return self._last_run_date.get(key) != now.date()
+
+    def _run_scheduled_once(self, label: str, script_args: list[str],
+                            stdout_filename: str) -> int:
+        _log(f"Running {label}.")
+        stdout_log = open(os.path.join(CACHE_DIR, stdout_filename), "a")
+        proc = subprocess.Popen([PYTHON_EXE] + script_args, cwd=PROJECT_DIR,
+                                stdout=stdout_log, stderr=subprocess.STDOUT)
+        self._current_scheduled_proc = proc
+        proc.wait()
+        self._current_scheduled_proc = None
+        _log(f"{label} finished (code {proc.returncode}).")
+        return proc.returncode
+
     def _scheduler_loop(self) -> None:
-        """Runs live_rebalance.py once a day at REBALANCE_HOUR:REBALANCE_MINUTE
-        on weekdays -- the same command/schedule the standalone
-        NSE-Momentum-DailyRebalanceScan Task Scheduler entry used to run."""
+        """Three jobs, all running the exact same command a manual/CLI
+        invocation would: the daily rebalance scan (matches the standalone
+        NSE-Momentum-DailyRebalanceScan Task Scheduler entry this replaced),
+        the 9:16 AM gap-down safety check (live_rebalance.py --gap-check --
+        see check_gap_down_stops()'s docstring for why this one place places
+        real orders automatically), and a Monday-morning fundamentals
+        refresh (fundamentals_agent.py) so that cache doesn't go stale for
+        months between manual Fundamentals-page runs."""
         while self.running:
             now = dt.datetime.now()
-            due = (now.weekday() < 5 and now.hour == REBALANCE_HOUR
-                  and now.minute >= REBALANCE_MINUTE
-                  and self._last_rebalance_date != now.date())
-            if due:
-                _log("Running scheduled rebalance scan.")
-                stdout_log = open(os.path.join(CACHE_DIR, "service_rebalance_stdout.txt"), "a")
-                self.rebalance_proc = subprocess.Popen(
-                    [PYTHON_EXE, "live_rebalance.py"], cwd=PROJECT_DIR,
-                    stdout=stdout_log, stderr=subprocess.STDOUT)
-                self.rebalance_proc.wait()
-                self._last_rebalance_date = now.date()
-                _log(f"Rebalance scan finished (code {self.rebalance_proc.returncode}).")
+
+            if self._is_due("rebalance", now, None, REBALANCE_HOUR, REBALANCE_MINUTE):
+                self._run_scheduled_once(
+                    "scheduled rebalance scan", ["live_rebalance.py"],
+                    "service_rebalance_stdout.txt")
+                self._last_run_date["rebalance"] = now.date()
+
+            if self._is_due("gap_check", now, None, GAP_CHECK_HOUR, GAP_CHECK_MINUTE):
+                self._run_scheduled_once(
+                    "morning gap-down check", ["live_rebalance.py", "--gap-check"],
+                    "service_gap_check_stdout.txt")
+                self._last_run_date["gap_check"] = now.date()
+
+            if self._is_due("fundamentals", now, FUNDAMENTALS_WEEKDAY,
+                            FUNDAMENTALS_HOUR, FUNDAMENTALS_MINUTE):
+                self._run_scheduled_once(
+                    "weekly fundamentals scan", ["fundamentals_agent.py"],
+                    "service_fundamentals_stdout.txt")
+                self._last_run_date["fundamentals"] = now.date()
+
             if win32event.WaitForSingleObject(self.stop_event, 30_000) == win32event.WAIT_OBJECT_0:
                 break
 

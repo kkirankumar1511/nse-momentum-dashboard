@@ -3,11 +3,15 @@ Stage 1 of live automation: propose today's rebalance (sells + buys) by
 running the exact same screener pipeline used live and in the backtest,
 diffing it against your ACTUAL broker holdings.
 
-This module NEVER places an order. It only computes a proposal and writes
-it to disk for review -- you place orders yourself (Trade tab or broker
-app). Meant to be run once a day, either from the dashboard's "Daily
-Rebalance" tab or scheduled externally (Windows Task Scheduler / cron)
-via `python live_rebalance.py`.
+propose_rebalance()/main() NEVER place an order -- they only compute a
+proposal and write it to disk for review, you place orders yourself (Trade
+tab or broker app). Meant to be run once a day, either from the dashboard's
+"Daily Rebalance" tab or scheduled externally (Windows Task Scheduler /
+cron / trading_service.py) via `python live_rebalance.py`.
+
+check_gap_down_stops()/main_gap_check() are the one deliberate exception --
+see that function's docstring for why an immediate automatic market sell is
+the right call there specifically, unlike everywhere else in this module.
 
 Why sells can lag a day: the rebalance rule (200 EMA / rank) is only ever
 evaluated when this runs, so if you don't run it on a given day, a stock
@@ -147,9 +151,16 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
                          "avg_price": float(row["average_price"]),
                          "reason": "closed below 200 EMA"})
         elif sym not in keep_zone:
+            keep_zone_size = cfg["max_positions"] * 2
+            if sym in candidates.index:
+                rank = candidates.index.get_loc(sym) + 1
+                reason = (f"dropped out of top {keep_zone_size} rank "
+                         f"(now #{rank} of {len(candidates)})")
+            else:
+                reason = (f"failed a technical gate (trend/near-high/RSI) -- "
+                         f"not in the top {keep_zone_size} at all")
             sells.append({"symbol": sym, "qty": int(row["quantity"]),
-                         "avg_price": float(row["average_price"]),
-                         "reason": f"dropped out of top {cfg['max_positions'] * 2} rank"})
+                         "avg_price": float(row["average_price"]), "reason": reason})
     sells_df = pd.DataFrame(sells)
 
     # ---- Buys: fill slots opened up by the sells above ----
@@ -211,6 +222,117 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     return result
 
 
+def check_gap_down_stops() -> list[dict]:
+    """Morning safety net -- meant to run once, shortly after market open.
+
+    kite_client.place_gtt_stoploss's triggered order is a LIMIT sell at
+    trigger_price*0.995, not a market order. That's fine for an ordinary
+    intraday stop hit, but if a stock gaps down hard overnight -- opening
+    already well below the stop -- the GTT still "triggers" (LTP crossed the
+    threshold) but the resulting limit order can sit unfilled if the market
+    price has already gapped past it, leaving the position open with no
+    actual exit. This checks every open position's LTP against its tracked
+    stop and, for anything already through it, places an immediate MARKET
+    sell (via kite_client.square_off_position, the same call the dashboard's
+    manual Square-off button uses) to guarantee an exit, then deletes the
+    now-stale GTT so it can't also sit there confusingly pointed at a
+    position that no longer exists.
+
+    This is the one place in this module that places a real order
+    automatically, without a human confirmation step -- deliberately, since
+    the whole point is to react before a human could realistically check
+    and confirm; propose_rebalance()/main() stay proposal-only everywhere
+    else.
+
+    Returns one {"symbol", "qty", "stop", "ltp", "order_id", "gtt_deleted",
+    "error"} dict per position that was gapped below its stop (empty list
+    if nothing needed exiting)."""
+    positions = state_db.get_open_positions()
+    if not positions:
+        return []
+
+    try:
+        ltps = kite_client.get_ltp(list(positions.keys()))
+    except Exception as e:
+        return [{"symbol": None, "error": f"Could not fetch LTPs: {e}"}]
+
+    gtts = kite_client.get_active_gtts()
+    gtt_by_symbol = {}
+    if not gtts.empty and "condition" in gtts.columns:
+        for _, row in gtts.iterrows():
+            cond = row["condition"]
+            sym = cond.get("tradingsymbol") if isinstance(cond, dict) else None
+            if sym:
+                gtt_by_symbol[sym] = row["id"]
+
+    actions = []
+    still_held = set(positions.keys())
+    for sym, pos in positions.items():
+        ltp = ltps.get(sym)
+        if ltp is None or ltp > pos["current_stop"]:
+            continue  # not gapped below stop -- nothing to do
+
+        action = {"symbol": sym, "qty": pos["qty"], "stop": pos["current_stop"],
+                  "ltp": ltp, "order_id": None, "gtt_deleted": False, "error": None}
+        try:
+            action["order_id"] = kite_client.square_off_position(sym)
+            still_held.discard(sym)
+        except Exception as e:
+            action["error"] = f"Market sell FAILED: {e}"
+            actions.append(action)
+            continue
+
+        gtt_id = gtt_by_symbol.get(sym)
+        if gtt_id:
+            try:
+                kite_client.delete_gtt(gtt_id)
+                action["gtt_deleted"] = True
+            except Exception as e:
+                action["error"] = f"Sold OK but GTT delete failed: {e}"
+
+        actions.append(action)
+
+    if actions:
+        exit_prices = {a["symbol"]: a["ltp"] for a in actions if a.get("order_id")}
+        state_db.reconciled_positions(still_held, exit_prices)
+
+    return actions
+
+
+def main_gap_check():
+    """Headless entry point for check_gap_down_stops() -- e.g. from
+    trading_service.py's scheduler, shortly after market open. Logs to the
+    same LOG_PATH as main()'s rebalance scan, since both are automated runs
+    with no console to watch."""
+    os.makedirs("cache", exist_ok=True)
+    log_lines = [f"\n{'=' * 60}\n{dt.datetime.now():%d %b %Y %H:%M:%S} (gap-down check)"
+                f"\n{'=' * 60}"]
+
+    def log(msg=""):
+        print(msg)
+        log_lines.append(msg)
+
+    try:
+        actions = check_gap_down_stops()
+    except Exception as e:
+        log(f"FAILED -- {e}")
+        with open(LOG_PATH, "a") as f:
+            f.write("\n".join(log_lines) + "\n")
+        return
+
+    if not actions:
+        log("No positions gapped below their stop.")
+    for a in actions:
+        if a.get("error") and a.get("order_id") is None:
+            log(f"⚠️ {a['symbol']}: {a['error']}")
+        else:
+            log(f"🔴 {a['symbol']}: gapped to ₹{a['ltp']:.2f} (stop ₹{a['stop']:.2f}) -- "
+               f"market SELL order {a['order_id']}, GTT deleted: {a['gtt_deleted']}"
+               + (f" -- {a['error']}" if a.get("error") else ""))
+    with open(LOG_PATH, "a") as f:
+        f.write("\n".join(log_lines) + "\n")
+
+
 def main():
     """Run headless, e.g. from Windows Task Scheduler -- see README's
     "Scheduled scan" section. Every run appends a timestamped block to
@@ -260,4 +382,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if "--gap-check" in sys.argv:
+        main_gap_check()
+    else:
+        main()

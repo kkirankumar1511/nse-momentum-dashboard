@@ -93,10 +93,19 @@ _STRATEGY_DEFAULTS = {
     "ema_fast": 50,
     "ema_slow": 200,
 
-    # RSI regime: momentum names trade 40-80; avoid parabolic >80 entries
+    # RSI regime: momentum names trade 40-80; avoid parabolic >80 entries.
+    # rsi_max raised 78 -> 80 after an A/B backtest (5y, max_positions=4):
+    # CAGR 7.36->8.15%, Sharpe 1.14->1.25, max DD -6.62->-6.51%, profit
+    # factor 1.9->2.06 -- a clean, consistent improvement (flat-or-better in
+    # 5 of 6 calendar years), not one lucky year. A separate idea tested
+    # alongside this one -- relaxing rsi_max specifically for ALREADY-HELD
+    # positions (so overbought alone wouldn't trigger a sell) -- made every
+    # metric worse and was discarded entirely, same as the regime filter and
+    # beta scoring before it: this simple threshold-only change is the one
+    # that earned a spot.
     "rsi_period": 14,
     "rsi_min": 45,
-    "rsi_max": 78,
+    "rsi_max": 80,
 
     # Volume confirmation: 20d avg volume vs 60d avg volume
     "volume_expansion_min": 1.0,
@@ -127,6 +136,13 @@ _STRATEGY_DEFAULTS = {
     # fundamentals_agent.fno_value_scan(). 50 is a rough "average-or-better
     # across profitability, health, and growth" bar — tune to taste.
     "min_fundamental_score": 50.0,
+    # Off by default: the fundamental score is always shown (Screener, Live
+    # Rebalance) whenever fundamentals data is available, for your own
+    # reference, but doesn't filter live/backtest candidates unless this is
+    # on -- keeps live trading matching the technical-only backtest that
+    # actually validated this strategy, rather than silently gating on a
+    # dimension never tested for. See screener.apply_gates()'s docstring.
+    "fundamental_gate_enabled": False,
 
     # Sector relative-strength bonus (see sector_universe.py): tilts ranking
     # toward stocks in currently-outperforming sectors. 0 = off, matching

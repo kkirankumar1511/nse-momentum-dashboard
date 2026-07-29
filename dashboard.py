@@ -37,6 +37,7 @@ import kite_client
 import live_rebalance as lr
 import screener
 import sector_universe as su
+from background_jobs import clear_background_job, get_background_job, start_background_job
 
 
 # Windows' asyncio ProactorEventLoop logs a spurious traceback whenever a
@@ -231,12 +232,72 @@ def _pnl_color(val) -> str:
     return ""
 
 
-def pnl_style(df: pd.DataFrame, cols: list[str], fmt: dict | None = None,
+# Raw/snake_case field name -> human-readable table header, applied by
+# pnl_style() (and readable_df() for the few tables that don't need P&L
+# coloring or number formatting) so no table in this app ever shows a
+# header like `pnl_pct` or `tradingsymbol`. One shared dict rather than a
+# per-page copy, since the same fields (symbol, qty, entry/exit price, P&L,
+# ATR-based stops...) repeat across Overview, Live Rebalance, Positions &
+# Trade, Backtest, and Fundamentals.
+COLUMN_LABELS = {
+    "symbol": "Symbol", "tradingsymbol": "Symbol",
+    "qty": "Qty", "quantity": "Qty",
+    "avg_price": "Avg price", "average_price": "Avg price",
+    "ltp": "LTP", "last_price": "LTP",
+    "pnl": "P&L", "pnl_pct": "P&L %",
+    "entry_date": "Entry date", "exit_date": "Exit date",
+    "entry_price": "Entry price", "exit_price": "Exit price",
+    "current_price": "Current price",
+    "current_stop": "Current stop", "recommended_stop": "Recommended stop",
+    "suggested_stop": "Suggested stop", "stop": "Stop",
+    "gtt_active": "GTT active", "gtt_trigger_id": "GTT trigger ID",
+    "days_held": "Days held", "holding_days": "Days held",
+    "source": "Source", "reason": "Reason",
+    "product": "Product", "status": "Status",
+    "transaction_type": "Type", "order_timestamp": "Time",
+    "unrealized_pnl": "Unrealized P&L", "unrealized_ret_pct": "Unrealized return %",
+    "ret_pct": "Return %",
+    "date": "Date", "amount": "Amount (₹)", "note": "Note",
+
+    # Screener / momentum
+    "score": "Score", "price": "Price", "rs_3m": "RS 3M", "rs_6m": "RS 6M",
+    "pct_52w_high": "% of 52W high", "rsi": "RSI",
+    "vol_expansion": "Vol expansion", "atr_pct": "ATR %",
+    "fundamental_score": "Fundamental score", "fundamental_rubric": "Sector rubric",
+    "trend_ok": "Trend OK", "near_high_ok": "Near high OK", "rsi_ok": "RSI OK",
+    "quality_ok": "Quality OK", "quality_fails": "Quality fails",
+
+    # Fundamentals (Value Score)
+    "total_score": "Score (0-100)", "rubric": "Sector", "roe": "ROE %",
+    "roa": "ROA %", "debt_to_equity": "Debt / equity",
+    "current_ratio": "Current ratio", "revenue_cagr_pct": "Revenue CAGR %",
+    "fcf_yoy_pct": "FCF growth %", "peg": "PEG ratio",
+    "gross_npa_pct": "Gross NPA %", "net_npa_pct": "Net NPA %",
+    "nim_proxy_pct": "NIM (approx.) %", "advances_yoy_pct": "Advances growth %",
+    "pat_yoy_pct": "Profit growth %", "combined_ratio_pct": "Combined ratio %",
+    "incurred_claim_ratio_pct": "Claims ratio %",
+    "premium_yoy_pct": "Premium growth %", "loan_yoy_pct": "Loan book growth %",
+    "fiscal_year_end": "As of", "missing_pillars": "Data gaps",
+}
+
+
+def readable_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Renames every column present in COLUMN_LABELS to its human-readable
+    label. Columns not in the dict (already-readable, author-chosen labels
+    like a yearly-performance table's "Strategy %") pass through unchanged."""
+    return df.rename(columns=COLUMN_LABELS)
+
+
+def pnl_style(df: pd.DataFrame, cols: list[str] | None = None, fmt: dict | None = None,
              na_rep: str = "—"):
-    """Applies _pnl_color to `cols` (only the ones actually present) on top
-    of an optional format dict -- the common pattern repeated across every
-    table in this app that shows a profit/loss figure."""
-    cols = [c for c in cols if c in df.columns]
+    """Renames columns via readable_df(), then applies optional numeric
+    formatting and green/red P&L coloring -- the one function every styled
+    table in this app goes through. `cols`/`fmt` are given in the ORIGINAL
+    (pre-rename) field names -- remapped internally, so call sites don't
+    need to track the renamed labels themselves."""
+    df = readable_df(df)
+    cols = [COLUMN_LABELS.get(c, c) for c in (cols or []) if COLUMN_LABELS.get(c, c) in df.columns]
+    fmt = {COLUMN_LABELS.get(k, k): v for k, v in (fmt or {}).items()}
     styler = df.style
     if fmt:
         styler = styler.format(fmt, na_rep=na_rep)
@@ -474,7 +535,7 @@ def page_admin():
         st.caption("No cash flows logged yet.")
     else:
         st.dataframe(
-            ledger.sort_values("date", ascending=False).style.format({"amount": "{:,.0f}"}),
+            pnl_style(ledger.sort_values("date", ascending=False), fmt={"amount": "{:,.0f}"}),
             width="stretch", hide_index=True)
 
     st.divider()
@@ -539,10 +600,19 @@ def page_admin():
             value=float(cfg["volume_expansion_min"]), step=0.1)
 
         st.markdown("**Fundamental gate & sector bonus (opt-in features)**")
+        fundamental_gate_enabled = st.checkbox(
+            "Filter candidates on fundamental score (Live Rebalance + Screener)",
+            value=bool(cfg["fundamental_gate_enabled"]),
+            help="Off by default: the fundamental score still shows for every "
+                 "candidate wherever fundamentals data is fetched, for your own "
+                 "reference, but doesn't remove anything from 'all gates' unless "
+                 "this is on — keeps live trading matching the technical-only "
+                 "backtest that actually validated this strategy.")
         c15, c16, c17 = st.columns(3)
         min_fundamental_score = c15.number_input(
             "Min fundamental score (0-100)", min_value=0.0, max_value=100.0,
-            value=float(cfg["min_fundamental_score"]), step=1.0)
+            value=float(cfg["min_fundamental_score"]), step=1.0,
+            help="Only enforced when the checkbox above is on.")
         sector_bonus_weight = c16.number_input(
             "Sector bonus weight", min_value=0.0, max_value=1.0,
             value=float(cfg["sector_bonus_weight"]), step=0.05,
@@ -570,6 +640,7 @@ def page_admin():
             "rsi_min": int(rsi_min),
             "rsi_max": int(rsi_max),
             "volume_expansion_min": float(volume_expansion_min),
+            "fundamental_gate_enabled": bool(fundamental_gate_enabled),
             "min_fundamental_score": float(min_fundamental_score),
             "sector_bonus_weight": float(sector_bonus_weight),
             "history_days": int(history_days),
@@ -642,26 +713,56 @@ def page_screener():
             os.path.getmtime(SCREEN_CACHE))
         st.session_state["screen_is_cached"] = True
 
+    def _run_and_cache_screen(with_fund, fundamentals, progress_cb):
+        result = screener.run_screen(with_fund, fundamentals=fundamentals,
+                                     progress_cb=progress_cb)
+        os.makedirs("cache", exist_ok=True)
+        result.to_pickle(SCREEN_CACHE)
+        return result
+
+    screen_job = get_background_job("screen_run")
+    screen_running = screen_job is not None and not screen_job["done"]
+
     colA, colB = st.columns([1, 3])
     with colA:
         with_fund = st.checkbox(
-            "Include fundamental quality gate", value=True,
-            help="Uses the Fundamentals page's primary-XBRL score. Reuses "
-                 "those results if already run/loaded this session, or the "
-                 "on-disk cache, rather than re-scanning NSE.")
-        if st.button("Run screen", type="primary"):
-            bar = st.progress(0.0, text="Starting...")
-            def cb(stage, frac):
-                bar.progress(frac, text=stage)
-            result = screener.run_screen(
-                with_fund, fundamentals=st.session_state.get("value_scores"),
-                progress_cb=cb)
-            bar.empty()
-            st.session_state["screen"] = result
+            "Fetch fundamental score", value=True,
+            help="Shows each candidate's fundamental score/sector rubric for "
+                 "reference (uses the Fundamentals page's primary-XBRL score, "
+                 "reusing the on-disk cache if present rather than re-scanning "
+                 "NSE). Whether it also FILTERS candidates is a separate "
+                 "toggle — see Admin → Strategy configuration → 'Filter "
+                 "candidates on fundamental score' (off by default).")
+        if screen_running:
+            st.info(f"⏳ Scan already in progress (started "
+                   f"{screen_job['started_at']:%H:%M:%S}) — button disabled "
+                   "until it finishes; safe to switch tabs.")
+        if st.button("Run screen", type="primary", disabled=screen_running):
+            start_background_job(
+                "screen_run", _run_and_cache_screen, with_fund,
+                st.session_state.get("value_scores"))
+            st.rerun()
+
+    @st.fragment(run_every="1s" if screen_running else None)
+    def _screen_job_status():
+        job = get_background_job("screen_run")
+        if job is None:
+            return
+        if not job["done"]:
+            frac, stage = job["progress"]
+            st.progress(frac, text=f"{stage} — started {job['started_at']:%H:%M:%S}, "
+                              "keeps running even if you switch tabs")
+            return
+        if job["error"]:
+            st.error(f"Scan failed: {job['error']}")
+        else:
+            st.session_state["screen"] = job["result"]
             st.session_state["screen_time"] = dt.datetime.now()
             st.session_state["screen_is_cached"] = False
-            os.makedirs("cache", exist_ok=True)
-            result.to_pickle(SCREEN_CACHE)
+        clear_background_job("screen_run")
+        st.rerun()
+
+    _screen_job_status()
 
     if "screen" not in st.session_state:
         st.info("Click **Run screen** to fetch Kite data and rank the universe.")
@@ -672,23 +773,41 @@ def page_screener():
         if st.session_state.get("screen_is_cached") else ""
     st.caption(f"Last run: {st.session_state['screen_time']:%d %b %Y %H:%M}{cached_note}")
 
-    candidates = t[t["all_gates"]]
-    show_cols = ["score", "price", "rs_3m", "rs_6m", "pct_52w_high", "rsi",
+    candidates = t[t["all_gates"]].copy()  # already sorted by score, descending
+    candidates.insert(0, "rank", range(1, len(candidates) + 1))
+    show_cols = ["rank", "score", "price", "rs_3m", "rs_6m", "pct_52w_high", "rsi",
                 "vol_expansion", "atr_pct", "suggested_stop",
                 "fundamental_score", "fundamental_rubric"]
     show_cols = [c for c in show_cols if c in candidates.columns]
-    # fundamental_rubric is a string column ("general"/"nbfc"/...) — a single
-    # global format spec would crash trying to apply "{:.2f}" to it.
-    num_fmt = {c: "{:.2f}" for c in show_cols if c != "fundamental_rubric"}
+    if "fundamental_score" not in t.columns:
+        # apply_gates() only attaches these two columns at all when it was
+        # given non-empty fundamentals -- silently absent otherwise, which
+        # used to look like a bug rather than a consequence of the checkbox
+        # (or this exact result being cached from a run where it was off).
+        st.caption("ℹ️ No fundamental score column — this result was scanned "
+                  "with **Include fundamental quality gate** off, or "
+                  "fundamentals data wasn't available at scan time. Check the "
+                  "box above and click **Run screen** again to include it.")
+    # fundamental_rubric is a string column ("general"/"nbfc"/...) and rank is
+    # already a plain int -- a single global "{:.2f}" format spec would crash
+    # on the former and add pointless decimals to the latter.
+    num_fmt = {c: "{:.2f}" for c in show_cols if c not in ("fundamental_rubric", "rank")}
 
+    keep_zone_size = config.STRATEGY["max_positions"] * 2
     st.subheader(f"✅ Candidates passing all gates ({len(candidates)})")
-    st.dataframe(candidates[show_cols].style.format(num_fmt, na_rep="—"), width="stretch")
+    st.caption(f"Sorted by score, highest first — Live Rebalance keeps a held "
+              f"position only while it's ranked in the top {keep_zone_size} "
+              f"here (max_positions × 2); dropping below that rank is what "
+              f"triggers a proposed sell.")
+    st.dataframe(
+        pnl_style(candidates[show_cols].rename_axis("Symbol"), fmt=num_fmt),
+        width="stretch")
 
     with st.expander("Full universe (including gate failures)"):
         all_cols = show_cols + ["trend_ok", "near_high_ok", "rsi_ok",
                                 "quality_ok", "quality_fails"]
         all_cols = [c for c in all_cols if c in t.columns]
-        st.dataframe(t[all_cols], width="stretch")
+        st.dataframe(readable_df(t[all_cols].rename_axis("Symbol")), width="stretch")
 
     st.divider()
     sym = st.selectbox("Chart a symbol", list(t.index))
@@ -769,15 +888,37 @@ def page_live_rebalance():
                 columns={"tradingsymbol": "symbol"})
             st.session_state["rebalance_proposal"] = last_run
 
-    if st.button("Run today's scan", type="primary"):
-        bar = st.progress(0.0, text="Starting...")
-        def cb(stage, frac):
-            bar.progress(frac, text=stage)
+    rebalance_job = get_background_job("rebalance_run")
+    rebalance_running = rebalance_job is not None and not rebalance_job["done"]
+
+    if rebalance_running:
+        st.info(f"⏳ Scan already in progress (started "
+               f"{rebalance_job['started_at']:%H:%M:%S}) — button disabled "
+               "until it finishes; safe to switch tabs.")
+    if st.button("Run today's scan", type="primary", disabled=rebalance_running):
         fundamentals = st.session_state.get("value_scores")
-        result = lr.propose_rebalance(available_cash, fundamentals=fundamentals,
-                                      progress_cb=cb)
-        bar.empty()
-        st.session_state["rebalance_proposal"] = result
+        start_background_job("rebalance_run", lr.propose_rebalance,
+                             available_cash, fundamentals=fundamentals)
+        st.rerun()
+
+    @st.fragment(run_every="1s" if rebalance_running else None)
+    def _rebalance_job_status():
+        job = get_background_job("rebalance_run")
+        if job is None:
+            return
+        if not job["done"]:
+            frac, stage = job["progress"]
+            st.progress(frac, text=f"{stage} — started {job['started_at']:%H:%M:%S}, "
+                              "keeps running even if you switch tabs")
+            return
+        if job["error"]:
+            st.error(f"Scan failed: {job['error']}")
+        else:
+            st.session_state["rebalance_proposal"] = job["result"]
+        clear_background_job("rebalance_run")
+        st.rerun()
+
+    _rebalance_job_status()
 
     if "rebalance_proposal" not in st.session_state:
         st.info("Click **Run today's scan** to generate a proposal.")
@@ -793,7 +934,7 @@ def page_live_rebalance():
 
     st.subheader(f"🔴 Proposed sells ({len(result['sells'])})")
     if not result["sells"].empty:
-        st.dataframe(result["sells"].style.format({"avg_price": "{:.2f}"}),
+        st.dataframe(pnl_style(result["sells"], fmt={"avg_price": "{:.2f}"}),
                     width="stretch", hide_index=True)
         confirm_sell = st.checkbox(
             "I confirm I want to execute ALL proposed sells at market",
@@ -813,14 +954,14 @@ def page_live_rebalance():
 
     st.subheader(f"🟢 Proposed buys ({len(result['buys'])})")
     if not result["buys"].empty:
-        st.caption("`fundamental_score`/`fundamental_rubric` are shown for "
-                  "your own extra confirmation, not as a filter — the "
-                  "candidate list above is already gated on technicals "
-                  "(+ fundamentals, if `min_fundamental_score` applies).")
+        st.caption("Fundamental score/sector rubric are shown for your own "
+                  "reference, not as a filter — the candidate list above is "
+                  "technicals-only unless you've turned on 'Filter candidates "
+                  "on fundamental score' in Admin → Strategy configuration.")
         st.dataframe(
-            result["buys"].style.format(
-                {"price": "{:.2f}", "stop": "{:.2f}", "score": "{:.2f}",
-                 "fundamental_score": "{:.1f}"}, na_rep="—"),
+            pnl_style(result["buys"], fmt={
+                "price": "{:.2f}", "stop": "{:.2f}", "score": "{:.2f}",
+                "fundamental_score": "{:.1f}"}),
             width="stretch", hide_index=True)
         place_gtt = st.checkbox("Also place a GTT stop-loss for each buy",
                                 value=True, key="rebal_gtt")
@@ -865,7 +1006,7 @@ def page_live_rebalance():
                   "as a position gains — see README's Trailing stop section. "
                   "Nothing is modified until you confirm below.")
         st.dataframe(
-            stop_updates.style.format({"current_stop": "{:.2f}", "recommended_stop": "{:.2f}"}),
+            pnl_style(stop_updates, fmt={"current_stop": "{:.2f}", "recommended_stop": "{:.2f}"}),
             width="stretch", hide_index=True)
         confirm_stops = st.checkbox(
             "I confirm I want to raise ALL these GTT stop-losses",
@@ -912,7 +1053,7 @@ def page_live_rebalance():
         st.warning(f"Could not check GTT coverage: {e}")
 
     with st.expander("Current holdings snapshot used for this proposal"):
-        st.dataframe(result["holdings"].style.format({"average_price": "{:.2f}"}),
+        st.dataframe(pnl_style(result["holdings"], fmt={"average_price": "{:.2f}"}),
                     width="stretch", hide_index=True)
 
 
@@ -1069,8 +1210,9 @@ def page_positions_trade():
     orders = kite_client.get_orders()
     if not orders.empty:
         st.dataframe(
-            orders[["order_timestamp", "tradingsymbol", "transaction_type",
-                    "quantity", "average_price", "status"]],
+            pnl_style(orders[["order_timestamp", "tradingsymbol", "transaction_type",
+                             "quantity", "average_price", "status"]],
+                     fmt={"average_price": "{:.2f}"}),
             width="stretch", hide_index=True)
     else:
         st.caption("No orders today.")
@@ -1606,18 +1748,9 @@ def page_fundamentals():
         os.makedirs("cache", exist_ok=True)
         result.to_pickle(VALUE_SCORE_CACHE)
 
-    COLUMN_LABELS = {
-        "total_score": "Score (0-100)", "rubric": "Sector", "roe": "ROE %",
-        "roa": "ROA %", "debt_to_equity": "Debt / Equity",
-        "current_ratio": "Current Ratio", "revenue_cagr_pct": "Revenue CAGR %",
-        "fcf_yoy_pct": "FCF Growth %", "peg": "PEG Ratio",
-        "gross_npa_pct": "Gross NPA %", "net_npa_pct": "Net NPA %",
-        "nim_proxy_pct": "NIM (approx.) %", "advances_yoy_pct": "Advances Growth %",
-        "pat_yoy_pct": "Profit Growth %", "combined_ratio_pct": "Combined Ratio %",
-        "incurred_claim_ratio_pct": "Claims Ratio %",
-        "premium_yoy_pct": "Premium Growth %", "loan_yoy_pct": "Loan Book Growth %",
-        "fiscal_year_end": "As of", "missing_pillars": "Data Gaps",
-    }
+    # Column labels for this page's tables live in the module-level
+    # COLUMN_LABELS dict (near pnl_style/readable_df) alongside every other
+    # page's, rather than a local copy here.
 
     # DECISION-relevant headline metrics only — excludes the 0-5 pillar
     # averages and sub-scores, which explain HOW a score was computed, not
@@ -1661,9 +1794,8 @@ def page_fundamentals():
 
     st.subheader(f"Ranked ({shown['total_score'].notna().sum()}/{len(shown)} scored"
                 f"{'' if sector == 'All' else f', {sector}'})")
-    display_df = shown[show_cols].rename(columns=COLUMN_LABELS)
-    fmt = {COLUMN_LABELS.get(c, c): "{:.2f}" for c in ["total_score"] + numeric_cols}
-    st.dataframe(display_df.style.format(fmt, na_rep="—"), width="stretch")
+    fmt = {c: "{:.2f}" for c in ["total_score"] + numeric_cols}
+    st.dataframe(pnl_style(shown[show_cols], fmt=fmt), width="stretch")
 
     with st.expander("🔍 Score breakdown for one symbol"):
         st.caption("The 0-5 pillar scores and individual sub-metric buckets "
@@ -1703,7 +1835,7 @@ def page_fundamentals():
                   "'unsupported_taxonomy') the sector isn't covered by any "
                   "rubric yet.")
         inc_cols = show_cols + ["missing_pillars"]
-        st.dataframe(incomplete[inc_cols].rename(columns=COLUMN_LABELS), width="stretch")
+        st.dataframe(readable_df(incomplete[inc_cols]), width="stretch")
 
 
 # ---------------------------------------------------------------------------

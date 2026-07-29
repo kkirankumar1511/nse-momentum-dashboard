@@ -182,8 +182,20 @@ def get_positions() -> pd.DataFrame:
 
 
 def get_holdings() -> pd.DataFrame:
+    """Holdings (CNC), quantity normalized to what you actually own.
+
+    Kite reports a just-bought lot that hasn't yet settled into demat under
+    `t1_quantity` instead of `quantity` -- also seen transiently for
+    already-settled holdings in the early-morning window before the day's
+    settlement file is processed. Either way, `quantity` alone silently
+    undercounts (0 for a real position) until settlement catches up, so it's
+    folded into `quantity` here once, at the source, rather than every
+    consumer needing to know about this Kite-internal settlement split."""
     kite = get_kite()
-    return pd.DataFrame(kite.holdings())
+    df = pd.DataFrame(kite.holdings())
+    if not df.empty and "t1_quantity" in df.columns:
+        df["quantity"] = df["quantity"] + df["t1_quantity"]
+    return df
 
 
 def get_margins() -> dict:
@@ -275,6 +287,14 @@ def modify_gtt_trigger(trigger_id: int, symbol: str, qty: int,
             "price": round(new_trigger_price * 0.995, 1),
         }],
     )["trigger_id"]
+
+
+def delete_gtt(trigger_id: int) -> None:
+    """Cancels a GTT -- used after a manual/automatic market exit (e.g. the
+    morning gap-down safety check) to remove the now-stale stop-loss trigger
+    rather than leaving it pointing at a position that no longer exists."""
+    kite = get_kite()
+    kite.delete_gtt(trigger_id)
 
 
 def square_off_position(symbol: str) -> str | None:
