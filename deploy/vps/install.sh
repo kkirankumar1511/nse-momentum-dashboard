@@ -16,7 +16,7 @@ set -euo pipefail
 APP_USER="nseapp"
 APP_DIR="/opt/nse-momentum-dashboard"
 REPO_URL="https://github.com/kkirankumar1511/nse-momentum-dashboard.git"
-BRANCH="experiments/beta-scoring-bonus"
+BRANCH="master"
 
 echo "== Setting timezone to Asia/Kolkata (IST) =="
 # systemd timers below use IST times (16:00, 09:16, Mon 08:00) -- matching
