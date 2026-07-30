@@ -303,6 +303,7 @@ COLUMN_LABELS = {
     "exit_reason": "Exit reason", "entry_reason": "Why this trade",
     "latest_recommended_stop": "Latest stop (daily 8:30AM calc)",
     "extra_qty": "Extra qty",
+    "trigger_price": "GTT trigger price", "updated_at": "Last updated",
     "realized_pnl": "Realized P&L",
     "realized_ret_pct": "Realized return %",
 }
@@ -545,6 +546,42 @@ def page_cockpit():
                      {"avg_price": "{:.2f}", "ltp": "{:.2f}", "pnl": "{:,.0f}",
                       "current_stop": "{:.2f}"}, na_rep="—"),
             width="stretch", hide_index=True)
+
+        with st.expander("Active GTTs — straight from Kite (source of truth)"):
+            st.caption(
+                "The 'Current stop' column above is this app's own tracked "
+                "value -- it should match this list once you've clicked "
+                "'Apply stop updates', but this table reads directly from "
+                "your broker, so it's the real, authoritative answer to "
+                "\"what's my GTT actually set to right now.\"")
+            try:
+                gtts = kite_client.get_active_gtts()
+                rows = []
+                if not gtts.empty:
+                    for _, g in gtts.iterrows():
+                        cond = g.get("condition") or {}
+                        orders = g.get("orders") or []
+                        sym = cond.get("tradingsymbol") if isinstance(cond, dict) else None
+                        if sym not in held:
+                            continue
+                        trigger_vals = cond.get("trigger_values") if isinstance(cond, dict) else None
+                        trigger_price = trigger_vals[0] if trigger_vals else None
+                        qty = orders[0].get("quantity") if orders else None
+                        rows.append({
+                            "symbol": sym, "trigger_price": trigger_price,
+                            "qty": qty, "status": g.get("status"),
+                            "updated_at": g.get("updated_at"),
+                        })
+                gtt_df = pd.DataFrame(rows)
+                if gtt_df.empty:
+                    st.caption("No active GTTs found for your current holdings.")
+                else:
+                    st.dataframe(
+                        pnl_style(gtt_df.sort_values("symbol"),
+                                 fmt={"trigger_price": "{:.2f}"}),
+                        width="stretch", hide_index=True)
+            except Exception as e:
+                st.warning(f"Could not fetch GTTs from Kite: {e}")
 
 # ---------------------------------------------------------------------------
 # Page: Admin
