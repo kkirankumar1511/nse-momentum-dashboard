@@ -40,14 +40,29 @@ def compute_stop_updates(held_symbols: set[str], cfg: dict) -> list[dict]:
     """Recomputes each held position's trailing stop using the exact same
     formula as backtest.py's step 1b (highest_close_since_entry -
     trailing_atr_multiple*ATR, ratchet up only) -- so live and backtest
-    logic can never quietly drift apart. Proposal-only: nothing is
-    modified here, this only returns candidate updates for the dashboard's
-    explicit-approval flow. highest_close/current_stop are persisted back
-    to state_db regardless of whether anything ratchets this run, since
-    that bookkeeping needs to continue every day."""
+    logic can never quietly drift apart. highest_close/current_stop are
+    persisted back to state_db regardless of whether anything ratchets
+    this run, since that bookkeeping needs to continue every day.
+
+    cfg["auto_apply_stop_updates"] (True by default): when a stop
+    genuinely ratchets, immediately pushes it to the real broker GTT
+    (kite_client.modify_gtt_trigger + state_db.apply_stop_update) -- same
+    automation level as the gap-down safety check, since raising a stop
+    is a one-directional, low-risk action (it only ever tightens risk,
+    never loosens it or places a new order). Shared by both the scheduled
+    daily job and the dashboard's manual "Run today's scan" button, since
+    this function is common to both.
+
+    Returns only the updates that still need YOUR attention: auto-apply
+    was off, there's no active GTT to push to (needs one placed manually
+    first), or the modify_gtt_trigger call itself failed (network/API
+    error) -- each such row carries an "apply_error" explaining why.
+    A successfully auto-applied update is NOT included here; it's already
+    done."""
     stale = state_db.get_stale_open_symbols(held_symbols)
     exit_prices = kite_client.get_ltp(stale) if stale else {}
     positions = state_db.reconciled_positions(held_symbols, exit_prices)
+    auto_apply = cfg.get("auto_apply_stop_updates", True)
     updates = []
     for sym, pos in positions.items():
         try:
@@ -60,14 +75,31 @@ def compute_stop_updates(held_symbols: set[str], cfg: dict) -> list[dict]:
         highest_close = max(pos["highest_close"], today_close)
         atr_now = float(indicators.atr(df, cfg["atr_period"]).iloc[-1])
         new_stop = highest_close - cfg["trailing_atr_multiple"] * atr_now
-        if new_stop > pos["current_stop"]:
-            updates.append({
-                "symbol": sym, "qty": pos["qty"],
-                "current_stop": round(pos["current_stop"], 2),
-                "recommended_stop": round(new_stop, 2),
-                "gtt_trigger_id": pos.get("gtt_trigger_id"),
-            })
         state_db.update_position_stop(sym, highest_close, atr_now, new_stop)
+        if new_stop <= pos["current_stop"]:
+            continue  # no ratchet this run -- nothing to apply or report
+
+        entry = {
+            "symbol": sym, "qty": pos["qty"],
+            "current_stop": round(pos["current_stop"], 2),
+            "recommended_stop": round(new_stop, 2),
+            "gtt_trigger_id": pos.get("gtt_trigger_id"),
+        }
+        gtt_id = pos.get("gtt_trigger_id")
+        if not auto_apply:
+            updates.append(entry)
+            continue
+        if not gtt_id:
+            entry["apply_error"] = "no active GTT to update -- place one manually (Trade tab)"
+            updates.append(entry)
+            continue
+        try:
+            ltp = kite_client.get_ltp([sym])[sym]
+            kite_client.modify_gtt_trigger(int(gtt_id), sym, int(pos["qty"]), new_stop, ltp)
+            state_db.apply_stop_update(sym)
+        except Exception as e:
+            entry["apply_error"] = str(e)
+            updates.append(entry)
     return updates
 
 
@@ -521,9 +553,9 @@ def main():
         log("\n-- Proposed TOP-UPS --")
         log(result["top_ups"].to_string(index=False) if not result["top_ups"].empty
            else "(none)")
-        log("\n-- Recommended stop updates (trailing stop) --")
+        log("\n-- Trailing-stop updates needing attention (auto-apply failed or no GTT) --")
         log(result["stop_updates"].to_string(index=False) if not result["stop_updates"].empty
-           else "(none)")
+           else "(none -- everything that ratcheted today applied cleanly)")
         log(f"\nEqual-weight target: Rs.{result['target_per_slot']:,.0f}/slot, "
            f"Rs.{result['cash_pool']:,.0f} available (cash + proposed sell proceeds)")
         if result["unsettled_proceeds"] > 0:

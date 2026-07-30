@@ -131,6 +131,16 @@ _STRATEGY_DEFAULTS = {
     "trailing_stop_enabled": True,
     "trailing_atr_multiple": 4.0,
 
+    # Push a ratcheted trailing stop straight to the real broker GTT the
+    # moment it's computed (live_rebalance.py's compute_stop_updates),
+    # rather than waiting for a manual "Apply stop updates" click --
+    # same automation level as the gap-down safety check. Deliberately
+    # not something that needed a backtest: this only changes WHO/WHEN
+    # pushes an already-decided stop value to the broker, not the stop
+    # formula or any trading decision itself, and it only ever tightens
+    # risk (ratchets up), never loosens it or places a new order.
+    "auto_apply_stop_updates": True,
+
     # Fundamental gate: xbrl_parser's sector-aware value_score/bank_score/
     # nbfc_score/etc total (0-100), computed from primary-source XBRL via
     # fundamentals_agent.fno_value_scan(). 50 is a rough "average-or-better

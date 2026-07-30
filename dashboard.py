@@ -73,7 +73,7 @@ if os.name == "nt":
         _ProactorBasePipeTransport._connection_reset_silenced = True
 import state_db
 
-st.set_page_config(page_title="NSE Momentum Cockpit", layout="wide", page_icon="📈")
+st.set_page_config(page_title="KK Trading System", layout="wide", page_icon="📈")
 
 def _redirect_to_kite_login(error: str | None = None) -> None:
     """Auto-redirects the browser to Zerodha's real login + 2FA page --
@@ -180,7 +180,7 @@ elif request_token:
 state_db.ensure_dashboard_auth_seeded(config.DASHBOARD_USERNAME, config.DASHBOARD_PASSWORD)
 
 if not st.session_state.get("dashboard_authenticated", False):
-    st.title("🔒 NSE Momentum Cockpit — sign in")
+    st.title("🔒 KK Trading System — sign in")
     with st.form("login_form", clear_on_submit=True):
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
@@ -304,6 +304,7 @@ COLUMN_LABELS = {
     "latest_recommended_stop": "Latest stop (daily 8:30AM calc)",
     "extra_qty": "Extra qty",
     "trigger_price": "GTT trigger price", "updated_at": "Last updated",
+    "apply_error": "Why it needs attention",
     "realized_pnl": "Realized P&L",
     "realized_ret_pct": "Realized return %",
 }
@@ -1250,17 +1251,18 @@ def page_live_rebalance():
     else:
         st.caption("No under-target holdings, or no cash left over to top up with.")
 
-    st.subheader(f"🔼 Recommended stop updates ({len(result.get('stop_updates', pd.DataFrame()))})")
+    stop_updates = result.get("stop_updates", pd.DataFrame())
+    st.subheader(f"🔼 Stop updates needing attention ({len(stop_updates)})")
     if st.session_state.get("stopupdate_exec_log"):
         st.success("Stop update(s) applied and removed from the list below.")
         for line in st.session_state["stopupdate_exec_log"]:
             st.write(line)
         del st.session_state["stopupdate_exec_log"]
-    stop_updates = result.get("stop_updates", pd.DataFrame())
     if not stop_updates.empty:
-        st.caption("The trailing stop only ever moves up (never back down) "
-                  "as a position gains — see README's Trailing stop section. "
-                  "Nothing is modified until you confirm below.")
+        st.caption("The trailing stop ratchets up automatically as soon as it's "
+                  "computed (same as the gap-down safety check) — the rows "
+                  "below are ones that **couldn't** auto-apply (no active GTT, "
+                  "or the update to Kite failed) and need your attention.")
         st.dataframe(
             pnl_style(stop_updates, fmt={"current_stop": "{:.2f}", "recommended_stop": "{:.2f}"}),
             width="stretch", hide_index=True)
@@ -1296,7 +1298,8 @@ def page_live_rebalance():
                 st.session_state["rebalance_proposal"] = result
             st.rerun()
     else:
-        st.caption("No trailing-stop increases recommended today.")
+        st.caption("No trailing-stop increases needed attention today — "
+                  "either nothing ratcheted, or it all auto-applied cleanly.")
 
     st.subheader("⚠️ Unprotected holdings")
     try:
