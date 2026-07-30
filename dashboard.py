@@ -232,6 +232,23 @@ def _pnl_color(val) -> str:
     return ""
 
 
+def colored_metric(label: str, value: float, fmt: str = "₹{:,.0f}") -> None:
+    """A st.metric substitute for headline P&L-shaped numbers. st.metric
+    only ever colors its DELTA text green/red, never the main value --
+    which meant Realized/Unrealized/Total P&L sat there in plain,
+    sign-less text no different from a loss to a gain. Same green/red
+    convention as _pnl_color/pnl_style (#16a34a / #dc2626), rendered as
+    markdown since no dataframe/delta is involved here. Only the number
+    is colored, not the label, so it still reads fine in both light and
+    dark themes."""
+    color = "#16a34a" if value >= 0 else "#dc2626"
+    st.markdown(
+        f"<div style='font-size:0.875rem; opacity:0.75; margin-bottom:0.1rem'>{label}</div>"
+        f"<div style='font-size:1.75rem; font-weight:600; color:{color}; "
+        f"line-height:1.2'>{fmt.format(value)}</div>",
+        unsafe_allow_html=True)
+
+
 def _status_color(val) -> str:
     """Open positions get a green badge, closed a neutral gray -- used on
     the Tradebook's status column so open/closed reads at a glance instead
@@ -456,26 +473,61 @@ def page_cockpit():
                   "or right after a sell before the next buy fills the slot.")
 
     k6, k7, k8, k9 = st.columns(4)
-    k6.metric("Realized P&L", f"₹{realized_pnl:,.0f}")
-    k7.metric("Unrealized P&L", f"₹{unrealized_pnl:,.0f}")
-    k8.metric("Total P&L", f"₹{total_pnl:,.0f}")
+    with k6:
+        colored_metric("Realized P&L", realized_pnl)
+    with k7:
+        colored_metric("Unrealized P&L", unrealized_pnl)
+    with k8:
+        colored_metric("Total P&L", total_pnl)
     k9.metric("Open positions", f"{len(merged)} / {config.STRATEGY['max_positions']}")
 
     k10, k11 = st.columns(2)
-    k10.metric("Annualized return (XIRR) — this year",
-             f"{current_xirr * 100:+.1f}%" if current_xirr is not None else "—")
-    k11.metric("Annualized return (XIRR) — overall",
-             f"{overall_xirr * 100:+.1f}%" if overall_xirr is not None else "—")
+    with k10:
+        st.caption("Annualized return (XIRR) — this year")
+        if current_xirr is not None:
+            colored_metric("", current_xirr * 100, fmt="{:+.1f}%")
+        else:
+            st.markdown("—")
+    with k11:
+        st.caption("Annualized return (XIRR) — overall")
+        if overall_xirr is not None:
+            colored_metric("", overall_xirr * 100, fmt="{:+.1f}%")
+        else:
+            st.markdown("—")
     if overall_xirr is None:
         st.caption("XIRR needs at least one logged deposit and one portfolio "
                   "value snapshot — log a deposit on the Admin page (or fund "
                   "the account) to start tracking annualized return.")
 
-    chart_df = log.set_index("date")[["value", "invested_amount"]].rename(
-        columns={"value": "Total capital (₹)", "invested_amount": "Invested amount (₹)"})
     if len(log) > 1:
-        st.line_chart(chart_df)
-        if chart_df["Invested amount (₹)"].isna().any():
+        plot_log = log.copy()
+        plot_log["date"] = pd.to_datetime(plot_log["date"])
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=plot_log["date"], y=plot_log["value"], name="Total capital (₹)",
+            mode="lines", line=dict(color="#16a34a", width=2),
+            fill="tozeroy", fillcolor="rgba(22,163,74,0.08)",
+            hovertemplate="₹%{y:,.0f}<extra>Total capital</extra>"))
+        if plot_log["invested_amount"].notna().any():
+            fig.add_trace(go.Scatter(
+                x=plot_log["date"], y=plot_log["invested_amount"],
+                name="Invested amount (₹)", mode="lines",
+                line=dict(color="#6b7280", width=1.5, dash="dot"),
+                hovertemplate="₹%{y:,.0f}<extra>Invested amount</extra>"))
+        fig.update_layout(
+            height=380, margin=dict(l=10, r=10, t=10, b=10),
+            hovermode="x unified",
+            xaxis=dict(rangeslider=dict(visible=True), rangeselector=dict(buttons=[
+                dict(count=1, label="1m", step="month", stepmode="backward"),
+                dict(count=6, label="6m", step="month", stepmode="backward"),
+                dict(count=1, label="YTD", step="year", stepmode="todate"),
+                dict(count=1, label="1y", step="year", stepmode="backward"),
+                dict(step="all", label="All"),
+            ])),
+            yaxis=dict(tickprefix="₹", separatethousands=True),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+        st.plotly_chart(fig, width="stretch")
+        if plot_log["invested_amount"].isna().any():
             st.caption("Invested amount only started being logged recently — "
                       "earlier days show a gap until enough history builds up.")
     else:
@@ -1796,12 +1848,24 @@ def page_backtest():
         eq_base = ab_base["equity_curve"]
         eq_sector = ab_sector["equity_curve"]
         nifty_ab = ab_bench["close"].reindex(eq_base.index).ffill()
-        ab_plot = pd.DataFrame({
-            "Baseline": eq_base / eq_base.iloc[0] * 100,
-            "Sector-aware": (eq_sector / eq_sector.iloc[0] * 100).reindex(eq_base.index).ffill(),
-            "NIFTY 50": nifty_ab / nifty_ab.iloc[0] * 100,
-        })
-        st.line_chart(ab_plot)
+        ab_fig = go.Figure()
+        ab_fig.add_trace(go.Scatter(
+            x=eq_base.index, y=eq_base / eq_base.iloc[0] * 100,
+            name="Baseline", mode="lines", line=dict(color="#6b7280", width=1.5),
+            hovertemplate="%{y:.1f}<extra>Baseline</extra>"))
+        ab_fig.add_trace(go.Scatter(
+            x=eq_base.index,
+            y=(eq_sector / eq_sector.iloc[0] * 100).reindex(eq_base.index).ffill(),
+            name="Sector-aware", mode="lines", line=dict(color="#16a34a", width=2),
+            hovertemplate="%{y:.1f}<extra>Sector-aware</extra>"))
+        ab_fig.add_trace(go.Scatter(
+            x=nifty_ab.index, y=nifty_ab / nifty_ab.iloc[0] * 100,
+            name="NIFTY 50", mode="lines", line=dict(color="#9ca3af", width=1, dash="dot"),
+            hovertemplate="%{y:.1f}<extra>NIFTY 50</extra>"))
+        ab_fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
+                            hovermode="x unified", yaxis=dict(title="Growth of 100"),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+        st.plotly_chart(ab_fig, width="stretch")
         st.dataframe(pd.DataFrame({"Baseline": ab_base["metrics"],
                                    "Sector-aware": ab_sector["metrics"]}),
                     width="stretch")
@@ -1843,12 +1907,24 @@ def page_backtest():
         eq_ts_base = ts_base["equity_curve"]
         eq_ts_trailing = ts_trailing["equity_curve"]
         nifty_ts = ts_bench["close"].reindex(eq_ts_base.index).ffill()
-        ts_plot = pd.DataFrame({
-            "Baseline": eq_ts_base / eq_ts_base.iloc[0] * 100,
-            "Trailing-stop": (eq_ts_trailing / eq_ts_trailing.iloc[0] * 100).reindex(eq_ts_base.index).ffill(),
-            "NIFTY 50": nifty_ts / nifty_ts.iloc[0] * 100,
-        })
-        st.line_chart(ts_plot)
+        ts_fig = go.Figure()
+        ts_fig.add_trace(go.Scatter(
+            x=eq_ts_base.index, y=eq_ts_base / eq_ts_base.iloc[0] * 100,
+            name="Baseline", mode="lines", line=dict(color="#6b7280", width=1.5),
+            hovertemplate="%{y:.1f}<extra>Baseline</extra>"))
+        ts_fig.add_trace(go.Scatter(
+            x=eq_ts_base.index,
+            y=(eq_ts_trailing / eq_ts_trailing.iloc[0] * 100).reindex(eq_ts_base.index).ffill(),
+            name="Trailing-stop", mode="lines", line=dict(color="#16a34a", width=2),
+            hovertemplate="%{y:.1f}<extra>Trailing-stop</extra>"))
+        ts_fig.add_trace(go.Scatter(
+            x=nifty_ts.index, y=nifty_ts / nifty_ts.iloc[0] * 100,
+            name="NIFTY 50", mode="lines", line=dict(color="#9ca3af", width=1, dash="dot"),
+            hovertemplate="%{y:.1f}<extra>NIFTY 50</extra>"))
+        ts_fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
+                            hovermode="x unified", yaxis=dict(title="Growth of 100"),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+        st.plotly_chart(ts_fig, width="stretch")
         st.dataframe(pd.DataFrame({"Baseline": ts_base["metrics"],
                                    "Trailing-stop": ts_trailing["metrics"]}),
                     width="stretch")
@@ -1878,11 +1954,26 @@ def page_backtest():
     bench_bt = st.session_state["bt_bench"]
 
     nifty = bench_bt["close"].reindex(eq.index).ffill()
-    plot_df = pd.DataFrame({
-        "Strategy": eq / eq.iloc[0] * 100,
-        "NIFTY 50": nifty / nifty.iloc[0] * 100,
-    })
-    st.line_chart(plot_df)
+
+    eq_fig = go.Figure()
+    eq_fig.add_trace(go.Scatter(
+        x=eq.index, y=eq / eq.iloc[0] * 100, name="Strategy", mode="lines",
+        line=dict(color="#16a34a", width=2),
+        hovertemplate="%{y:.1f}<extra>Strategy</extra>"))
+    eq_fig.add_trace(go.Scatter(
+        x=nifty.index, y=nifty / nifty.iloc[0] * 100, name="NIFTY 50", mode="lines",
+        line=dict(color="#6b7280", width=1.5, dash="dot"),
+        hovertemplate="%{y:.1f}<extra>NIFTY 50</extra>"))
+    eq_fig.update_layout(
+        height=380, margin=dict(l=10, r=10, t=10, b=10), hovermode="x unified",
+        xaxis=dict(rangeslider=dict(visible=True), rangeselector=dict(buttons=[
+            dict(count=1, label="1y", step="year", stepmode="backward"),
+            dict(count=3, label="3y", step="year", stepmode="backward"),
+            dict(step="all", label="All"),
+        ])),
+        yaxis=dict(title="Growth of 100"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+    st.plotly_chart(eq_fig, width="stretch")
 
     bc1, bc2, bc3, bc4 = st.columns(4)
     bc1.metric("Final capital", f"₹{res['final_capital']:,.0f}",
@@ -1894,7 +1985,15 @@ def page_backtest():
     st.dataframe(pd.DataFrame({"Value": res["metrics"]}), width="stretch")
 
     dd = (eq / eq.cummax() - 1) * 100
-    st.area_chart(dd.rename("Drawdown %"))
+    dd_fig = go.Figure()
+    dd_fig.add_trace(go.Scatter(
+        x=dd.index, y=dd, name="Drawdown %", mode="lines",
+        line=dict(color="#dc2626", width=1.5), fill="tozeroy",
+        fillcolor="rgba(220,38,38,0.15)",
+        hovertemplate="%{y:.1f}%<extra>Drawdown</extra>"))
+    dd_fig.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10),
+                         yaxis=dict(title="Drawdown %"), showlegend=False)
+    st.plotly_chart(dd_fig, width="stretch")
 
     st.subheader("Year-by-year performance")
     yp = bt.yearly_performance(eq, bench_bt, res["trades"])
@@ -1906,7 +2005,18 @@ def page_backtest():
                       "Alpha %": "{:.2f}", "Win rate %": "{:.1f}"}),
             width="stretch")
     with yc2:
-        st.bar_chart(yp[["Strategy %", "NIFTY %"]])
+        bar_fig = go.Figure()
+        bar_colors = ["#16a34a" if v >= 0 else "#dc2626" for v in yp["Strategy %"]]
+        bar_fig.add_trace(go.Bar(
+            x=yp.index.astype(str), y=yp["Strategy %"], name="Strategy %",
+            marker_color=bar_colors, hovertemplate="%{y:.1f}%<extra>Strategy</extra>"))
+        bar_fig.add_trace(go.Bar(
+            x=yp.index.astype(str), y=yp["NIFTY %"], name="NIFTY %",
+            marker_color="#9ca3af", hovertemplate="%{y:.1f}%<extra>NIFTY 50</extra>"))
+        bar_fig.update_layout(
+            height=320, margin=dict(l=10, r=10, t=10, b=10), barmode="group",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+        st.plotly_chart(bar_fig, width="stretch")
 
     if not res["open_positions"].empty:
         with st.expander(f"Open positions at period end ({len(res['open_positions'])})",
