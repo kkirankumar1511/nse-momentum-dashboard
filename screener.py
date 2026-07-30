@@ -26,6 +26,7 @@ import config
 import indicators
 import kite_client
 import fundamentals_agent as fa
+import state_db
 
 
 def _zscore(s: pd.Series) -> pd.Series:
@@ -219,3 +220,25 @@ def run_screen(with_fundamentals: bool = True,
     t = score(t)
     report("Done", 1.0)
     return t
+
+
+SCREEN_CACHE = os.path.join("cache", "screen.pkl")
+
+
+def main():
+    """Headless daily refresh -- e.g. from nse-screen-refresh.timer, every
+    morning before market open. Runs the exact same pipeline as the
+    Screener page's manual "Run screen" button and writes to the SAME
+    cache (SCREEN_CACHE) it reads from -- so opening the Screener page
+    shows this morning's fresh ranking without needing a manual click
+    first. Wrapped in state_db.job_run() so it shows in the Job Log
+    alongside the other scheduled jobs."""
+    with state_db.job_run("screen_run", "scheduled") as jr:
+        result = run_screen(with_fundamentals=True)
+        os.makedirs("cache", exist_ok=True)
+        result.to_pickle(SCREEN_CACHE)
+        jr["summary"] = f"{len(result)} candidates ({int(result['all_gates'].sum())} passing all gates)"
+
+
+if __name__ == "__main__":
+    main()
