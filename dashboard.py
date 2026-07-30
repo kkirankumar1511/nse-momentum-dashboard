@@ -876,9 +876,7 @@ def page_screener():
                  "toggle — see Admin → Strategy configuration → 'Filter "
                  "candidates on fundamental score' (off by default).")
         if screen_running:
-            st.info(f"⏳ Scan already in progress (started "
-                   f"{screen_job['started_at']:%H:%M:%S}) — button disabled "
-                   "until it finishes; safe to switch tabs.")
+            st.info(f"⏳ Scan running since {screen_job['started_at']:%H:%M:%S} — safe to switch tabs.")
         if st.button("Run screen", type="primary", disabled=screen_running):
             start_background_job(
                 "screen_run", _run_and_cache_screen, with_fund,
@@ -1046,9 +1044,7 @@ def page_live_rebalance():
     rebalance_running = rebalance_job is not None and not rebalance_job["done"]
 
     if rebalance_running:
-        st.info(f"⏳ Scan already in progress (started "
-               f"{rebalance_job['started_at']:%H:%M:%S}) — button disabled "
-               "until it finishes; safe to switch tabs.")
+        st.info(f"⏳ Scan running since {rebalance_job['started_at']:%H:%M:%S} — safe to switch tabs.")
     if st.button("Run today's scan", type="primary", disabled=rebalance_running):
         fundamentals = st.session_state.get("value_scores")
         start_background_job(
