@@ -212,7 +212,6 @@ SCREEN_CACHE = os.path.join("cache", "screen.pkl")
 VALUE_SCORE_CACHE = os.path.join("cache", "fno_value_scores.pkl")
 BACKTEST_CACHE = os.path.join("cache", "backtest_result.pkl")
 FUNDAMENTALS_HISTORY_CACHE = os.path.join("cache", "fundamentals_history.pkl")
-SECTOR_DATA_CACHE = os.path.join("cache", "sector_data.pkl")
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +443,18 @@ def page_cockpit():
     unrealized_pnl = float(merged["pnl"].sum()) if not merged.empty else 0.0
     portfolio_value = available_cash + holdings_value
 
-    log = log_equity_snapshot(portfolio_value, invested_amount)
+    if portfolio_value > 0:
+        log = log_equity_snapshot(portfolio_value, invested_amount)
+    else:
+        # A Kite auth failure or transient fetch error can silently leave
+        # available_cash/holdings_value at 0 -- logging that as a real
+        # snapshot would put a fake drop-to-zero in the equity curve (this
+        # happened for real on a live install; see get_equity_log()'s
+        # docstring). Skip the write, just show the log as it already is.
+        log = state_db.get_equity_log()
+        st.warning("⚠️ Computed portfolio value is ₹0 — not logging today's "
+                  "snapshot (likely a Kite connection issue, not a real "
+                  "zero balance). Check the Kite login if this persists.")
     state_db.ensure_first_cash_flow_captured(available_cash)
     realized_pnl = state_db.get_realized_pnl()
     total_pnl = realized_pnl + unrealized_pnl
@@ -505,27 +515,34 @@ def page_cockpit():
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=plot_log["date"], y=plot_log["value"], name="Total capital (₹)",
-            mode="lines", line=dict(color="#16a34a", width=2),
-            fill="tozeroy", fillcolor="rgba(22,163,74,0.08)",
+            mode="lines+markers", line=dict(color="#16a34a", width=2),
+            marker=dict(size=5),
             hovertemplate="₹%{y:,.0f}<extra>Total capital</extra>"))
         if plot_log["invested_amount"].notna().any():
             fig.add_trace(go.Scatter(
                 x=plot_log["date"], y=plot_log["invested_amount"],
-                name="Invested amount (₹)", mode="lines",
+                name="Invested amount (₹)", mode="lines+markers",
                 line=dict(color="#6b7280", width=1.5, dash="dot"),
+                marker=dict(size=5),
                 hovertemplate="₹%{y:,.0f}<extra>Invested amount</extra>"))
+        # No fill-to-zero and an explicit, padded y-range -- with a small
+        # account and only a few days of history, the day-to-day move is
+        # tiny relative to the absolute total (e.g. ~2.5% over 4 days), so
+        # an axis forced to include ₹0 (which "fill: tozeroy" does) squashes
+        # that real movement into an invisible sliver at the top: the chart
+        # LOOKS flat/broken even though the underlying data is fine. Padding
+        # off the actual min/max instead makes real day-to-day change
+        # visible regardless of how large the total balance is.
+        all_vals = pd.concat([plot_log["value"], plot_log["invested_amount"]]).dropna()
+        y_lo, y_hi = float(all_vals.min()), float(all_vals.max())
+        pad = (y_hi - y_lo) * 0.15 or max(y_hi * 0.02, 100.0)
         fig.update_layout(
-            height=380, margin=dict(l=10, r=10, t=10, b=10),
+            title=dict(text="Portfolio value over time", x=0, xanchor="left"),
+            height=420, margin=dict(l=10, r=10, t=60, b=10),
             hovermode="x unified",
-            xaxis=dict(rangeslider=dict(visible=True), rangeselector=dict(buttons=[
-                dict(count=1, label="1m", step="month", stepmode="backward"),
-                dict(count=6, label="6m", step="month", stepmode="backward"),
-                dict(count=1, label="YTD", step="year", stepmode="todate"),
-                dict(count=1, label="1y", step="year", stepmode="backward"),
-                dict(step="all", label="All"),
-            ])),
-            yaxis=dict(tickprefix="₹", separatethousands=True),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+            yaxis=dict(tickprefix="₹", separatethousands=True,
+                      range=[y_lo - pad, y_hi + pad]),
+            legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0))
         st.plotly_chart(fig, width="stretch")
         if plot_log["invested_amount"].isna().any():
             st.caption("Invested amount only started being logged recently — "
@@ -757,8 +774,12 @@ def page_admin():
         sector_bonus_weight = c17.number_input(
             "Sector bonus weight", min_value=0.0, max_value=1.0,
             value=float(cfg["sector_bonus_weight"]), step=0.05,
-            help="0 = off. Backtested to underperform as of this default; "
-                 "see README's Sector relative-strength section.")
+            help="0 = off (recommended). Re-tested with the equal-weight "
+                 "allocator specifically (0.5/1.0/2.0): loses on CAGR and "
+                 "Sharpe at every weight, AND drawdown gets worse too "
+                 "(-19.58%->-22 to -27%), so there's no risk/reward "
+                 "trade-off to make here, unlike the fundamental gate. "
+                 "See README's Sector relative-strength section.")
         history_days = c18.number_input(
             "Candle history fetched (days)", min_value=300, max_value=3000,
             value=int(cfg["history_days"]), step=100)
@@ -1628,11 +1649,15 @@ def page_backtest():
         "Replays the exact screener logic point-in-time with monthly "
         "rebalancing (any slot freed by a stop gets redeployed immediately, "
         "not just at the next rebalance), daily ATR-stop checks, and "
-        "transaction costs. The fundamental quality gate is off by default "
-        "and opt-in below — when enabled it's genuinely point-in-time (only "
-        "uses filings that were actually public as of each rebalance date, "
-        "via each filing's real broadcast timestamp), not lookahead. Today's "
-        "universe implies some survivorship bias regardless — treat "
+        "transaction costs. Defaults below match the current LIVE strategy "
+        "(config.STRATEGY) exactly: fundamental quality gate on, trailing "
+        "stop on, the equal-weight allocator with cross-slot borrowing. "
+        "(The sector relative-strength bonus was tested here too -- "
+        "including together with the equal-weight allocator -- and "
+        "removed: it lost on CAGR/Sharpe at every weight tried, with "
+        "*worse* drawdown too, so there's no free lunch even in trade for "
+        "safety.) Today's universe implies some survivorship bias "
+        "regardless — treat "
         "parameter-sensitivity comparisons as more reliable than absolute "
         "returns."
     )
@@ -1653,22 +1678,122 @@ def page_backtest():
         end_date = b2.date_input("End date", value=dt.date.today(),
                                  max_value=dt.date.today())
         years = None
-    bt_capital = st.number_input("Starting capital (₹)", value=1_000_000.0,
-                                 step=100000.0)
+    bc1, bc2 = st.columns(2)
+    with bc1:
+        bt_capital = bc1.number_input("Starting capital (₹)", value=1_000_000.0,
+                                      step=100000.0)
+    with bc2:
+        bt_max_positions = bc2.number_input(
+            "Max open positions", min_value=1, max_value=30,
+            value=int(config.STRATEGY["max_positions"]), step=1,
+            help="Backtest-only override (config.STRATEGY['max_positions'] "
+                 "is 10 live) -- more slots means more diversification but "
+                 "smaller equal-weight targets per slot; fewer slots "
+                 "concentrates capital in higher-conviction picks. Not "
+                 "itself an A/B-tuned edge parameter the way the ones below "
+                 "are, just a portfolio-construction choice to experiment "
+                 "with.")
     st.caption("No per-trade cost is modeled — Zerodha charges no brokerage "
               "on equity delivery (CNC). Statutory costs (STT, stamp duty, "
               "exchange/SEBI charges) still apply in reality (~5-7 bps round "
               "trip) but aren't broker-specific; use `--cost-bps` on the CLI "
               "if you want a more conservative run that includes them.")
 
+    st.divider()
+    st.subheader("🎯 Strategy parameters — tested & approved")
+    st.caption("Every value below defaults to the current LIVE config.STRATEGY "
+              "-- adjust and click Run backtest to test a variation, the same "
+              "way each of these earned its spot as the default in the first "
+              "place.")
+
+    p1, p2 = st.columns(2)
+    with p1:
+        rsi_min_v = st.number_input(
+            "RSI min", min_value=0.0, max_value=100.0,
+            value=float(config.STRATEGY["rsi_min"]), step=0.01, format="%.2f",
+            help="Momentum names trade 45-80 in this system's regime; below "
+                 "this is not yet in an uptrend.")
+    with p2:
+        rsi_max_v = st.number_input(
+            "RSI max", min_value=0.0, max_value=100.0,
+            value=float(config.STRATEGY["rsi_max"]), step=0.01, format="%.2f",
+            help="A 5-year A/B (max_positions=4) found raising this 78->80 "
+                 "improved CAGR 7.36->8.15%, Sharpe 1.14->1.25 -- re-verify "
+                 "any further move against that same baseline, not just "
+                 "eyeballing one run.")
+
+    p3, p4 = st.columns(2)
+    with p3:
+        use_trailing = st.checkbox(
+            "Trailing stop (chandelier-style)",
+            value=bool(config.STRATEGY["trailing_stop_enabled"]),
+            help="LIVE default is ON. Ratchets each position's stop up to "
+                 "highest_close_since_entry - multiple*ATR as it gains, "
+                 "never back down.")
+    with p4:
+        trailing_mult_v = st.number_input(
+            "Trailing ATR multiple", min_value=0.5, max_value=10.0,
+            value=float(config.STRATEGY["trailing_atr_multiple"]), step=0.25,
+            disabled=not use_trailing,
+            help="A 5-year sweep found an inverted-U peaking at 4.0x (the "
+                 "live default): CAGR 24.30% vs baseline 22.51%, Sharpe 1.73 "
+                 "vs 1.50, max drawdown -14.37% vs -18.06%.")
+
+    p5, p6 = st.columns(2)
+    with p5:
+        use_equal_weight = st.checkbox(
+            "Equal-weight allocator (cross-slot borrowing)",
+            value=bool(config.STRATEGY["advanced_equal_weight_sizing"]),
+            help="LIVE default is ON. Sizes the whole day's buys in one "
+                 "pass -- cross-slot borrowing within tolerance, partial "
+                 "fill on shortfall, hard-stop-not-substitute, top-up of "
+                 "under-target holdings -- instead of one-symbol-at-a-time "
+                 "greedy sizing.")
+    with p6:
+        equal_weight_tolerance_v = st.number_input(
+            "Equal-weight tolerance (fraction)", min_value=0.0, max_value=1.0,
+            value=float(config.STRATEGY["equal_weight_tolerance_pct"]), step=0.01,
+            format="%.2f", disabled=not use_equal_weight,
+            help="A 5-year A/B found 0.20 (the live default) beats the "
+                 "original one-at-a-time fill on every metric at once: CAGR "
+                 "43.06->44.39%, Sharpe 1.64->1.67, max drawdown "
+                 "-20.30->-19.58%, profit factor 2.10->2.12.")
+
     use_fundamentals = st.checkbox(
-        "Include fundamental quality gate (point-in-time)", value=False,
-        help="Uses each filing's real broadcast timestamp to only count "
-             "what was actually public knowledge as of each rebalance date "
-             "— not today's fundamentals applied retroactively. Needs a "
-             "fundamentals history built below first (a one-time or "
-             "periodic scan across the universe, same cost as the "
-             "Fundamentals page's scan).")
+        "Include fundamental quality gate (point-in-time)", value=True,
+        help="This is the LIVE default (config.STRATEGY['fundamental_gate_"
+             "enabled']=True) -- uncheck only to see the pure-technical "
+             "baseline it was A/B'd against. Uses each filing's real "
+             "broadcast timestamp to only count what was actually public "
+             "knowledge as of each rebalance date -- not today's "
+             "fundamentals applied retroactively. Needs a fundamentals "
+             "history built below first (a one-time or periodic scan "
+             "across the universe, same cost as the Fundamentals page's "
+             "scan) -- without one, this checkbox has no effect regardless "
+             "of its state.")
+    p7, p8 = st.columns(2)
+    with p7:
+        fundamental_bonus_weight_v = st.number_input(
+            "Fundamental bonus weight", min_value=0.0, max_value=3.0,
+            value=float(config.STRATEGY["fundamental_bonus_weight"]), step=0.1,
+            disabled=not use_fundamentals,
+            help="Tilts ranking toward higher-quality gate-passers (on top "
+                 "of the gate itself, which only excludes/includes). A "
+                 "5-year sweep found an inverted-U peaking at 0.5 (the live "
+                 "default): CAGR 43.70->43.03% at 0.5, Sharpe 1.62->1.64, "
+                 "max drawdown improves -24.61->-20.30% -- anything above "
+                 "0.5 is a clear net negative.")
+    with p8:
+        min_fundamental_score_v = st.number_input(
+            "Min fundamental score (gate threshold)", min_value=0.0, max_value=100.0,
+            value=float(config.STRATEGY["min_fundamental_score"]), step=1.0,
+            disabled=not use_fundamentals,
+            help="NOT independently A/B-tuned -- config.py calls 50 (the "
+                 "live default) 'a rough average-or-better bar, tune to "
+                 "taste.' Only the gate's on/off status and the bonus "
+                 "weight above have documented A/B history; this threshold "
+                 "itself has never been swept, so treat any result here as "
+                 "a first look, not a verified finding.")
     if use_fundamentals:
         if os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
             hist_cached = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)
@@ -1689,68 +1814,6 @@ def page_backtest():
                         FUNDAMENTALS_HISTORY_CACHE)
             st.rerun()
 
-    use_sector = st.checkbox(
-        "Include sector relative-strength bonus", value=False,
-        help="Tilts ranking toward stocks in currently-outperforming "
-             "sectors, using each sector index's own real historical price "
-             "data (point-in-time, not today's NSE heatmap applied "
-             "retroactively) — see sector_universe.py. Needs sector data "
-             "built below first. Off by default: an earlier scoring "
-             "dimension built the same way (long-year breakout priority) "
-             "was A/B tested and found no edge, so treat this the same way "
-             "— verify with the A/B run below before trusting it.")
-    sector_weight = 1.0
-    if use_sector:
-        if os.path.exists(SECTOR_DATA_CACHE):
-            sec_cached = pd.read_pickle(SECTOR_DATA_CACHE)
-            age_hr = (dt.datetime.now() - sec_cached["run_time"]).total_seconds() / 3600
-            st.caption(f"📁 Sector data built {age_hr:.1f}h ago "
-                      f"({len(sec_cached['sector_candles'])} sector indices, "
-                      f"{len(sec_cached['sector_membership'])} symbols mapped).")
-        else:
-            st.warning("No sector data built yet — the bonus will have no "
-                      "effect until you build it.")
-        if st.button("Build/Refresh sector data"):
-            with st.spinner("Fetching sector membership + index history..."):
-                sector_membership = su.get_sector_membership(force_refresh=True)
-                sector_candles = su.fetch_sector_index_candles(
-                    days=int(years * 365) + 400 if range_mode == "Trailing years"
-                    else (dt.date.today() - start_date).days + 400)
-            os.makedirs("cache", exist_ok=True)
-            pd.to_pickle({"sector_membership": sector_membership,
-                         "sector_candles": sector_candles,
-                         "run_time": dt.datetime.now()}, SECTOR_DATA_CACHE)
-            st.rerun()
-        sector_weight = st.slider("Sector bonus weight", 0.0, 3.0, 1.0, 0.25,
-                                  help="0 = no effect (same as unchecked). "
-                                       "Higher = sector strength matters more "
-                                       "relative to the 4 existing technical "
-                                       "score terms.")
-
-    use_trailing = st.checkbox(
-        "Trail the stop up as a position gains (chandelier-style)",
-        value=False,
-        help="Ratchets each position's stop up to "
-             "highest_close_since_entry - multiple*ATR as it gains, never "
-             "back down — instead of leaving the stop fixed at entry for "
-             "the whole holding period. Existing winners already run "
-             "60-86 days on average and capture solid gains via the "
-             "rebalance exit; a fixed stop never locks in any of that "
-             "along the way, so a reversal can give back most of an open "
-             "profit before the stop or next month's rebalance catches "
-             "it. Verify with the A/B run below before trusting it.")
-    trailing_mult = 4.0
-    if use_trailing:
-        trailing_mult = st.slider(
-            "Trailing ATR multiple", 1.0, 8.0, 4.0, 0.25,
-            help="Distance below the running peak close, in ATRs. A real "
-                 "5-year sweep found this forms an inverted-U — too narrow "
-                 "(near the entry stop's own 2.5x) whipsaws out of "
-                 "winners early, too wide (6.0x+) barely trails at all — "
-                 "peaking at 4.0x (default here): CAGR 24.30% vs baseline "
-                 "22.51%, Sharpe 1.73 vs 1.50, max drawdown -14.37% vs "
-                 "-18.06%. Re-verify with the A/B run below on your own "
-                 "window before trusting it.")
 
     if "bt_result" not in st.session_state and os.path.exists(BACKTEST_CACHE):
         cached = pd.read_pickle(BACKTEST_CACHE)
@@ -1775,23 +1838,29 @@ def page_backtest():
         fundamentals_history = None
         if use_fundamentals and os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
             fundamentals_history = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)["history"]
-        run_cfg, sector_candles, sector_membership = None, None, None
-        if use_sector and os.path.exists(SECTOR_DATA_CACHE):
-            sec_data = pd.read_pickle(SECTOR_DATA_CACHE)
-            sector_candles = sec_data["sector_candles"]
-            sector_membership = sec_data["sector_membership"]
-            run_cfg = dict(config.STRATEGY)
-            run_cfg["sector_bonus_weight"] = sector_weight
-        if use_trailing:
-            run_cfg = run_cfg or dict(config.STRATEGY)
-            run_cfg["trailing_stop_enabled"] = True
-            run_cfg["trailing_atr_multiple"] = trailing_mult
+        # Always built fresh from the live config + every control above, so
+        # the backtest that actually runs can never silently diverge from
+        # what's shown on screen (previously run_cfg stayed None -- falling
+        # back to config.STRATEGY untouched -- unless sector was checked).
+        run_cfg = dict(config.STRATEGY)
+        run_cfg["max_positions"] = int(bt_max_positions)
+        run_cfg["rsi_min"] = rsi_min_v
+        run_cfg["rsi_max"] = rsi_max_v
+        run_cfg["trailing_stop_enabled"] = use_trailing
+        run_cfg["trailing_atr_multiple"] = trailing_mult_v
+        run_cfg["advanced_equal_weight_sizing"] = use_equal_weight
+        run_cfg["equal_weight_tolerance_pct"] = equal_weight_tolerance_v
+        # fundamental_gate_enabled is set explicitly too, even though the
+        # gate is already a no-op without fundamentals_history (see
+        # use_fundamentals above) -- this keeps run_cfg an honest mirror of
+        # every control on screen rather than relying on that side channel.
+        run_cfg["fundamental_gate_enabled"] = use_fundamentals
+        run_cfg["fundamental_bonus_weight"] = fundamental_bonus_weight_v
+        run_cfg["min_fundamental_score"] = min_fundamental_score_v
         with st.spinner("Simulating..."):
             res = bt.run_backtest(candles_bt, bench_bt, run_cfg,
                                   initial_capital=bt_capital,
-                                  fundamentals_history=fundamentals_history,
-                                  sector_candles=sector_candles,
-                                  sector_membership=sector_membership)
+                                  fundamentals_history=fundamentals_history)
             run_time = dt.datetime.now()
             st.session_state["bt_result"] = res
             st.session_state["bt_bench"] = bench_bt
@@ -1800,144 +1869,6 @@ def page_backtest():
             os.makedirs("cache", exist_ok=True)
             pd.to_pickle({"result": res, "bench": bench_bt, "run_time": run_time},
                         BACKTEST_CACHE)
-
-    st.divider()
-    st.subheader("Sector A/B comparison")
-    st.caption("Runs the backtest twice with identical settings — once with "
-              "the sector bonus off (baseline), once with it on at the "
-              "chosen weight above — so you can see the actual effect "
-              "instead of assuming one.")
-    if st.button("Run A/B: baseline vs sector-aware", disabled=run_disabled
-                or not os.path.exists(SECTOR_DATA_CACHE)):
-        with st.spinner("Loading candles (cached daily, first run is slow)..."):
-            if range_mode == "Custom dates":
-                ab_days = (dt.date.today() - start_date).days + 400
-                candles_ab, bench_ab = bt.load_candles_cached(
-                    config.UNIVERSE, ab_days, end_date=end_date)
-            else:
-                candles_ab, bench_ab = bt.load_candles_cached(
-                    config.UNIVERSE, int(years * 365) + 400)
-        sec_data = pd.read_pickle(SECTOR_DATA_CACHE)
-        # Explicit trailing_stop_enabled=False on both arms: isolates the
-        # sector effect against a pure-technical baseline (matching the
-        # already-published README numbers) regardless of what
-        # config.STRATEGY's own default is -- config.STRATEGY now ships
-        # with trailing_stop_enabled=True, so leaving it implicit here
-        # would silently fold the trailing stop into "baseline" too.
-        cfg_baseline = dict(config.STRATEGY)
-        cfg_baseline["trailing_stop_enabled"] = False
-        cfg_sector = dict(config.STRATEGY)
-        cfg_sector["trailing_stop_enabled"] = False
-        cfg_sector["sector_bonus_weight"] = sector_weight
-        with st.spinner("Simulating baseline..."):
-            res_baseline = bt.run_backtest(candles_ab, bench_ab, cfg_baseline,
-                                           initial_capital=bt_capital)
-        with st.spinner("Simulating sector-aware..."):
-            res_sector = bt.run_backtest(
-                candles_ab, bench_ab, cfg_sector, initial_capital=bt_capital,
-                sector_candles=sec_data["sector_candles"],
-                sector_membership=sec_data["sector_membership"])
-        st.session_state["bt_ab_baseline"] = res_baseline
-        st.session_state["bt_ab_sector"] = res_sector
-        st.session_state["bt_ab_bench"] = bench_ab
-
-    if "bt_ab_baseline" in st.session_state:
-        ab_base = st.session_state["bt_ab_baseline"]
-        ab_sector = st.session_state["bt_ab_sector"]
-        ab_bench = st.session_state["bt_ab_bench"]
-        eq_base = ab_base["equity_curve"]
-        eq_sector = ab_sector["equity_curve"]
-        nifty_ab = ab_bench["close"].reindex(eq_base.index).ffill()
-        ab_fig = go.Figure()
-        ab_fig.add_trace(go.Scatter(
-            x=eq_base.index, y=eq_base / eq_base.iloc[0] * 100,
-            name="Baseline", mode="lines", line=dict(color="#6b7280", width=1.5),
-            hovertemplate="%{y:.1f}<extra>Baseline</extra>"))
-        ab_fig.add_trace(go.Scatter(
-            x=eq_base.index,
-            y=(eq_sector / eq_sector.iloc[0] * 100).reindex(eq_base.index).ffill(),
-            name="Sector-aware", mode="lines", line=dict(color="#16a34a", width=2),
-            hovertemplate="%{y:.1f}<extra>Sector-aware</extra>"))
-        ab_fig.add_trace(go.Scatter(
-            x=nifty_ab.index, y=nifty_ab / nifty_ab.iloc[0] * 100,
-            name="NIFTY 50", mode="lines", line=dict(color="#9ca3af", width=1, dash="dot"),
-            hovertemplate="%{y:.1f}<extra>NIFTY 50</extra>"))
-        ab_fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
-                            hovermode="x unified", yaxis=dict(title="Growth of 100"),
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-        st.plotly_chart(ab_fig, width="stretch")
-        st.dataframe(pd.DataFrame({"Baseline": ab_base["metrics"],
-                                   "Sector-aware": ab_sector["metrics"]}),
-                    width="stretch")
-
-    st.divider()
-    st.subheader("Trailing stop A/B comparison")
-    st.caption("Runs the backtest twice with identical settings — once with "
-              "a fixed entry stop (baseline), once with the stop trailing "
-              "up at the chosen ATR multiple above — so you can see the "
-              "actual effect instead of assuming one.")
-    if st.button("Run A/B: baseline vs trailing-stop", disabled=run_disabled):
-        with st.spinner("Loading candles (cached daily, first run is slow)..."):
-            if range_mode == "Custom dates":
-                ts_days = (dt.date.today() - start_date).days + 400
-                candles_ts, bench_ts = bt.load_candles_cached(
-                    config.UNIVERSE, ts_days, end_date=end_date)
-            else:
-                candles_ts, bench_ts = bt.load_candles_cached(
-                    config.UNIVERSE, int(years * 365) + 400)
-        cfg_ts_baseline = dict(config.STRATEGY)
-        cfg_ts_baseline["trailing_stop_enabled"] = False
-        cfg_trailing = dict(config.STRATEGY)
-        cfg_trailing["trailing_stop_enabled"] = True
-        cfg_trailing["trailing_atr_multiple"] = trailing_mult
-        with st.spinner("Simulating baseline..."):
-            res_ts_baseline = bt.run_backtest(candles_ts, bench_ts, cfg_ts_baseline,
-                                              initial_capital=bt_capital)
-        with st.spinner("Simulating trailing-stop..."):
-            res_ts_trailing = bt.run_backtest(candles_ts, bench_ts, cfg_trailing,
-                                              initial_capital=bt_capital)
-        st.session_state["bt_ts_baseline"] = res_ts_baseline
-        st.session_state["bt_ts_trailing"] = res_ts_trailing
-        st.session_state["bt_ts_bench"] = bench_ts
-
-    if "bt_ts_baseline" in st.session_state:
-        ts_base = st.session_state["bt_ts_baseline"]
-        ts_trailing = st.session_state["bt_ts_trailing"]
-        ts_bench = st.session_state["bt_ts_bench"]
-        eq_ts_base = ts_base["equity_curve"]
-        eq_ts_trailing = ts_trailing["equity_curve"]
-        nifty_ts = ts_bench["close"].reindex(eq_ts_base.index).ffill()
-        ts_fig = go.Figure()
-        ts_fig.add_trace(go.Scatter(
-            x=eq_ts_base.index, y=eq_ts_base / eq_ts_base.iloc[0] * 100,
-            name="Baseline", mode="lines", line=dict(color="#6b7280", width=1.5),
-            hovertemplate="%{y:.1f}<extra>Baseline</extra>"))
-        ts_fig.add_trace(go.Scatter(
-            x=eq_ts_base.index,
-            y=(eq_ts_trailing / eq_ts_trailing.iloc[0] * 100).reindex(eq_ts_base.index).ffill(),
-            name="Trailing-stop", mode="lines", line=dict(color="#16a34a", width=2),
-            hovertemplate="%{y:.1f}<extra>Trailing-stop</extra>"))
-        ts_fig.add_trace(go.Scatter(
-            x=nifty_ts.index, y=nifty_ts / nifty_ts.iloc[0] * 100,
-            name="NIFTY 50", mode="lines", line=dict(color="#9ca3af", width=1, dash="dot"),
-            hovertemplate="%{y:.1f}<extra>NIFTY 50</extra>"))
-        ts_fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
-                            hovermode="x unified", yaxis=dict(title="Growth of 100"),
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-        st.plotly_chart(ts_fig, width="stretch")
-        st.dataframe(pd.DataFrame({"Baseline": ts_base["metrics"],
-                                   "Trailing-stop": ts_trailing["metrics"]}),
-                    width="stretch")
-
-        yp_ts_base = bt.yearly_performance(eq_ts_base, ts_bench, ts_base["trades"])
-        yp_ts_trailing = bt.yearly_performance(eq_ts_trailing, ts_bench, ts_trailing["trades"])
-        st.caption("Year-by-year Strategy % — baseline vs trailing-stop")
-        st.dataframe(pd.DataFrame({
-            "Baseline %": yp_ts_base["Strategy %"],
-            "Trailing-stop %": yp_ts_trailing["Strategy %"],
-            "NIFTY %": yp_ts_base["NIFTY %"],
-            "Difference": yp_ts_trailing["Strategy %"] - yp_ts_base["Strategy %"],
-        }), width="stretch")
 
     if "bt_result" not in st.session_state:
         st.info("Click **Run backtest** to simulate on real Kite data.")
@@ -1965,14 +1896,10 @@ def page_backtest():
         line=dict(color="#6b7280", width=1.5, dash="dot"),
         hovertemplate="%{y:.1f}<extra>NIFTY 50</extra>"))
     eq_fig.update_layout(
-        height=380, margin=dict(l=10, r=10, t=10, b=10), hovermode="x unified",
-        xaxis=dict(rangeslider=dict(visible=True), rangeselector=dict(buttons=[
-            dict(count=1, label="1y", step="year", stepmode="backward"),
-            dict(count=3, label="3y", step="year", stepmode="backward"),
-            dict(step="all", label="All"),
-        ])),
+        title=dict(text="Backtest equity curve — growth of ₹100", x=0, xanchor="left"),
+        height=420, margin=dict(l=10, r=10, t=60, b=10), hovermode="x unified",
         yaxis=dict(title="Growth of 100"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0))
     st.plotly_chart(eq_fig, width="stretch")
 
     bc1, bc2, bc3, bc4 = st.columns(4)
@@ -1991,8 +1918,10 @@ def page_backtest():
         line=dict(color="#dc2626", width=1.5), fill="tozeroy",
         fillcolor="rgba(220,38,38,0.15)",
         hovertemplate="%{y:.1f}%<extra>Drawdown</extra>"))
-    dd_fig.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10),
-                         yaxis=dict(title="Drawdown %"), showlegend=False)
+    dd_fig.update_layout(
+        title=dict(text="Drawdown from peak", x=0, xanchor="left"),
+        height=260, margin=dict(l=10, r=10, t=50, b=10),
+        yaxis=dict(title="Drawdown %"), showlegend=False)
     st.plotly_chart(dd_fig, width="stretch")
 
     st.subheader("Year-by-year performance")
@@ -2014,8 +1943,9 @@ def page_backtest():
             x=yp.index.astype(str), y=yp["NIFTY %"], name="NIFTY %",
             marker_color="#9ca3af", hovertemplate="%{y:.1f}%<extra>NIFTY 50</extra>"))
         bar_fig.update_layout(
-            height=320, margin=dict(l=10, r=10, t=10, b=10), barmode="group",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+            title=dict(text="Strategy vs NIFTY by year", x=0, xanchor="left"),
+            height=350, margin=dict(l=10, r=10, t=50, b=10), barmode="group",
+            legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0))
         st.plotly_chart(bar_fig, width="stretch")
 
     if not res["open_positions"].empty:

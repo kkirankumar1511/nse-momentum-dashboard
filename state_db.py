@@ -707,6 +707,22 @@ def log_equity_snapshot(value: float, invested_amount: float | None = None) -> p
     return log
 
 
+def get_equity_log() -> pd.DataFrame:
+    """Read-only variant of log_equity_snapshot() for callers that want
+    today's chart data WITHOUT writing a new row -- e.g. page_cockpit()
+    skips the write entirely when the freshly-computed portfolio_value
+    looks invalid (a Kite auth failure or transient fetch error silently
+    returning 0 would otherwise get logged as a real snapshot and put a
+    fake drop-to-zero in the equity curve; this happened for real before
+    this guard existed -- see the 2026-07-18..24 rows manually cleaned
+    up from a live install)."""
+    conn = get_conn()
+    log = pd.read_sql(
+        "SELECT date, value, invested_amount FROM equity_log ORDER BY date", conn)
+    conn.close()
+    return log
+
+
 # ---------------------------------------------------------------------------
 # Rebalance run history (replaces rebalance_proposal.pkl)
 # ---------------------------------------------------------------------------
