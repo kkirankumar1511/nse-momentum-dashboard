@@ -664,9 +664,49 @@ def page_admin():
     if ledger.empty:
         st.caption("No cash flows logged yet.")
     else:
-        st.dataframe(
-            pnl_style(ledger.sort_values("date", ascending=False), fmt={"amount": "{:,.0f}"}),
-            width="stretch", hide_index=True)
+        st.caption("Edit a value directly, delete a row via its trash icon "
+                  "(hover the row, far left), or add one right in the table "
+                  "-- then click Update. Nothing changes until you do.")
+        display_ledger = ledger.sort_values("date", ascending=False).reset_index(drop=True)
+        display_ledger["date"] = pd.to_datetime(display_ledger["date"]).dt.date
+        edited_ledger = st.data_editor(
+            display_ledger, hide_index=True, width="stretch",
+            key="cash_flow_editor", num_rows="dynamic",
+            column_config={
+                "id": None,  # internal row key, hidden from display
+                "date": st.column_config.DateColumn("Date"),
+                "amount": st.column_config.NumberColumn(
+                    "Amount (₹) — +deposit / -withdrawal", format="%.2f"),
+                "note": st.column_config.TextColumn("Note"),
+            })
+        if st.button("Update ledger", type="primary", key="cash_flow_update_btn"):
+            original_by_id = ledger.set_index("id")
+            edited_ids = set(edited_ledger["id"].dropna().astype(int))
+            deleted_ids = set(original_by_id.index) - edited_ids
+            changed = 0
+            for did in deleted_ids:
+                state_db.delete_cash_flow(int(did))
+                changed += 1
+            for _, row in edited_ledger.iterrows():
+                if row["date"] is None or pd.isna(row["amount"]) or row["amount"] == 0:
+                    continue  # incomplete row (e.g. a blank row just added) -- skip
+                new_date = row["date"].isoformat() if hasattr(row["date"], "isoformat") \
+                    else str(row["date"])
+                new_note = row["note"] or ""
+                if pd.isna(row["id"]):
+                    # A brand-new row typed directly into the table.
+                    state_db.record_cash_flow(new_date, float(row["amount"]), new_note)
+                    changed += 1
+                    continue
+                rid = int(row["id"])
+                orig = original_by_id.loc[rid]
+                if (new_date != orig["date"] or float(row["amount"]) != float(orig["amount"])
+                        or new_note != (orig["note"] or "")):
+                    state_db.update_cash_flow(rid, new_date, float(row["amount"]), new_note)
+                    changed += 1
+            st.success(f"Updated {changed} entr{'y' if changed == 1 else 'ies'}." if changed
+                      else "No changes to apply.")
+            st.rerun()
 
     st.divider()
     st.subheader("🎯 Strategy configuration")
@@ -825,7 +865,7 @@ def page_admin():
     _skipped_df = state_db.get_skipped_symbols_df()
     skipped_reasons = (_skipped_df.set_index("symbol")["reason"] if not _skipped_df.empty
                       else pd.Series(dtype=str))
-    all_syms_for_skip = sorted(set(config.UNIVERSE) | set(skipped_reasons.index))
+    all_syms_for_skip = sorted(set(config.UNIVERSE_RAW) | set(skipped_reasons.index))
     try:
         skip_prices = kite_client.get_ltp(all_syms_for_skip)
     except Exception as e:
@@ -2313,7 +2353,9 @@ page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
 
 with st.sidebar:
     st.metric("Available cash", f"₹{available_cash:,.0f}")
-    st.caption(f"F&O universe: {len(config.UNIVERSE)} stocks · "
+    n_skipped = len(config.UNIVERSE_RAW) - len(config.UNIVERSE)
+    skipped_note = f" ({n_skipped} skipped)" if n_skipped else ""
+    st.caption(f"F&O universe: {len(config.UNIVERSE_RAW)} stocks{skipped_note} · "
               f"{dt.date.today():%d %b %Y}")
 
 nav = st.navigation([page_cockpit_p, page_screener_p, page_live_rebalance_p,

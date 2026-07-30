@@ -66,26 +66,33 @@ def get_universe(refresh: bool = False) -> list[str]:
 
 
 def refresh_universe() -> None:
-    """Recomputes the module-level UNIVERSE list in place, applying the
-    current skip list (state_db.skipped_symbols, editable from Admin --
-    "Skip stocks from scanner"). Called once below at import time, and
-    again after every Admin-page skip/un-skip so the change takes effect
+    """Recomputes UNIVERSE and UNIVERSE_RAW in place, applying the current
+    skip list (state_db.skipped_symbols, editable from Admin -- "Skip
+    stocks from scanner"). Called once below at import time, and again
+    after every Admin-page skip/un-skip so the change takes effect
     immediately for every module that reads config.UNIVERSE -- screener.py,
     backtest.py, fundamentals_agent.py, dashboard.py all do `import config`
     and then read `config.UNIVERSE` fresh at call time (never `from config
     import UNIVERSE`), so reassigning the name here is all that's needed;
     same live-update pattern as config.STRATEGY.update() elsewhere in this
-    app -- no dashboard/service restart required."""
-    global UNIVERSE
-    base = _fno.get_fno_universe(verbose=False)
+    app -- no dashboard/service restart required.
+
+    UNIVERSE_RAW is the full F&O-eligible list, NEVER skip-filtered --
+    skipping a stock is a "don't scan/trade this" preference, not a claim
+    that NSE's actual F&O list is smaller, so anything just reporting the
+    exchange's real count (e.g. the sidebar's "F&O universe: N stocks")
+    should read UNIVERSE_RAW, not UNIVERSE."""
+    global UNIVERSE, UNIVERSE_RAW
+    UNIVERSE_RAW = _fno.get_fno_universe(verbose=False)
     skipped = set(state_db.get_skipped_symbols())
-    UNIVERSE = [s for s in base if s not in skipped]
+    UNIVERSE = [s for s in UNIVERSE_RAW if s not in skipped]
 
 
 # Lazily-resolved default universe (safe at import time — falls back to the
-# bundled snapshot if NSE/Kite are unreachable). Excludes anything in the
-# manual skip list -- see refresh_universe() above.
+# bundled snapshot if NSE/Kite are unreachable). UNIVERSE excludes anything
+# in the manual skip list; UNIVERSE_RAW never does -- see refresh_universe().
 UNIVERSE: list[str] = []
+UNIVERSE_RAW: list[str] = []
 refresh_universe()
 
 BENCHMARK = "NSE:NIFTY 50"   # for relative strength

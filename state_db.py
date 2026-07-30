@@ -657,12 +657,34 @@ def record_cash_flow(date: str, amount: float, note: str = "") -> None:
 
 def get_cash_flows() -> pd.DataFrame:
     """Full ledger, oldest first -- feeds the XIRR calc and the Admin
-    page's audit-trail table."""
+    page's audit-trail table. Includes `id` so the Admin page's editable
+    table can target a specific row for update/delete -- callers that
+    only need date/amount/note (the XIRR calc) can simply ignore it."""
     conn = get_conn()
     log = pd.read_sql(
-        "SELECT date, amount, note FROM cash_flows ORDER BY date, id", conn)
+        "SELECT id, date, amount, note FROM cash_flows ORDER BY date, id", conn)
     conn.close()
     return log
+
+
+def update_cash_flow(id: int, date: str, amount: float, note: str = "") -> None:
+    """Corrects an existing entry (wrong date/amount/note typo) in place --
+    used by the Admin page's editable ledger table."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE cash_flows SET date = ?, amount = ?, note = ? WHERE id = ?",
+        (date, amount, note, id))
+    conn.commit()
+    conn.close()
+
+
+def delete_cash_flow(id: int) -> None:
+    """Removes an entry logged in error -- used by the Admin page's
+    editable ledger table."""
+    conn = get_conn()
+    conn.execute("DELETE FROM cash_flows WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
 
 
 def ensure_first_cash_flow_captured(available_cash: float) -> None:
