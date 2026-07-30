@@ -548,41 +548,10 @@ def page_cockpit():
                       "current_stop": "{:.2f}"}, na_rep="—"),
             width="stretch", hide_index=True)
 
-        with st.expander("Active GTTs — straight from Kite (source of truth)"):
-            st.caption(
-                "The 'Current stop' column above is this app's own tracked "
-                "value -- it should match this list once you've clicked "
-                "'Apply stop updates', but this table reads directly from "
-                "your broker, so it's the real, authoritative answer to "
-                "\"what's my GTT actually set to right now.\"")
-            try:
-                gtts = kite_client.get_active_gtts()
-                rows = []
-                if not gtts.empty:
-                    for _, g in gtts.iterrows():
-                        cond = g.get("condition") or {}
-                        orders = g.get("orders") or []
-                        sym = cond.get("tradingsymbol") if isinstance(cond, dict) else None
-                        if sym not in held:
-                            continue
-                        trigger_vals = cond.get("trigger_values") if isinstance(cond, dict) else None
-                        trigger_price = trigger_vals[0] if trigger_vals else None
-                        qty = orders[0].get("quantity") if orders else None
-                        rows.append({
-                            "symbol": sym, "trigger_price": trigger_price,
-                            "qty": qty, "status": g.get("status"),
-                            "updated_at": g.get("updated_at"),
-                        })
-                gtt_df = pd.DataFrame(rows)
-                if gtt_df.empty:
-                    st.caption("No active GTTs found for your current holdings.")
-                else:
-                    st.dataframe(
-                        pnl_style(gtt_df.sort_values("symbol"),
-                                 fmt={"trigger_price": "{:.2f}"}),
-                        width="stretch", hide_index=True)
-            except Exception as e:
-                st.warning(f"Could not fetch GTTs from Kite: {e}")
+        st.caption("'Current stop'/'GTT active' above are this app's own "
+                  "tracked values.")
+        st.page_link(page_positions_trade_p,
+                    label="Full GTT details + actions →", icon="🛑")
 
 # ---------------------------------------------------------------------------
 # Page: Admin
@@ -657,6 +626,24 @@ def page_admin():
         trailing_atr_multiple = c5.number_input(
             "Trailing stop (× ATR)", min_value=0.5, max_value=10.0,
             value=float(cfg["trailing_atr_multiple"]), step=0.1)
+
+        st.markdown("**Automation**")
+        c4b, c4c = st.columns(2)
+        auto_apply_stop_updates = c4b.checkbox(
+            "Auto-apply trailing-stop ratchets", value=bool(cfg["auto_apply_stop_updates"]),
+            help="Push a ratcheted stop straight to the real broker GTT as "
+                 "soon as it's computed, instead of waiting for a manual "
+                 "'Apply stop updates' click. Low-risk (only ever tightens "
+                 "an existing stop) -- on by default.")
+        auto_execute_trades = c4c.checkbox(
+            "Auto-execute sells/buys/top-ups", value=bool(cfg["auto_execute_trades"]),
+            help="Have the SCHEDULED daily rebalance job place proposed "
+                 "sells/buys/top-ups as real orders automatically, with no "
+                 "confirmation step (never affects the dashboard's manual "
+                 "'Run today's scan' button, which always stays "
+                 "review-first). Off by default -- this deploys new "
+                 "capital and exits real positions, so it's a deliberate "
+                 "opt-in once you trust the proposal quality.")
 
         st.markdown("**Momentum & trend**")
         c6, c7, c8 = st.columns(3)
@@ -733,6 +720,8 @@ def page_admin():
             "atr_stop_multiple": float(atr_stop_multiple),
             "trailing_stop_enabled": bool(trailing_stop_enabled),
             "trailing_atr_multiple": float(trailing_atr_multiple),
+            "auto_apply_stop_updates": bool(auto_apply_stop_updates),
+            "auto_execute_trades": bool(auto_execute_trades),
             "mom_lookback_days_short": int(mom_lookback_days_short),
             "mom_lookback_days_long": int(mom_lookback_days_long),
             "skip_recent_days": int(skip_recent_days),
@@ -967,20 +956,31 @@ def page_screener():
 # ---------------------------------------------------------------------------
 
 def page_live_rebalance():
-    st.subheader("📡 Live Rebalance — review, then execute")
-    st.warning(
-        "**Running the scan never places an order by itself.** Execution "
-        "below requires an explicit confirmation checkbox per batch."
-    )
-    st.caption(
-        "Runs the exact same screener pipeline as Screener/Backtest, diffs "
-        "it against your actual Kite holdings, and proposes sells (closed "
-        "below 200 EMA, or dropped out of the top-ranked zone), buys (open "
-        "slots, sized off your real available cash), and trailing-stop "
-        "updates (see below) — your broker enforces the GTT itself "
-        "intraday, this only recommends raising it. Can also be scheduled "
-        "externally via `python live_rebalance.py`."
-    )
+    auto_exec = bool(config.STRATEGY.get("auto_execute_trades", False))
+    st.subheader(
+        "📡 Live Rebalance — review, then execute" if not auto_exec
+        else "📡 Live Rebalance — auto-executing",
+        help="Runs the exact same screener pipeline as Screener/Backtest, "
+             "diffs it against your actual Kite holdings, and proposes "
+             "sells (closed below 200 EMA, or dropped out of the "
+             "top-ranked zone), buys (open slots, sized off your real "
+             "available cash), and trailing-stop updates. Can also be "
+             "scheduled externally via `python live_rebalance.py`.")
+    if auto_exec:
+        st.warning(
+            "**auto_execute_trades is ON** — the scheduled daily scan places "
+            "these sells/buys/top-ups as real orders automatically, with no "
+            "confirmation step. The buttons below still work as a manual "
+            "override for whatever's left (e.g. a manual 'Run today's scan'). "
+            "Turn this off in Admin → Strategy configuration to go back to "
+            "manual-only.")
+    else:
+        st.info(
+            "Manual mode — running the scan never places an order by "
+            "itself. Execution below requires an explicit confirmation "
+            "checkbox per batch. Enable **auto_execute_trades** in "
+            "Admin → Strategy configuration to have the scheduled daily "
+            "scan place these automatically instead.")
 
     if "rebalance_proposal" not in st.session_state:
         last_run = state_db.get_last_rebalance_run()
@@ -1077,41 +1077,7 @@ def page_live_rebalance():
             "I confirm I want to execute ALL proposed sells at market",
             key="confirm_sell_all")
         if st.button("Execute all sells", disabled=not confirm_sell):
-            log = []
-            succeeded = []
-            for _, r in result["sells"].iterrows():
-                try:
-                    oid = kite_client.square_off_position(r["symbol"])
-                    log.append(f"✅ {r['symbol']}: order {oid}")
-                    # LTP-at-order-time approximation for the tradebook exit
-                    # price -- same convention reconciled_positions() already
-                    # documents (Kite's API has no historical fill-price
-                    # endpoint). Carries the rebalance rule's own reason
-                    # (e.g. "dropped out of top N rank") onto the trade
-                    # record -- previously discarded the moment the order fired.
-                    try:
-                        ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
-                    except Exception:
-                        ltp = None
-                    state_db.close_trade(r["symbol"], ltp, r["reason"])
-                    # A stale GTT left pointing at a position you no longer
-                    # hold can trigger and attempt to sell shares that
-                    # aren't there (order rejection) or confusingly linger
-                    # in the Kite GTT list -- same cleanup
-                    # check_gap_down_stops() already does for its own
-                    # auto-sells.
-                    pos = state_db.get_open_positions().get(r["symbol"])
-                    gtt_id = pos.get("gtt_trigger_id") if pos else None
-                    if gtt_id:
-                        try:
-                            kite_client.delete_gtt(int(gtt_id))
-                            log.append(f"   GTT {gtt_id} deleted")
-                        except Exception as e:
-                            log.append(f"   ⚠️ GTT delete failed: {e} — "
-                                      "remove it manually in the Trade tab")
-                    succeeded.append(r["symbol"])
-                except Exception as e:
-                    log.append(f"❌ {r['symbol']}: FAILED — {e}")
+            log, succeeded = lr.execute_sells(result["sells"])
             st.session_state["sell_exec_log"] = log
             if succeeded:
                 result["sells"] = result["sells"][
@@ -1143,47 +1109,7 @@ def page_live_rebalance():
             "I confirm I want to execute ALL proposed buys at market",
             key="confirm_buy_all")
         if st.button("Execute all buys", disabled=not confirm_buy):
-            log = []
-            succeeded = []
-            for _, r in result["buys"].iterrows():
-                try:
-                    oid = kite_client.place_order(r["symbol"], int(r["qty"]), "BUY")
-                except Exception as e:
-                    log.append(f"❌ {r['symbol']}: BUY FAILED — {e}")
-                    continue
-                succeeded.append(r["symbol"])
-                msg = f"✅ {r['symbol']}: order {oid}"
-                gtt_id = None
-                if place_gtt:
-                    try:
-                        gtt_id = kite_client.place_gtt_stoploss(
-                            r["symbol"], int(r["qty"]), r["stop"], r["price"])
-                        msg += f", GTT {gtt_id} @ ₹{r['stop']:.1f}"
-                    except Exception as e:
-                        msg += (f" — ⚠️ BUY SUCCEEDED but GTT FAILED: {e} "
-                               "(no stop-loss in place — check Unprotected "
-                               "holdings below)")
-                # Recorded even when the GTT failed (gtt_id=None) so the
-                # unprotected-holdings check below can flag it -- a bought
-                # position always needs trailing-stop bookkeeping started,
-                # whether or not its GTT actually got placed.
-                position_id = state_db.record_new_position(
-                    r["symbol"], float(r["price"]), int(r["qty"]),
-                    float(r["stop"]), gtt_id)
-                # Entry-time technical/fundamental snapshot for the
-                # tradebook -- already on this row from the screener
-                # pipeline (propose_rebalance()'s buys dict), zero extra
-                # computation.
-                state_db.record_trade_entry(
-                    r["symbol"], float(r["price"]), int(r["qty"]),
-                    float(r["stop"]),
-                    snapshot={"score": r.get("score"), "rsi": r.get("rsi"),
-                             "pct_52w_high": r.get("pct_52w_high"),
-                             "vol_expansion": r.get("vol_expansion"),
-                             "fundamental_score": r.get("fundamental_score"),
-                             "entry_reason": r.get("reason")},
-                    position_id=position_id)
-                log.append(msg)
+            log, succeeded = lr.execute_buys(result["buys"], place_gtt=place_gtt)
             st.session_state["buy_exec_log"] = log
             if succeeded:
                 result["buys"] = result["buys"][
@@ -1214,34 +1140,7 @@ def page_live_rebalance():
             "I confirm I want to execute ALL proposed top-ups at market",
             key="confirm_topup_all")
         if st.button("Execute all top-ups", disabled=not confirm_topup):
-            log = []
-            succeeded = []
-            for _, r in top_ups.iterrows():
-                try:
-                    oid = kite_client.place_order(r["symbol"], int(r["extra_qty"]), "BUY")
-                except Exception as e:
-                    log.append(f"❌ {r['symbol']}: BUY FAILED — {e}")
-                    continue
-                succeeded.append(r["symbol"])
-                msg = f"✅ {r['symbol']}: order {oid} (+{int(r['extra_qty'])})"
-                gtt_id = r.get("gtt_trigger_id")
-                if pd.notna(gtt_id):
-                    try:
-                        pos = state_db.get_open_positions().get(r["symbol"])
-                        new_total_qty = (pos["qty"] + int(r["extra_qty"])) if pos else int(r["extra_qty"])
-                        ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
-                        kite_client.modify_gtt_trigger(
-                            int(gtt_id), r["symbol"], new_total_qty,
-                            pos["current_stop"] if pos else float(r["price"]), ltp)
-                        msg += f", GTT updated to qty {new_total_qty}"
-                    except Exception as e:
-                        msg += (f" — ⚠️ BUY SUCCEEDED but GTT quantity update FAILED: "
-                               f"{e} (existing GTT still only covers the old "
-                               "quantity — check Unprotected holdings below)")
-                else:
-                    msg += " — ⚠️ no existing GTT to update (position may be unprotected)"
-                state_db.top_up_trade(r["symbol"], int(r["extra_qty"]), float(r["price"]))
-                log.append(msg)
+            log, succeeded = lr.execute_top_ups(top_ups)
             st.session_state["topup_exec_log"] = log
             if succeeded:
                 result["top_ups"] = top_ups[
@@ -1301,29 +1200,13 @@ def page_live_rebalance():
         st.caption("No trailing-stop increases needed attention today — "
                   "either nothing ratcheted, or it all auto-applied cleanly.")
 
-    st.subheader("⚠️ Unprotected holdings")
-    try:
-        active_gtts = kite_client.get_active_gtts()
-        gtt_symbols = set()
-        if not active_gtts.empty and "condition" in active_gtts.columns:
-            for cond in active_gtts["condition"]:
-                sym = cond.get("tradingsymbol") if isinstance(cond, dict) else None
-                if sym:
-                    gtt_symbols.add(sym)
-        unprotected = [sym for sym in result["holdings"]["symbol"]
-                      if sym not in gtt_symbols]
-        if unprotected:
-            st.error(f"{len(unprotected)} holding(s) with **no active GTT "
-                    f"stop-loss**: {', '.join(unprotected)}. Place one "
-                    "manually in the Trade tab.")
-        else:
-            st.caption("Every current holding has an active GTT stop-loss.")
-    except Exception as e:
-        st.warning(f"Could not check GTT coverage: {e}")
-
-    with st.expander("Current holdings snapshot used for this proposal"):
-        st.dataframe(pnl_style(result["holdings"], fmt={"average_price": "{:.2f}"}),
-                    width="stretch", hide_index=True)
+    st.caption("For GTT coverage/details and a full trade history, see:")
+    lc1, lc2 = st.columns(2)
+    with lc1:
+        st.page_link(page_positions_trade_p,
+                    label="GTT / Stop-Loss Management →", icon="🛑")
+    with lc2:
+        st.page_link(page_tradebook_p, label="Tradebook →", icon="📒")
 
 
 # ---------------------------------------------------------------------------
@@ -1428,30 +1311,58 @@ def page_positions_trade():
         st.caption("Nothing to square off.")
 
     st.divider()
-    st.subheader("🛑 Place stop-loss for an existing position")
-    st.caption("For positions bought outside this app's own buy flow (e.g. "
-              "placed directly on Kite) -- computes the same ATR-based stop "
-              "this app always uses, places a GTT, and backfills this app's "
-              "own bookkeeping (entry price/qty read from Kite's real "
-              "holdings) so future trailing-stop updates pick it up too.")
+    st.subheader(
+        "🛑 GTT / Stop-Loss Management",
+        help="The one place for GTT visibility and actions: every current "
+             "position/holding, its live GTT status straight from Kite "
+             "(the source of truth, not just this app's own tracking), "
+             "and -- for anything unprotected -- the action to place one. "
+             "Computes the same ATR-based stop this app always uses for a "
+             "position bought outside its own buy flow (e.g. placed "
+             "directly on Kite), and backfills this app's own bookkeeping "
+             "so future trailing-stop updates pick it up too.")
 
     try:
         active_gtts = kite_client.get_active_gtts()
-        gtt_symbols = set()
+        gtt_by_symbol = {}
         if not active_gtts.empty and "condition" in active_gtts.columns:
-            for cond in active_gtts["condition"]:
+            for _, g in active_gtts.iterrows():
+                cond = g.get("condition") or {}
                 gsym = cond.get("tradingsymbol") if isinstance(cond, dict) else None
-                if gsym:
-                    gtt_symbols.add(gsym)
+                if not gsym:
+                    continue
+                trigger_vals = cond.get("trigger_values") if isinstance(cond, dict) else None
+                gtt_by_symbol[gsym] = {
+                    "trigger_price": trigger_vals[0] if trigger_vals else None,
+                    "updated_at": g.get("updated_at"),
+                }
     except Exception as e:
-        st.warning(f"Could not check existing GTTs: {e}")
-        gtt_symbols = set()
+        st.warning(f"Could not fetch GTTs from Kite: {e}")
+        gtt_by_symbol = {}
+
+    gtt_symbols = set(gtt_by_symbol)
+    gtt_rows = []
+    for sym in all_syms:
+        g = gtt_by_symbol.get(sym)
+        gtt_rows.append({
+            "symbol": sym, "gtt_active": "✅" if g else "❌",
+            "trigger_price": g["trigger_price"] if g else None,
+            "updated_at": g["updated_at"] if g else None,
+        })
+    gtt_table = pd.DataFrame(gtt_rows)
+    if not gtt_table.empty:
+        st.dataframe(
+            pnl_style(gtt_table.sort_values("symbol"), fmt={"trigger_price": "{:.2f}"},
+                     na_rep="—"),
+            width="stretch", hide_index=True)
 
     unprotected_syms = [s for s in all_syms if s not in gtt_symbols]
 
     if not unprotected_syms:
-        st.caption("Every current position/holding already has an active GTT.")
+        st.success("Every current position/holding has an active GTT.")
     else:
+        st.warning(f"{len(unprotected_syms)} unprotected: "
+                  f"{', '.join(unprotected_syms)} — place a stop-loss below.")
         sl_symbol = st.selectbox("Symbol", unprotected_syms, key="manual_sl_symbol")
 
         sl_qty, sl_avg_price = 0, 0.0
@@ -1564,8 +1475,8 @@ def page_positions_trade():
                         st.success(f"GTT stop-loss placed: trigger {gtt_id} at ₹{stop:,.1f}")
                     except Exception as e:
                         st.warning(f"⚠️ Buy succeeded but GTT stop-loss FAILED: {e} "
-                                  "(no stop-loss in place — check Live Rebalance's "
-                                  "Unprotected holdings section)")
+                                  "(no stop-loss in place — check the GTT / "
+                                  "Stop-Loss Management section below)")
                 # Recorded even when the GTT failed (gtt_id=None), same
                 # reasoning as the Live Rebalance buy flow.
                 position_id = state_db.record_new_position(

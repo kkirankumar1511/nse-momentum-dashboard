@@ -3,15 +3,24 @@ Stage 1 of live automation: propose today's rebalance (sells + buys) by
 running the exact same screener pipeline used live and in the backtest,
 diffing it against your ACTUAL broker holdings.
 
-propose_rebalance()/main() NEVER place an order -- they only compute a
-proposal and write it to disk for review, you place orders yourself (Trade
-tab or broker app). Meant to be run once a day, either from the dashboard's
-"Daily Rebalance" tab or scheduled externally (Windows Task Scheduler /
-cron / trading_service.py) via `python live_rebalance.py`.
+propose_rebalance() itself only ever computes a proposal -- it never
+places an order. Execution is a separate, explicit step: either the
+dashboard's manual "Execute all .../Apply..." buttons (config.STRATEGY
+["auto_execute_trades"]=False, the default), or main()'s own
+auto-execute block right after computing the proposal
+(auto_execute_trades=True) -- both routes call the exact same
+execute_sells()/execute_buys()/execute_top_ups() functions below, so
+manual and automated execution can never drift apart. Meant to be run
+once a day, either from the dashboard's Live Rebalance page or scheduled
+externally (systemd timer / cron / Windows Task Scheduler) via
+`python live_rebalance.py`.
 
-check_gap_down_stops()/main_gap_check() are the one deliberate exception --
-see that function's docstring for why an immediate automatic market sell is
-the right call there specifically, unlike everywhere else in this module.
+check_gap_down_stops()/main_gap_check() and trailing-stop ratchets
+(compute_stop_updates(), config.STRATEGY["auto_apply_stop_updates"],
+True by default) are automated regardless of auto_execute_trades --
+both are lower-risk, one-directional actions (an immediate market sell
+to guarantee an exit, or tightening an existing stop) that don't carry
+the same new-capital-deployment risk a full auto-execute does.
 
 Why sells can lag a day: the rebalance rule (200 EMA / rank) is only ever
 evaluated when this runs, so if you don't run it on a given day, a stock
@@ -390,6 +399,117 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     return result
 
 
+# ---------------------------------------------------------------------------
+# Execution -- shared between the dashboard's manual "Execute all ..."
+# buttons and main()'s auto-execute path (config.STRATEGY
+# ["auto_execute_trades"]), so the two can never quietly drift apart.
+# Each returns a list of human-readable log lines.
+# ---------------------------------------------------------------------------
+
+def execute_sells(sells_df: pd.DataFrame) -> tuple[list[str], list[str]]:
+    """Market-sells every row (the rebalance rule's exits), closes the
+    tradebook entry with the reason already computed (previously
+    discarded the moment the order fired), and deletes any stale GTT left
+    pointing at the now-closed position -- same cleanup
+    check_gap_down_stops() already does for its own auto-sells. Returns
+    (log_lines, succeeded_symbols)."""
+    log, succeeded = [], []
+    for _, r in sells_df.iterrows():
+        try:
+            oid = kite_client.square_off_position(r["symbol"])
+            log.append(f"✅ {r['symbol']}: order {oid}")
+            try:
+                ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
+            except Exception:
+                ltp = None
+            state_db.close_trade(r["symbol"], ltp, r["reason"])
+            pos = state_db.get_open_positions().get(r["symbol"])
+            gtt_id = pos.get("gtt_trigger_id") if pos else None
+            if gtt_id:
+                try:
+                    kite_client.delete_gtt(int(gtt_id))
+                    log.append(f"   GTT {gtt_id} deleted")
+                except Exception as e:
+                    log.append(f"   ⚠️ GTT delete failed: {e} — remove it manually")
+            succeeded.append(r["symbol"])
+        except Exception as e:
+            log.append(f"❌ {r['symbol']}: FAILED — {e}")
+    return log, succeeded
+
+
+def execute_buys(buys_df: pd.DataFrame, place_gtt: bool = True) -> tuple[list[str], list[str]]:
+    """Market-buys every row (new candidates filling open slots), places a
+    GTT stop-loss at the sizing-time stop unless place_gtt=False, and
+    seeds this app's own trailing-stop bookkeeping + tradebook entry
+    (entry-time technical/fundamental snapshot, already on the row).
+    Returns (log_lines, succeeded_symbols)."""
+    log, succeeded = [], []
+    for _, r in buys_df.iterrows():
+        try:
+            oid = kite_client.place_order(r["symbol"], int(r["qty"]), "BUY")
+        except Exception as e:
+            log.append(f"❌ {r['symbol']}: BUY FAILED — {e}")
+            continue
+        succeeded.append(r["symbol"])
+        msg = f"✅ {r['symbol']}: order {oid}"
+        gtt_id = None
+        if place_gtt:
+            try:
+                gtt_id = kite_client.place_gtt_stoploss(
+                    r["symbol"], int(r["qty"]), r["stop"], r["price"])
+                msg += f", GTT {gtt_id} @ ₹{r['stop']:.1f}"
+            except Exception as e:
+                msg += (f" — ⚠️ BUY SUCCEEDED but GTT FAILED: {e} "
+                       "(no stop-loss in place)")
+        position_id = state_db.record_new_position(
+            r["symbol"], float(r["price"]), int(r["qty"]), float(r["stop"]), gtt_id)
+        state_db.record_trade_entry(
+            r["symbol"], float(r["price"]), int(r["qty"]), float(r["stop"]),
+            snapshot={"score": r.get("score"), "rsi": r.get("rsi"),
+                     "pct_52w_high": r.get("pct_52w_high"),
+                     "vol_expansion": r.get("vol_expansion"),
+                     "fundamental_score": r.get("fundamental_score"),
+                     "entry_reason": r.get("reason")},
+            position_id=position_id)
+        log.append(msg)
+    return log, succeeded
+
+
+def execute_top_ups(top_ups_df: pd.DataFrame) -> tuple[list[str], list[str]]:
+    """Buys the extra shares for each under-target existing holding, and
+    updates its GTT to cover the new total quantity at the same stop
+    price (the stop itself never changes here -- only quantity). Returns
+    (log_lines, succeeded_symbols)."""
+    log, succeeded = [], []
+    for _, r in top_ups_df.iterrows():
+        try:
+            oid = kite_client.place_order(r["symbol"], int(r["extra_qty"]), "BUY")
+        except Exception as e:
+            log.append(f"❌ {r['symbol']}: BUY FAILED — {e}")
+            continue
+        succeeded.append(r["symbol"])
+        msg = f"✅ {r['symbol']}: order {oid} (+{int(r['extra_qty'])})"
+        gtt_id = r.get("gtt_trigger_id")
+        if pd.notna(gtt_id):
+            try:
+                pos = state_db.get_open_positions().get(r["symbol"])
+                new_total_qty = ((pos["qty"] + int(r["extra_qty"]))
+                                if pos else int(r["extra_qty"]))
+                ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
+                kite_client.modify_gtt_trigger(
+                    int(gtt_id), r["symbol"], new_total_qty,
+                    pos["current_stop"] if pos else float(r["price"]), ltp)
+                msg += f", GTT updated to qty {new_total_qty}"
+            except Exception as e:
+                msg += (f" — ⚠️ BUY SUCCEEDED but GTT quantity update FAILED: "
+                       f"{e} (existing GTT still only covers the old quantity)")
+        else:
+            msg += " — ⚠️ no existing GTT to update (position may be unprotected)"
+        state_db.top_up_trade(r["symbol"], int(r["extra_qty"]), float(r["price"]))
+        log.append(msg)
+    return log, succeeded
+
+
 def check_gap_down_stops() -> list[dict]:
     """Morning safety net -- meant to run once, shortly after market open.
 
@@ -569,8 +689,21 @@ def main():
             log("Sufficient cash to fully equal-weight every open slot and "
                "under-target holding.")
         log(f"\nSaved to {state_db.DB_PATH}")
-        log("Nothing was placed or modified -- review and execute/apply manually "
-           "in the dashboard's Live Rebalance page or the Trade tab.")
+        if config.STRATEGY.get("auto_execute_trades", False):
+            log("\n-- Auto-executing trades (auto_execute_trades=True) --")
+            if not result["sells"].empty:
+                sell_log, _ = execute_sells(result["sells"])
+                log("\n".join(sell_log))
+            if not result["buys"].empty:
+                buy_log, _ = execute_buys(result["buys"])
+                log("\n".join(buy_log))
+            if not result["top_ups"].empty:
+                topup_log, _ = execute_top_ups(result["top_ups"])
+                log("\n".join(topup_log))
+            log("\nTrades executed automatically -- see the log above for each order.")
+        else:
+            log("Nothing was placed or modified -- review and execute/apply manually "
+               "in the dashboard's Live Rebalance page or the Trade tab.")
         with open(LOG_PATH, "a") as f:
             f.write("\n".join(log_lines) + "\n")
         jr["summary"] = (f"{len(result['buys'])} buys, {len(result['sells'])} sells, "

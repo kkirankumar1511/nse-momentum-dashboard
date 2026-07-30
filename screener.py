@@ -82,6 +82,22 @@ def apply_gates(tech: pd.DataFrame,
     t["near_high_ok"] = t["pct_52w_high"] >= cfg["near_high_threshold"]
     t["rsi_ok"] = t["rsi"].between(cfg["rsi_min"], cfg["rsi_max"])
 
+    # EXPERIMENTAL, backtest-only for now -- excludes candidates priced
+    # above max_stock_price entirely, at the root of the "one very
+    # expensive stock breaks equal-weight math" problem
+    # (screener.allocate_equal_weight_buys already handles it at the
+    # sizing layer via cross-slot borrowing/partial fills/hard-stop, but
+    # this is a simpler, blunter alternative -- just never consider the
+    # stock at all). cfg.get(..., False) so this is a no-op (byte-
+    # identical current behavior) until explicitly enabled -- needs a
+    # real backtest before it's ever turned on live, same as every other
+    # gate here.
+    if cfg.get("max_stock_price_enabled", False):
+        max_price = cfg.get("max_stock_price", 5000.0)
+        t["price_ok"] = t["price"] <= max_price
+    else:
+        t["price_ok"] = True
+
     gate_enabled = cfg.get("fundamental_gate_enabled", False)
     if fundamentals is not None and not fundamentals.empty:
         fund = fundamentals.reindex(t.index)
@@ -102,7 +118,8 @@ def apply_gates(tech: pd.DataFrame,
         t["quality_ok"] = True
         t["quality_fails"] = ""
 
-    t["all_gates"] = t["trend_ok"] & t["near_high_ok"] & t["rsi_ok"] & t["quality_ok"]
+    t["all_gates"] = (t["trend_ok"] & t["near_high_ok"] & t["rsi_ok"]
+                      & t["quality_ok"] & t["price_ok"])
     return t
 
 

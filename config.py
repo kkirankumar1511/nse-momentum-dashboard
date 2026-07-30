@@ -211,6 +211,20 @@ _STRATEGY_DEFAULTS = {
     # behavior for rollback.
     "advanced_equal_weight_sizing": True,
     "equal_weight_tolerance_pct": 0.20,
+
+    # Fully automate placing the proposed sells/buys/top-ups as real
+    # orders, immediately after the SCHEDULED daily rebalance job computes
+    # them (live_rebalance.py's main() only -- deliberately NOT the
+    # dashboard's manual "Run today's scan" button, so clicking that to
+    # look at today's candidates never itself fires real orders; same
+    # split as check_gap_down_stops() being scheduled-only automation).
+    # False by default -- unlike auto_apply_stop_updates (which only ever
+    # tightens an existing stop, low-risk), this places brand-new orders
+    # and exits real positions, so it stays an explicit opt-in only once
+    # you're confident in the proposal quality. When on, uses the exact
+    # same execute_sells()/execute_buys()/execute_top_ups() functions the
+    # dashboard's manual buttons call, so the two paths can't drift apart.
+    "auto_execute_trades": False,
 }
 
 STRATEGY = state_db.get_strategy_config(_STRATEGY_DEFAULTS)
