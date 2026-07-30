@@ -178,6 +178,17 @@ CREATE TABLE IF NOT EXISTS job_runs (
 -- Captures an entry-time technical/fundamental snapshot (for later
 -- feature analytics) and a real exit reason on every closed trade, which
 -- nothing in `positions` tracked before this.
+-- Manually excluded symbols -- editable from Admin -- "Skip stocks from
+-- scanner". Excluded from config.UNIVERSE (see config.refresh_universe()),
+-- the single list the Screener, Live Rebalance, and backtest.py all fetch
+-- candles for -- so a skip here takes effect everywhere at once, not just
+-- one page.
+CREATE TABLE IF NOT EXISTS skipped_symbols (
+    symbol TEXT PRIMARY KEY,
+    reason TEXT,
+    added_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     position_id INTEGER REFERENCES positions(id),
@@ -890,6 +901,47 @@ def update_strategy_config(updates: dict) -> None:
         [(k, json.dumps(v)) for k, v in updates.items()])
     conn.commit()
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Manually skipped symbols -- editable from Admin -- "Skip stocks from
+# scanner". See config.refresh_universe(), which reads get_skipped_symbols()
+# to exclude these from config.UNIVERSE (the Screener/Live Rebalance/
+# backtest.py's shared candidate universe).
+# ---------------------------------------------------------------------------
+
+def add_skipped_symbol(symbol: str, reason: str = "") -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO skipped_symbols (symbol, reason) VALUES (?, ?) "
+        "ON CONFLICT(symbol) DO UPDATE SET reason = excluded.reason",
+        (symbol, reason))
+    conn.commit()
+    conn.close()
+
+
+def remove_skipped_symbol(symbol: str) -> None:
+    conn = get_conn()
+    conn.execute("DELETE FROM skipped_symbols WHERE symbol = ?", (symbol,))
+    conn.commit()
+    conn.close()
+
+
+def get_skipped_symbols() -> list[str]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT symbol FROM skipped_symbols ORDER BY symbol").fetchall()
+    conn.close()
+    return [r["symbol"] for r in rows]
+
+
+def get_skipped_symbols_df() -> pd.DataFrame:
+    conn = get_conn()
+    df = pd.read_sql_query(
+        "SELECT symbol, reason, added_at FROM skipped_symbols ORDER BY symbol",
+        conn)
+    conn.close()
+    return df
 
 
 # ---------------------------------------------------------------------------

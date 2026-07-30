@@ -59,14 +59,34 @@ UNIVERSE_OVERRIDE: list[str] = []          # non-empty = use this instead
 
 
 def get_universe(refresh: bool = False) -> list[str]:
-    if UNIVERSE_OVERRIDE:
-        return UNIVERSE_OVERRIDE
-    return _fno.tradable_on_kite(_fno.get_fno_universe(force_refresh=refresh))
+    base = (UNIVERSE_OVERRIDE if UNIVERSE_OVERRIDE else
+           _fno.tradable_on_kite(_fno.get_fno_universe(force_refresh=refresh)))
+    skipped = set(state_db.get_skipped_symbols())
+    return [s for s in base if s not in skipped]
+
+
+def refresh_universe() -> None:
+    """Recomputes the module-level UNIVERSE list in place, applying the
+    current skip list (state_db.skipped_symbols, editable from Admin --
+    "Skip stocks from scanner"). Called once below at import time, and
+    again after every Admin-page skip/un-skip so the change takes effect
+    immediately for every module that reads config.UNIVERSE -- screener.py,
+    backtest.py, fundamentals_agent.py, dashboard.py all do `import config`
+    and then read `config.UNIVERSE` fresh at call time (never `from config
+    import UNIVERSE`), so reassigning the name here is all that's needed;
+    same live-update pattern as config.STRATEGY.update() elsewhere in this
+    app -- no dashboard/service restart required."""
+    global UNIVERSE
+    base = _fno.get_fno_universe(verbose=False)
+    skipped = set(state_db.get_skipped_symbols())
+    UNIVERSE = [s for s in base if s not in skipped]
 
 
 # Lazily-resolved default universe (safe at import time — falls back to the
-# bundled snapshot if NSE/Kite are unreachable).
-UNIVERSE = _fno.get_fno_universe(verbose=False)
+# bundled snapshot if NSE/Kite are unreachable). Excludes anything in the
+# manual skip list -- see refresh_universe() above.
+UNIVERSE: list[str] = []
+refresh_universe()
 
 BENCHMARK = "NSE:NIFTY 50"   # for relative strength
 

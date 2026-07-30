@@ -742,6 +742,37 @@ def page_admin():
         st.success("Strategy settings saved — in effect immediately.")
 
     st.divider()
+    st.subheader("🚫 Skip stocks from scanner")
+    st.caption("Manually excluded symbols are removed from `config.UNIVERSE` "
+              "— the shared candidate list the Screener, Live Rebalance, "
+              "and backtest.py all fetch candles for — so a skip here takes "
+              "effect everywhere at once, immediately, no restart needed.")
+
+    skip_col1, skip_col2 = st.columns([2, 1])
+    with skip_col1:
+        skip_symbol = st.selectbox("Symbol to skip", config.UNIVERSE, key="skip_symbol")
+    with skip_col2:
+        skip_reason = st.text_input("Reason (optional)", key="skip_reason")
+    if st.button("Skip this stock", key="skip_add_btn"):
+        state_db.add_skipped_symbol(skip_symbol, skip_reason)
+        config.refresh_universe()
+        st.success(f"{skip_symbol} skipped — excluded from the scanner immediately.")
+        st.rerun()
+
+    skipped_df = state_db.get_skipped_symbols_df()
+    if skipped_df.empty:
+        st.caption("No stocks currently skipped.")
+    else:
+        st.dataframe(skipped_df, width="stretch", hide_index=True)
+        unskip_symbol = st.selectbox("Symbol to un-skip",
+                                     skipped_df["symbol"].tolist(), key="unskip_symbol")
+        if st.button("Un-skip this stock", key="skip_remove_btn"):
+            state_db.remove_skipped_symbol(unskip_symbol)
+            config.refresh_universe()
+            st.success(f"{unskip_symbol} restored — included in the scanner immediately.")
+            st.rerun()
+
+    st.divider()
     with st.expander("🔑 Change dashboard password"):
         st.caption("Stored as a salted hash in state.db — the password "
                   "itself is never saved anywhere, not even here.")
