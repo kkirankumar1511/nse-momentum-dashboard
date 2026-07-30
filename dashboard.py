@@ -1272,7 +1272,11 @@ def page_positions_trade():
     hold = kite_client.get_holdings()
 
     st.divider()
-    st.subheader("Square off a position")
+    st.subheader("Place an order")
+    st.caption("Sizing uses your ATR stop so every BUY risks the same % of capital. "
+               "Pick SELL on something you currently hold to square off the whole "
+               "position at market in one click.")
+
     all_syms = []
     if not pos.empty:
         all_syms += list(pos[pos["quantity"] != 0]["tradingsymbol"])
@@ -1280,24 +1284,93 @@ def page_positions_trade():
         all_syms += list(hold[hold["quantity"] > 0]["tradingsymbol"])
     all_syms = sorted(set(all_syms))
 
-    if all_syms:
-        sq_sym = st.selectbox("Symbol to square off", all_syms, key="sq")
-        confirm_sq = st.checkbox(
-            f"I confirm I want to close my entire {sq_sym} position at market")
-        if st.button("Square off", type="primary", disabled=not confirm_sq):
+    symbol_choices = sorted(set(all_syms) | set(config.UNIVERSE))
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        symbol = st.selectbox("Symbol", symbol_choices, key="trade_symbol")
+        side = st.radio("Side", ["BUY", "SELL"], horizontal=True, key="trade_side")
+
+    held_qty, held_avg_price = 0, 0.0
+    if not pos.empty and symbol in pos["tradingsymbol"].values:
+        r = pos[pos["tradingsymbol"] == symbol].iloc[0]
+        held_qty, held_avg_price = int(r["quantity"]), float(r["average_price"])
+    elif not hold.empty and symbol in hold["tradingsymbol"].values:
+        r = hold[hold["tradingsymbol"] == symbol].iloc[0]
+        held_qty, held_avg_price = int(r["quantity"]), float(r["average_price"])
+
+    square_off_mode = False
+    if side == "SELL" and held_qty > 0:
+        square_off_mode = st.checkbox(
+            f"Square off entire position ({held_qty} shares at market)",
+            value=True, key="trade_square_off")
+
+    with col2:
+        capital = st.number_input("Capital for sizing (₹)",
+                                  value=float(available_cash), step=10000.0,
+                                  key="trade_capital", disabled=square_off_mode)
+        order_type = st.radio("Order type", ["MARKET", "LIMIT"], horizontal=True,
+                              key="trade_order_type", disabled=square_off_mode)
+        limit_price = st.number_input("Limit price", value=0.0, step=0.05,
+                                      key="trade_limit") \
+            if (order_type == "LIMIT" and not square_off_mode) else None
+
+    try:
+        ltp = kite_client.get_ltp([symbol])[symbol]
+        df = kite_client.fetch_daily_candles(symbol, days=120)
+        atr_now = float(indicators.atr(df, cfg["atr_period"]).iloc[-1])
+        stop = ltp - cfg["atr_stop_multiple"] * atr_now
+        suggested_qty = screener.position_size(capital, ltp, stop)
+    except Exception as e:
+        st.warning(f"Couldn't fetch live data: {e}")
+        ltp, stop, suggested_qty = 0.0, 0.0, 0
+
+    with col3:
+        st.metric("LTP", f"₹{ltp:,.2f}")
+        st.metric("ATR stop", f"₹{stop:,.2f}")
+        if square_off_mode:
+            qty = held_qty
+            st.metric("Quantity", qty)
+        else:
+            default_qty = held_qty if (side == "SELL" and held_qty > 0) else int(suggested_qty)
+            qty = st.number_input("Quantity", value=default_qty, min_value=0,
+                                  help=f"Suggested for {cfg['risk_per_trade_pct']}% risk"
+                                       if side == "BUY" else "Currently held quantity",
+                                  key="trade_qty")
+
+    place_gtt = False
+    if side == "BUY" and not square_off_mode:
+        place_gtt = st.checkbox("Also place GTT stop-loss at the ATR stop", value=True,
+                                key="trade_place_gtt")
+
+    if square_off_mode:
+        st.info(f"Order preview: **SELL {qty} × {symbol}** at market "
+                f"(square-off) ≈ ₹{qty * ltp:,.0f}")
+    else:
+        est_value = qty * ltp
+        st.info(f"Order preview: **{side} {qty} × {symbol}** ≈ ₹{est_value:,.0f} "
+                f"({order_type}{f' @ ₹{limit_price}' if limit_price else ''})"
+                + (f" + GTT SL at ₹{stop:,.1f}" if place_gtt else ""))
+
+    confirm = st.checkbox(
+        f"I confirm I want to close my entire {symbol} position at market"
+        if square_off_mode else "I confirm this order",
+        key="trade_confirm")
+    if st.button("Square off" if square_off_mode else "Execute order", type="primary",
+                disabled=not confirm or qty == 0, key="trade_execute"):
+        if square_off_mode:
             try:
-                order_id = kite_client.square_off_position(sq_sym)
+                order_id = kite_client.square_off_position(symbol)
                 st.success(f"Square-off order placed: {order_id}")
                 try:
-                    ltp = kite_client.get_ltp([sq_sym])[sq_sym]
+                    exit_ltp = kite_client.get_ltp([symbol])[symbol]
                 except Exception:
-                    ltp = None
-                state_db.close_trade(sq_sym, ltp, "manual_square_off")
+                    exit_ltp = None
+                state_db.close_trade(symbol, exit_ltp, "manual_square_off")
                 # A stale GTT left pointing at a position you no longer
                 # hold can trigger and attempt to sell shares that aren't
                 # there, or just confusingly linger in the Kite GTT list.
-                pos = state_db.get_open_positions().get(sq_sym)
-                gtt_id = pos.get("gtt_trigger_id") if pos else None
+                tracked_pos = state_db.get_open_positions().get(symbol)
+                gtt_id = tracked_pos.get("gtt_trigger_id") if tracked_pos else None
                 if gtt_id:
                     try:
                         kite_client.delete_gtt(int(gtt_id))
@@ -1307,8 +1380,36 @@ def page_positions_trade():
                                   "manually in Kite or re-check here.")
             except Exception as e:
                 st.error(f"Order failed: {e}")
-    else:
-        st.caption("Nothing to square off.")
+        else:
+            try:
+                oid = kite_client.place_order(symbol, qty, side,
+                                              order_type=order_type, price=limit_price)
+            except Exception as e:
+                st.error(f"Order failed: {e}")
+            else:
+                st.success(f"Order placed: {oid}")
+                if side == "BUY":
+                    gtt_id = None
+                    if place_gtt:
+                        try:
+                            gtt_id = kite_client.place_gtt_stoploss(symbol, qty, stop, ltp)
+                            st.success(f"GTT stop-loss placed: trigger {gtt_id} at ₹{stop:,.1f}")
+                        except Exception as e:
+                            st.warning(f"⚠️ Buy succeeded but GTT stop-loss FAILED: {e} "
+                                      "(no stop-loss in place — check the GTT / "
+                                      "Stop-Loss Management section below)")
+                    # Recorded even when the GTT failed (gtt_id=None), same
+                    # reasoning as the Live Rebalance buy flow.
+                    position_id = state_db.record_new_position(
+                        symbol, float(ltp), int(qty), float(stop), gtt_id)
+                    # No screener row here (this is a manually-picked symbol, not
+                    # a candidate from the scan) -- entry snapshot is just
+                    # price/qty/stop, same as record_new_position itself gets.
+                    state_db.record_trade_entry(
+                        symbol, float(ltp), int(qty), float(stop),
+                        snapshot={"entry_reason": "Manually placed order (Trade tab), "
+                                 "not from the automated scan"},
+                        position_id=position_id)
 
     st.divider()
     st.subheader(
@@ -1413,82 +1514,6 @@ def page_positions_trade():
             width="stretch", hide_index=True)
     else:
         st.caption("No orders today.")
-
-    st.divider()
-    st.subheader("Place a manual order")
-    st.caption("Sizing uses your ATR stop so every position risks the same % of capital.")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        symbol = st.selectbox("Symbol", config.UNIVERSE, key="trade_symbol")
-        side = st.radio("Side", ["BUY", "SELL"], horizontal=True, key="trade_side")
-    with col2:
-        capital = st.number_input("Capital for sizing (₹)",
-                                  value=float(available_cash), step=10000.0,
-                                  key="trade_capital")
-        order_type = st.radio("Order type", ["MARKET", "LIMIT"], horizontal=True,
-                              key="trade_order_type")
-        limit_price = st.number_input("Limit price", value=0.0, step=0.05,
-                                      key="trade_limit") \
-            if order_type == "LIMIT" else None
-
-    try:
-        ltp = kite_client.get_ltp([symbol])[symbol]
-        df = kite_client.fetch_daily_candles(symbol, days=120)
-        atr_now = float(indicators.atr(df, cfg["atr_period"]).iloc[-1])
-        stop = ltp - cfg["atr_stop_multiple"] * atr_now
-        suggested_qty = screener.position_size(capital, ltp, stop)
-    except Exception as e:
-        st.warning(f"Couldn't fetch live data: {e}")
-        ltp, stop, suggested_qty = 0.0, 0.0, 0
-
-    with col3:
-        st.metric("LTP", f"₹{ltp:,.2f}")
-        st.metric("ATR stop", f"₹{stop:,.2f}")
-        qty = st.number_input("Quantity", value=int(suggested_qty), min_value=0,
-                              help=f"Suggested for {cfg['risk_per_trade_pct']}% risk",
-                              key="trade_qty")
-
-    place_gtt = st.checkbox("Also place GTT stop-loss at the ATR stop", value=True,
-                            key="trade_place_gtt")
-
-    est_value = qty * ltp
-    st.info(f"Order preview: **{side} {qty} × {symbol}** ≈ ₹{est_value:,.0f} "
-            f"({order_type}{f' @ ₹{limit_price}' if limit_price else ''})"
-            + (f" + GTT SL at ₹{stop:,.1f}" if place_gtt and side == 'BUY' else ""))
-
-    confirm = st.checkbox("I confirm this order", key="trade_confirm")
-    if st.button("Execute order", type="primary", disabled=not confirm or qty == 0,
-                key="trade_execute"):
-        try:
-            oid = kite_client.place_order(symbol, qty, side,
-                                          order_type=order_type, price=limit_price)
-        except Exception as e:
-            st.error(f"Order failed: {e}")
-        else:
-            st.success(f"Order placed: {oid}")
-            if side == "BUY":
-                gtt_id = None
-                if place_gtt:
-                    try:
-                        gtt_id = kite_client.place_gtt_stoploss(symbol, qty, stop, ltp)
-                        st.success(f"GTT stop-loss placed: trigger {gtt_id} at ₹{stop:,.1f}")
-                    except Exception as e:
-                        st.warning(f"⚠️ Buy succeeded but GTT stop-loss FAILED: {e} "
-                                  "(no stop-loss in place — check the GTT / "
-                                  "Stop-Loss Management section below)")
-                # Recorded even when the GTT failed (gtt_id=None), same
-                # reasoning as the Live Rebalance buy flow.
-                position_id = state_db.record_new_position(
-                    symbol, float(ltp), int(qty), float(stop), gtt_id)
-                # No screener row here (this is a manually-picked symbol, not
-                # a candidate from the scan) -- entry snapshot is just
-                # price/qty/stop, same as record_new_position itself gets.
-                state_db.record_trade_entry(
-                    symbol, float(ltp), int(qty), float(stop),
-                    snapshot={"entry_reason": "Manually placed order (Trade tab), "
-                             "not from the automated scan"},
-                    position_id=position_id)
 
 
 # ---------------------------------------------------------------------------
