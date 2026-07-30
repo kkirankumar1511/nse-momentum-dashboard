@@ -1033,6 +1033,10 @@ def page_live_rebalance():
 
     result = st.session_state["rebalance_proposal"]
     st.caption(f"Last run: {result['run_time']:%d %b %Y %H:%M}")
+    if rebalance_running:
+        st.warning("⏳ A new scan is running — actions below are locked until "
+                  "it finishes, so you can't execute against this now-stale "
+                  "proposal while a fresh one is being computed.")
 
     rc1, rc2, rc3 = st.columns(3)
     rc1.metric("Current holdings", len(result["holdings"]))
@@ -1076,7 +1080,7 @@ def page_live_rebalance():
         confirm_sell = st.checkbox(
             "I confirm I want to execute ALL proposed sells at market",
             key="confirm_sell_all")
-        if st.button("Execute all sells", disabled=not confirm_sell):
+        if st.button("Execute all sells", disabled=not confirm_sell or rebalance_running):
             log, succeeded = lr.execute_sells(result["sells"])
             st.session_state["sell_exec_log"] = log
             if succeeded:
@@ -1108,7 +1112,7 @@ def page_live_rebalance():
         confirm_buy = st.checkbox(
             "I confirm I want to execute ALL proposed buys at market",
             key="confirm_buy_all")
-        if st.button("Execute all buys", disabled=not confirm_buy):
+        if st.button("Execute all buys", disabled=not confirm_buy or rebalance_running):
             log, succeeded = lr.execute_buys(result["buys"], place_gtt=place_gtt)
             st.session_state["buy_exec_log"] = log
             if succeeded:
@@ -1139,7 +1143,7 @@ def page_live_rebalance():
         confirm_topup = st.checkbox(
             "I confirm I want to execute ALL proposed top-ups at market",
             key="confirm_topup_all")
-        if st.button("Execute all top-ups", disabled=not confirm_topup):
+        if st.button("Execute all top-ups", disabled=not confirm_topup or rebalance_running):
             log, succeeded = lr.execute_top_ups(top_ups)
             st.session_state["topup_exec_log"] = log
             if succeeded:
@@ -1168,7 +1172,7 @@ def page_live_rebalance():
         confirm_stops = st.checkbox(
             "I confirm I want to raise ALL these GTT stop-losses",
             key="confirm_stop_updates")
-        if st.button("Apply stop updates", disabled=not confirm_stops):
+        if st.button("Apply stop updates", disabled=not confirm_stops or rebalance_running):
             log = []
             succeeded = []
             for _, r in stop_updates.iterrows():

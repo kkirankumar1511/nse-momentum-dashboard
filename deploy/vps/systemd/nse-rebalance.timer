@@ -1,8 +1,8 @@
 [Unit]
-Description=Run the NSE rebalance scan daily at 08:30 (weekdays, before market open -- also refreshes the Screener page's cache)
+Description=Run the NSE rebalance scan daily at 15:05 (weekdays, ~13min before market close -- also refreshes the Screener page's cache). Deliberately NOT pre-market: Kite's historical "day" candle for today updates live intraday, so running close to the close gives the ranking/sizing pipeline a same-day price basis matching backtest.py's own same-day-close assumption, instead of pre-market's stale prior-day close (which also risked a gap-up open invalidating the day's sizing). The observed run time is ~13 minutes (see the Job Log page's rebalance_scan duration) -- re-check that history before moving this any later; it must finish with enough margin before 15:30 close for auto_execute_trades (if enabled) to place valid regular-hours orders.
 
 [Timer]
-OnCalendar=Mon..Fri 08:30
+OnCalendar=Mon..Fri 15:05
 Persistent=false
 Unit=nse-rebalance.service
 

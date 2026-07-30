@@ -1,5 +1,5 @@
 [Unit]
-Description=NSE daily rebalance scan (proposal only -- never places an order)
+Description=NSE daily rebalance scan (proposal only by default; also executes as real orders if auto_execute_trades is enabled in Admin -- Strategy configuration)
 
 [Service]
 Type=oneshot
