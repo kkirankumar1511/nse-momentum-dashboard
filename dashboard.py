@@ -1001,10 +1001,10 @@ def page_live_rebalance():
     rc2.metric("Proposed sells", len(result["sells"]))
     rc3.metric("Open slots after sells", result["open_slots"])
 
-    if "cash_shortfall" in result:
-        target = result.get("target_per_slot", 0)
-        pool = result.get("cash_pool", 0)
-        shortfall = result.get("cash_shortfall", 0)
+    if result.get("cash_shortfall") is not None:
+        target = result.get("target_per_slot") or 0
+        pool = result.get("cash_pool") or 0
+        shortfall = result.get("cash_shortfall") or 0
         if shortfall > 0:
             st.warning(
                 f"💰 **₹{shortfall:,.0f} more needed** to fully equal-weight every "
@@ -1017,7 +1017,7 @@ def page_live_rebalance():
                 f"✅ Enough cash (₹{pool:,.0f} available including proposed sell "
                 f"proceeds) to fully equal-weight every open slot and "
                 f"under-target holding at ₹{target:,.0f}/slot.")
-        unsettled = result.get("unsettled_proceeds", 0)
+        unsettled = result.get("unsettled_proceeds") or 0
         if unsettled:
             st.caption(
                 f"ℹ️ ₹{unsettled:,.0f} of today's sell proceeds is from a "
