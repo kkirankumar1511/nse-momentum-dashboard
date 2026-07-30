@@ -746,31 +746,50 @@ def page_admin():
     st.caption("Manually excluded symbols are removed from `config.UNIVERSE` "
               "— the shared candidate list the Screener, Live Rebalance, "
               "and backtest.py all fetch candles for — so a skip here takes "
-              "effect everywhere at once, immediately, no restart needed.")
+              "effect everywhere at once. Tick/untick Skip, optionally edit "
+              "the reason, then click Update — nothing changes until you do.")
 
-    skip_col1, skip_col2 = st.columns([2, 1])
-    with skip_col1:
-        skip_symbol = st.selectbox("Symbol to skip", config.UNIVERSE, key="skip_symbol")
-    with skip_col2:
-        skip_reason = st.text_input("Reason (optional)", key="skip_reason")
-    if st.button("Skip this stock", key="skip_add_btn"):
-        state_db.add_skipped_symbol(skip_symbol, skip_reason)
+    _skipped_df = state_db.get_skipped_symbols_df()
+    skipped_reasons = (_skipped_df.set_index("symbol")["reason"] if not _skipped_df.empty
+                      else pd.Series(dtype=str))
+    all_syms_for_skip = sorted(set(config.UNIVERSE) | set(skipped_reasons.index))
+    try:
+        skip_prices = kite_client.get_ltp(all_syms_for_skip)
+    except Exception as e:
+        st.warning(f"Couldn't fetch live prices: {e}")
+        skip_prices = {}
+
+    skip_table = pd.DataFrame({
+        "symbol": all_syms_for_skip,
+        "price": [skip_prices.get(s) for s in all_syms_for_skip],
+        "skip": [s in skipped_reasons.index for s in all_syms_for_skip],
+        "reason": [skipped_reasons.get(s, "") for s in all_syms_for_skip],
+    })
+    edited_skip_table = st.data_editor(
+        skip_table, hide_index=True, width="stretch", key="skip_table_editor",
+        disabled=["symbol", "price"],
+        column_config={
+            "symbol": st.column_config.TextColumn("Symbol"),
+            "price": st.column_config.NumberColumn("LTP (₹)", format="₹%.2f"),
+            "skip": st.column_config.CheckboxColumn("Skip?"),
+            "reason": st.column_config.TextColumn("Reason (optional)"),
+        })
+    if st.button("Update skip list", type="primary", key="skip_update_btn"):
+        changed = 0
+        for _, row in edited_skip_table.iterrows():
+            sym, reason = row["symbol"], row["reason"] or ""
+            currently_skipped = sym in skipped_reasons.index
+            if row["skip"]:
+                if not currently_skipped or skipped_reasons.get(sym, "") != reason:
+                    state_db.add_skipped_symbol(sym, reason)
+                    changed += 1
+            elif currently_skipped:
+                state_db.remove_skipped_symbol(sym)
+                changed += 1
         config.refresh_universe()
-        st.success(f"{skip_symbol} skipped — excluded from the scanner immediately.")
+        st.success(f"Updated {changed} symbol(s) — in effect immediately." if changed
+                  else "No changes to apply.")
         st.rerun()
-
-    skipped_df = state_db.get_skipped_symbols_df()
-    if skipped_df.empty:
-        st.caption("No stocks currently skipped.")
-    else:
-        st.dataframe(skipped_df, width="stretch", hide_index=True)
-        unskip_symbol = st.selectbox("Symbol to un-skip",
-                                     skipped_df["symbol"].tolist(), key="unskip_symbol")
-        if st.button("Un-skip this stock", key="skip_remove_btn"):
-            state_db.remove_skipped_symbol(unskip_symbol)
-            config.refresh_universe()
-            st.success(f"{unskip_symbol} restored — included in the scanner immediately.")
-            st.rerun()
 
     st.divider()
     with st.expander("🔑 Change dashboard password"):
