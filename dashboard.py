@@ -232,6 +232,17 @@ def _pnl_color(val) -> str:
     return ""
 
 
+def _status_color(val) -> str:
+    """Open positions get a green badge, closed a neutral gray -- used on
+    the Tradebook's status column so open/closed reads at a glance instead
+    of as plain text next to everything else."""
+    if val == "open":
+        return "background-color: #16a34a; color: white; font-weight: 600; border-radius: 4px"
+    if val == "closed":
+        return "background-color: #6b7280; color: white; font-weight: 600; border-radius: 4px"
+    return ""
+
+
 # Raw/snake_case field name -> human-readable table header, applied by
 # pnl_style() (and readable_df() for the few tables that don't need P&L
 # coloring or number formatting) so no table in this app ever shows a
@@ -278,6 +289,21 @@ COLUMN_LABELS = {
     "incurred_claim_ratio_pct": "Claims ratio %",
     "premium_yoy_pct": "Premium growth %", "loan_yoy_pct": "Loan book growth %",
     "fiscal_year_end": "As of", "missing_pillars": "Data gaps",
+
+    # Job execution log
+    "job_type": "Job", "trigger_type": "Trigger", "started_at": "Started",
+    "finished_at": "Finished", "duration_sec": "Duration (s)",
+    "summary": "Summary", "error_message": "Error",
+
+    # Tradebook
+    "initial_stop": "Initial stop", "entry_score": "Entry score",
+    "entry_rsi": "Entry RSI", "entry_pct_52w_high": "Entry % of 52W high",
+    "entry_vol_expansion": "Entry vol expansion",
+    "entry_fundamental_score": "Entry fundamental score",
+    "exit_reason": "Exit reason", "entry_reason": "Why this trade",
+    "latest_recommended_stop": "Latest stop (daily 4PM calc)",
+    "realized_pnl": "Realized P&L",
+    "realized_ret_pct": "Realized return %",
 }
 
 
@@ -610,17 +636,25 @@ def page_admin():
                  "fundamental score still shows for every candidate "
                  "wherever fundamentals data is fetched regardless of this "
                  "toggle, for your own reference.")
-        c15, c16, c17 = st.columns(3)
+        c15, c16, c17, c18 = st.columns(4)
         min_fundamental_score = c15.number_input(
             "Min fundamental score (0-100)", min_value=0.0, max_value=100.0,
             value=float(cfg["min_fundamental_score"]), step=1.0,
             help="Only enforced when the checkbox above is on.")
-        sector_bonus_weight = c16.number_input(
+        fundamental_bonus_weight = c16.number_input(
+            "Fundamental score ranking tilt", min_value=0.0, max_value=2.0,
+            value=float(cfg["fundamental_bonus_weight"]), step=0.1,
+            help="0 = off (gate only, no ranking effect). 5-year A/B "
+                 "(equal-weight sizing, max_positions=10) found an "
+                 "inverted-U peaking near 0.5 -- CAGR 43.70%->43.03%, "
+                 "Sharpe 1.62->1.64, max drawdown -24.61%->-20.30%. "
+                 "Anything above 0.5 tested worse across the board.")
+        sector_bonus_weight = c17.number_input(
             "Sector bonus weight", min_value=0.0, max_value=1.0,
             value=float(cfg["sector_bonus_weight"]), step=0.05,
             help="0 = off. Backtested to underperform as of this default; "
                  "see README's Sector relative-strength section.")
-        history_days = c17.number_input(
+        history_days = c18.number_input(
             "Candle history fetched (days)", min_value=300, max_value=3000,
             value=int(cfg["history_days"]), step=100)
 
@@ -644,6 +678,7 @@ def page_admin():
             "volume_expansion_min": float(volume_expansion_min),
             "fundamental_gate_enabled": bool(fundamental_gate_enabled),
             "min_fundamental_score": float(min_fundamental_score),
+            "fundamental_bonus_weight": float(fundamental_bonus_weight),
             "sector_bonus_weight": float(sector_bonus_weight),
             "history_days": int(history_days),
         }
@@ -742,7 +777,8 @@ def page_screener():
         if st.button("Run screen", type="primary", disabled=screen_running):
             start_background_job(
                 "screen_run", _run_and_cache_screen, with_fund,
-                st.session_state.get("value_scores"))
+                st.session_state.get("value_scores"), job_type="screen_run",
+                summarize_fn=lambda r: f"{len(r)} candidates")
             st.rerun()
 
     @st.fragment(run_every="1s" if screen_running else None)
@@ -899,8 +935,11 @@ def page_live_rebalance():
                "until it finishes; safe to switch tabs.")
     if st.button("Run today's scan", type="primary", disabled=rebalance_running):
         fundamentals = st.session_state.get("value_scores")
-        start_background_job("rebalance_run", lr.propose_rebalance,
-                             available_cash, fundamentals=fundamentals)
+        start_background_job(
+            "rebalance_run", lr.propose_rebalance, available_cash,
+            fundamentals=fundamentals, job_type="rebalance_scan",
+            summarize_fn=lambda r: (f"{len(r['buys'])} buys, {len(r['sells'])} sells, "
+                                    f"{len(r['stop_updates'])} stop updates"))
         st.rerun()
 
     @st.fragment(run_every="1s" if rebalance_running else None)
@@ -947,6 +986,17 @@ def page_live_rebalance():
                 try:
                     oid = kite_client.square_off_position(r["symbol"])
                     log.append(f"✅ {r['symbol']}: order {oid}")
+                    # LTP-at-order-time approximation for the tradebook exit
+                    # price -- same convention reconciled_positions() already
+                    # documents (Kite's API has no historical fill-price
+                    # endpoint). Carries the rebalance rule's own reason
+                    # (e.g. "dropped out of top N rank") onto the trade
+                    # record -- previously discarded the moment the order fired.
+                    try:
+                        ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
+                    except Exception:
+                        ltp = None
+                    state_db.close_trade(r["symbol"], ltp, r["reason"])
                 except Exception as e:
                     log.append(f"❌ {r['symbol']}: FAILED — {e}")
             for line in log:
@@ -993,8 +1043,22 @@ def page_live_rebalance():
                 # unprotected-holdings check below can flag it -- a bought
                 # position always needs trailing-stop bookkeeping started,
                 # whether or not its GTT actually got placed.
-                state_db.record_new_position(r["symbol"], float(r["price"]),
-                                             int(r["qty"]), float(r["stop"]), gtt_id)
+                position_id = state_db.record_new_position(
+                    r["symbol"], float(r["price"]), int(r["qty"]),
+                    float(r["stop"]), gtt_id)
+                # Entry-time technical/fundamental snapshot for the
+                # tradebook -- already on this row from the screener
+                # pipeline (propose_rebalance()'s buys dict), zero extra
+                # computation.
+                state_db.record_trade_entry(
+                    r["symbol"], float(r["price"]), int(r["qty"]),
+                    float(r["stop"]),
+                    snapshot={"score": r.get("score"), "rsi": r.get("rsi"),
+                             "pct_52w_high": r.get("pct_52w_high"),
+                             "vol_expansion": r.get("vol_expansion"),
+                             "fundamental_score": r.get("fundamental_score"),
+                             "entry_reason": r.get("reason")},
+                    position_id=position_id)
                 log.append(msg)
             for line in log:
                 st.write(line)
@@ -1025,6 +1089,10 @@ def page_live_rebalance():
                     kite_client.modify_gtt_trigger(
                         int(r["gtt_trigger_id"]), r["symbol"], int(r["qty"]),
                         r["recommended_stop"], ltp)
+                    # Only now does the recommended stop become the applied
+                    # (real, broker-side) stop -- see apply_stop_update()'s
+                    # docstring for why this must never happen earlier.
+                    state_db.apply_stop_update(r["symbol"])
                     log.append(f"✅ {r['symbol']}: stop raised to "
                               f"₹{r['recommended_stop']:.2f}")
                 except Exception as e:
@@ -1138,6 +1206,11 @@ def page_positions_trade():
             try:
                 order_id = kite_client.square_off_position(sq_sym)
                 st.success(f"Square-off order placed: {order_id}")
+                try:
+                    ltp = kite_client.get_ltp([sq_sym])[sq_sym]
+                except Exception:
+                    ltp = None
+                state_db.close_trade(sq_sym, ltp, "manual_square_off")
             except Exception as e:
                 st.error(f"Order failed: {e}")
     else:
@@ -1284,8 +1357,16 @@ def page_positions_trade():
                                   "Unprotected holdings section)")
                 # Recorded even when the GTT failed (gtt_id=None), same
                 # reasoning as the Live Rebalance buy flow.
-                state_db.record_new_position(symbol, float(ltp), int(qty),
-                                             float(stop), gtt_id)
+                position_id = state_db.record_new_position(
+                    symbol, float(ltp), int(qty), float(stop), gtt_id)
+                # No screener row here (this is a manually-picked symbol, not
+                # a candidate from the scan) -- entry snapshot is just
+                # price/qty/stop, same as record_new_position itself gets.
+                state_db.record_trade_entry(
+                    symbol, float(ltp), int(qty), float(stop),
+                    snapshot={"entry_reason": "Manually placed order (Trade tab), "
+                             "not from the automated scan"},
+                    position_id=position_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1841,6 +1922,145 @@ def page_fundamentals():
 
 
 # ---------------------------------------------------------------------------
+# Page: Job Log
+# ---------------------------------------------------------------------------
+
+JOB_TYPES = ["rebalance_scan", "gap_check", "fundamentals_refresh", "screen_run"]
+
+
+def page_job_log():
+    st.subheader("🗂️ Job Log")
+    st.caption("Every scheduled job (systemd timers on the VPS) and manual "
+              "background-job button writes a row here -- answers \"did "
+              "today's jobs actually run\" without SSH-ing in to read raw "
+              "logs.")
+
+    st.markdown("**Last run of each job**")
+    cols = st.columns(len(JOB_TYPES))
+    for col, jt in zip(cols, JOB_TYPES):
+        last = state_db.get_last_job_run(jt)
+        with col:
+            if last is None:
+                st.metric(COLUMN_LABELS.get(jt, jt), "never run")
+                continue
+            started = dt.datetime.fromisoformat(last["started_at"])
+            age_hr = (dt.datetime.now() - started).total_seconds() / 3600
+            badge = {"success": "✅", "failed": "❌", "running": "⏳"}.get(last["status"], "❓")
+            st.metric(jt, f"{badge} {age_hr:.1f}h ago",
+                     help=last.get("summary") or last.get("error_message") or "")
+
+    st.divider()
+    st.markdown("**History**")
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        type_filter = st.multiselect("Job type", JOB_TYPES, key="jl_type_filter")
+    with f2:
+        status_filter = st.multiselect("Status", ["success", "failed", "running"],
+                                       key="jl_status_filter")
+    with f3:
+        since_date = st.date_input("Since", value=dt.date.today() - dt.timedelta(days=30),
+                                   key="jl_since")
+
+    runs = state_db.get_job_runs(since=since_date.isoformat(), limit=1000)
+    if type_filter:
+        runs = runs[runs["job_type"].isin(type_filter)]
+    if status_filter:
+        runs = runs[runs["status"].isin(status_filter)]
+
+    st.caption(f"Showing {len(runs)} run(s)")
+    if runs.empty:
+        st.info("No job runs match these filters.")
+        return
+
+    st.dataframe(
+        pnl_style(runs.drop(columns=["id"]),
+                 fmt={"duration_sec": "{:.1f}"}),
+        width="stretch", hide_index=True)
+
+    failed = runs[runs["status"] == "failed"]
+    if not failed.empty:
+        with st.expander(f"Failed runs -- full error detail ({len(failed)})"):
+            for _, r in failed.iterrows():
+                st.markdown(f"**{r['job_type']}** at {r['started_at']}")
+                st.code(r["error_message"] or "(no error message captured)")
+
+
+# ---------------------------------------------------------------------------
+# Page: Tradebook
+# ---------------------------------------------------------------------------
+
+def page_tradebook():
+    st.subheader("📒 Tradebook")
+    st.caption("Every trade this app has opened, with its entry-time "
+              "technical/fundamental snapshot and a real exit reason -- "
+              "separate from the Positions & Trade page's live view, meant "
+              "for historical/analytics use.")
+
+    trades = state_db.get_trades()
+    if trades.empty:
+        st.info("No trades recorded yet.")
+        return
+
+    closed = trades[trades["status"] == "closed"]
+    if not closed.empty:
+        s1, s2, s3, s4 = st.columns(4)
+        wins = closed[closed["realized_pnl"] > 0]
+        win_rate = 100 * len(wins) / len(closed[closed["realized_pnl"].notna()]) \
+            if closed["realized_pnl"].notna().any() else float("nan")
+        s1.metric("Win rate", f"{win_rate:.1f}%" if win_rate == win_rate else "—")
+        s2.metric("Avg holding days", f"{closed['holding_days'].mean():.0f}"
+                 if closed["holding_days"].notna().any() else "—")
+        s3.metric("Total realized P&L", f"₹{closed['realized_pnl'].sum():,.0f}")
+        best = closed["realized_ret_pct"].max()
+        worst = closed["realized_ret_pct"].min()
+        s4.metric("Best / worst trade",
+                 f"{best:+.1f}% / {worst:+.1f}%" if pd.notna(best) else "—")
+
+    st.divider()
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        sym_filter = st.multiselect("Symbol", sorted(trades["symbol"].unique()),
+                                    key="tb_sym_filter")
+    with f2:
+        status_filter = st.multiselect("Status", ["open", "closed"],
+                                       key="tb_status_filter")
+    with f3:
+        reasons = sorted(trades["exit_reason"].dropna().unique())
+        reason_filter = st.multiselect("Exit reason", reasons, key="tb_reason_filter")
+    with f4:
+        since_date = st.date_input("Entered since",
+                                   value=dt.date.today() - dt.timedelta(days=365),
+                                   key="tb_since")
+
+    filtered = trades[trades["entry_date"] >= since_date.isoformat()]
+    if sym_filter:
+        filtered = filtered[filtered["symbol"].isin(sym_filter)]
+    if status_filter:
+        filtered = filtered[filtered["status"].isin(status_filter)]
+    if reason_filter:
+        filtered = filtered[filtered["exit_reason"].isin(reason_filter)]
+
+    st.caption(f"Showing {len(filtered)} of {len(trades)} trades")
+    rest_cols = [c for c in filtered.columns
+                if c not in ("id", "position_id", "status", "latest_recommended_stop")]
+    stop_idx = rest_cols.index("initial_stop") + 1
+    display_cols = (["status"] + rest_cols[:stop_idx] + ["latest_recommended_stop"]
+                   + rest_cols[stop_idx:])
+    styled = pnl_style(
+        filtered[display_cols], ["realized_pnl", "realized_ret_pct"],
+        {"entry_price": "{:.2f}", "exit_price": "{:.2f}",
+         "initial_stop": "{:.2f}", "latest_recommended_stop": "{:.2f}",
+         "entry_score": "{:.2f}", "entry_rsi": "{:.1f}",
+         "entry_pct_52w_high": "{:.2f}", "entry_vol_expansion": "{:.2f}",
+         "entry_fundamental_score": "{:.1f}", "realized_pnl": "{:,.0f}",
+         "realized_ret_pct": "{:.2f}"})
+    styled = styled.map(_status_color, subset=["Status"])
+    st.dataframe(styled, width="stretch", hide_index=True)
+    st.download_button("Download tradebook CSV (filtered view)",
+                       filtered.to_csv(index=False), "tradebook.csv")
+
+
+# ---------------------------------------------------------------------------
 # Navigation
 # ---------------------------------------------------------------------------
 
@@ -1850,6 +2070,8 @@ page_live_rebalance_p = st.Page(page_live_rebalance, title="Live Rebalance", ico
 page_positions_trade_p = st.Page(page_positions_trade, title="Positions & Trade", icon="💼")
 page_backtest_p = st.Page(page_backtest, title="Backtest", icon="🧪")
 page_fundamentals_p = st.Page(page_fundamentals, title="Fundamentals", icon="📊")
+page_tradebook_p = st.Page(page_tradebook, title="Tradebook", icon="📒")
+page_job_log_p = st.Page(page_job_log, title="Job Log", icon="🗂️")
 page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
 
 with st.sidebar:
@@ -1859,5 +2081,5 @@ with st.sidebar:
 
 nav = st.navigation([page_cockpit_p, page_screener_p, page_live_rebalance_p,
                     page_positions_trade_p, page_backtest_p, page_fundamentals_p,
-                    page_admin_p])
+                    page_tradebook_p, page_job_log_p, page_admin_p])
 nav.run()

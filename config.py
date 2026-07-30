@@ -148,6 +148,18 @@ _STRATEGY_DEFAULTS = {
     # see screener.apply_gates()'s docstring.
     "fundamental_gate_enabled": True,
 
+    # Fundamental-score ranking tilt (screener.score(), on top of the gate
+    # above -- this affects WHERE a gate-passing candidate ranks, the gate
+    # only ever excludes/includes). A 5-year A/B sweep (equal-weight
+    # sizing, max_positions=10) found an inverted-U peaking near 0.5:
+    # weight 0->0.5->1.0->2.0 gives CAGR 43.70%->43.03%->38.88%->27.93%,
+    # Sharpe 1.62->1.64->1.56->1.26, but max drawdown improves at 0.5
+    # specifically (-24.61%->-20.30%) before getting worse again at 1.0
+    # (-26.72%). 0.5 is a near-wash on CAGR/win-rate (51.7%->50.6%) for a
+    # real ~4pp drawdown improvement -- kept for the same reasoning as the
+    # gate itself. Anything above 0.5 is a clear net negative.
+    "fundamental_bonus_weight": 0.5,
+
     # Sector relative-strength bonus (see sector_universe.py): tilts ranking
     # toward stocks in currently-outperforming sectors. 0 = off, matching
     # this codebase's pattern of shipping a new scoring dimension disabled

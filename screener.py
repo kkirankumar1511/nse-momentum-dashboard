@@ -124,6 +124,19 @@ def score(t: pd.DataFrame, cfg: dict = config.STRATEGY) -> pd.DataFrame:
         t["score"] += (cfg["sector_bonus_weight"]
                        * _zscore(t["sector_rs"].astype(float)).fillna(0))
 
+    # EXPERIMENTAL, backtest-only for now -- tilts ranking toward higher
+    # fundamental-quality names among gate-passers, same mechanic as the
+    # sector bonus above (not the same as the quality GATE in apply_gates,
+    # which only ever excludes/includes candidates -- this additionally
+    # affects WHERE an included candidate ranks). cfg.get(..., 0.0) so this
+    # is a no-op (byte-identical current behavior) until explicitly passed
+    # a nonzero weight in a custom cfg -- no permanent config.py/DB key
+    # added yet. NaN fundamental_score (not available for a symbol) ->
+    # zscore NaN -> fillna(0), neutral rather than penalized.
+    if cfg.get("fundamental_bonus_weight", 0.0) and "fundamental_score" in t.columns:
+        t["score"] += (cfg["fundamental_bonus_weight"]
+                       * _zscore(t["fundamental_score"].astype(float)).fillna(0))
+
     return t.sort_values("score", ascending=False)
 
 

@@ -16,12 +16,15 @@ run with no console).
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import json
 import os
 import secrets
 import sqlite3
+import time
+import traceback
 
 import pandas as pd
 
@@ -136,6 +139,52 @@ CREATE TABLE IF NOT EXISTS kite_credentials (
     access_token TEXT,
     access_token_updated_at TEXT
 );
+
+-- Unified execution log for every scheduled/background job (rebalance scan,
+-- gap-down check, fundamentals refresh, and the dashboard's own manual
+-- "Run screen"/"Run today's scan" buttons) -- see job_run() below. Before
+-- this, only the rebalance scan had any persisted history at all
+-- (rebalance_runs), and the other jobs had nothing queryable, only a
+-- plain-text tail log.
+CREATE TABLE IF NOT EXISTS job_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_type TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    duration_sec REAL,
+    status TEXT NOT NULL DEFAULT 'running',
+    summary TEXT,
+    error_message TEXT
+);
+
+-- The tradebook -- a clean, append-only analytics ledger, separate from
+-- `positions` (which stays focused on live trailing-stop bookkeeping).
+-- Captures an entry-time technical/fundamental snapshot (for later
+-- feature analytics) and a real exit reason on every closed trade, which
+-- nothing in `positions` tracked before this.
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id INTEGER REFERENCES positions(id),
+    symbol TEXT NOT NULL,
+    entry_date TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    qty INTEGER NOT NULL,
+    initial_stop REAL NOT NULL,
+    entry_score REAL,
+    entry_rsi REAL,
+    entry_pct_52w_high REAL,
+    entry_vol_expansion REAL,
+    entry_fundamental_score REAL,
+    entry_reason TEXT,
+    exit_date TEXT,
+    exit_price REAL,
+    exit_reason TEXT,
+    realized_pnl REAL,
+    realized_ret_pct REAL,
+    holding_days INTEGER,
+    status TEXT NOT NULL DEFAULT 'open'
+);
 """
 
 
@@ -161,6 +210,8 @@ def get_conn(db_path: str | None = None) -> sqlite3.Connection:
     _migrate_equity_log_once(conn)
     _migrate_fund_state_to_cash_flow(conn)
     _migrate_positions_schema(conn)
+    _migrate_stop_update_log_schema(conn)
+    _migrate_trades_schema(conn)
     return conn
 
 
@@ -201,14 +252,54 @@ def _migrate_fund_state_to_cash_flow(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_positions_schema(conn: sqlite3.Connection) -> None:
-    """Adds exit_price/realized_pnl columns to an already-existing positions
-    table -- CREATE TABLE IF NOT EXISTS above doesn't touch a table that
-    already exists, so new columns need this explicit, idempotent check."""
+    """Adds exit_price/realized_pnl/recommended_stop columns to an
+    already-existing positions table -- CREATE TABLE IF NOT EXISTS above
+    doesn't touch a table that already exists, so new columns need this
+    explicit, idempotent check.
+
+    recommended_stop: the latest trailing-stop VALUE COMPUTED, shown to the
+    user for approval -- current_stop now means only the APPLIED stop (what
+    the real broker GTT is actually set to), never written outside
+    apply_stop_update(). Before this column existed, update_position_stop()
+    wrote straight into current_stop every day regardless of whether the
+    user had actually applied it, so main_gap_check()'s gap-down comparison
+    (live_rebalance.py) could silently compare against a stop the broker
+    was never told about -- see apply_stop_update()'s docstring."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(positions)")}
     if "exit_price" not in cols:
         conn.execute("ALTER TABLE positions ADD COLUMN exit_price REAL")
     if "realized_pnl" not in cols:
         conn.execute("ALTER TABLE positions ADD COLUMN realized_pnl REAL")
+    if "recommended_stop" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN recommended_stop REAL")
+    conn.commit()
+
+
+def _migrate_trades_schema(conn: sqlite3.Connection) -> None:
+    """Adds entry_reason to an already-existing trades table -- a
+    human-readable one-liner (rank, score, RSI, fundamental score) built at
+    entry time, alongside the raw numeric snapshot columns, so the
+    tradebook is readable at a glance without cross-referencing every
+    number by hand."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(trades)")}
+    if "entry_reason" not in cols:
+        conn.execute("ALTER TABLE trades ADD COLUMN entry_reason TEXT")
+    conn.commit()
+
+
+def _migrate_stop_update_log_schema(conn: sqlite3.Connection) -> None:
+    """Adds atr_value/ratcheted columns to an already-existing
+    stop_update_log table. atr_value: the raw ATR reading that day's stop
+    was computed from (never persisted before this -- only the resulting
+    old_stop/new_stop pair was, and only on days the stop actually
+    ratcheted). ratcheted: whether THIS row's check actually raised the
+    stop -- update_position_stop() now inserts a row every day it runs, not
+    only on ratchet days, so a continuous daily history exists."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(stop_update_log)")}
+    if "atr_value" not in cols:
+        conn.execute("ALTER TABLE stop_update_log ADD COLUMN atr_value REAL")
+    if "ratcheted" not in cols:
+        conn.execute("ALTER TABLE stop_update_log ADD COLUMN ratcheted INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -217,19 +308,23 @@ def _migrate_positions_schema(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 def record_new_position(symbol: str, entry_price: float, qty: int,
-                        stop: float, gtt_trigger_id: int | None) -> None:
+                        stop: float, gtt_trigger_id: int | None) -> int:
     """Call right after a buy (+ GTT, if placed) succeeds -- seeds this
     symbol's trailing-stop bookkeeping. gtt_trigger_id=None if the GTT
-    placement failed or was skipped."""
+    placement failed or was skipped. Returns the new position's row id --
+    pass it to record_trade_entry() as position_id to link the tradebook
+    row back to this position."""
     conn = get_conn()
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO positions (symbol, entry_date, entry_price, qty, "
         "highest_close, current_stop, gtt_trigger_id, status) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
         (symbol, dt.date.today().isoformat(), entry_price, qty,
          entry_price, stop, gtt_trigger_id))
+    position_id = cur.lastrowid
     conn.commit()
     conn.close()
+    return position_id
 
 
 def get_stale_open_symbols(held_symbols: set[str]) -> list[str]:
@@ -260,12 +355,22 @@ def reconciled_positions(held_symbols: set[str],
     Kite's API only exposes today's trades/orders, no historical realized-
     P&L endpoint, so this LTP-at-detection-time approximation is this app's
     own reconstruction of it. Left null if no price was supplied for a
-    given symbol (caller chose to skip the extra LTP call)."""
+    given symbol (caller chose to skip the extra LTP call).
+
+    Also closes the matching trades row (see close_trade()) tagged
+    exit_reason='gtt_fill_or_external' -- this is the guaranteed-leftover
+    path: every KNOWN exit (gap-down stop, rebalance sell, manual
+    square-off) closes its trades row explicitly, with its own specific
+    reason, before this function next runs for that symbol. Anything still
+    caught here can only be a GTT that fired silently at the broker, or an
+    out-of-band manual sell outside this app -- close_trade() no-ops
+    harmlessly if an explicit call already closed the trade first."""
     exit_prices = exit_prices or {}
     conn = get_conn()
     open_rows = conn.execute(
         "SELECT * FROM positions WHERE status = 'open'").fetchall()
     today = dt.date.today().isoformat()
+    newly_closed = []
     for row in open_rows:
         if row["symbol"] not in held_symbols:
             exit_price = exit_prices.get(row["symbol"])
@@ -275,10 +380,13 @@ def reconciled_positions(held_symbols: set[str],
                 "UPDATE positions SET status = 'closed', closed_date = ?, "
                 "exit_price = ?, realized_pnl = ? WHERE id = ?",
                 (today, exit_price, realized_pnl, row["id"]))
+            newly_closed.append((row["symbol"], exit_price))
     conn.commit()
     remaining = conn.execute(
         "SELECT * FROM positions WHERE status = 'open'").fetchall()
     conn.close()
+    for symbol, exit_price in newly_closed:
+        close_trade(symbol, exit_price, "gtt_fill_or_external")
     return {r["symbol"]: dict(r) for r in remaining}
 
 
@@ -294,11 +402,20 @@ def get_realized_pnl() -> float:
     return float(row["total"]) if row["total"] is not None else 0.0
 
 
-def update_position_stop(symbol: str, highest_close: float, new_stop: float,
-                         applied: bool = False) -> None:
-    """Updates the open position's highest_close/current_stop and appends
-    a stop_update_log row -- an audit trail the old JSON version had no
-    way to keep, since it only ever stored the latest value."""
+def update_position_stop(symbol: str, highest_close: float, atr_value: float,
+                         new_stop: float) -> None:
+    """Called once daily (from live_rebalance.py's compute_stop_updates())
+    for every open position, ratchet or not -- records a stop_update_log
+    row EVERY time (atr_value + whether this check actually ratcheted the
+    stop), so a continuous daily ATR/stop history exists, not just a trail
+    of ratchet events.
+
+    Writes the computed candidate into positions.recommended_stop only --
+    never positions.current_stop. current_stop means the stop actually
+    APPLIED at the broker (see apply_stop_update()) and must only change
+    when an Apply action really pushes it to the real GTT; main_gap_check()
+    compares live LTP against current_stop specifically because it needs
+    the real, broker-side stop, not a theoretical unapplied one."""
     conn = get_conn()
     row = conn.execute(
         "SELECT * FROM positions WHERE symbol = ? AND status = 'open'",
@@ -306,18 +423,53 @@ def update_position_stop(symbol: str, highest_close: float, new_stop: float,
     if row is None:
         conn.close()
         return
-    if new_stop > row["current_stop"]:
-        conn.execute(
-            "INSERT INTO stop_update_log (position_id, date, old_stop, "
-            "new_stop, applied) VALUES (?, ?, ?, ?, ?)",
-            (row["id"], dt.date.today().isoformat(), row["current_stop"],
-             new_stop, int(applied)))
+    ratcheted = new_stop > row["current_stop"]
     conn.execute(
-        "UPDATE positions SET highest_close = ?, current_stop = ?, "
+        "INSERT INTO stop_update_log (position_id, date, old_stop, "
+        "new_stop, atr_value, ratcheted, applied) VALUES (?, ?, ?, ?, ?, ?, 0)",
+        (row["id"], dt.date.today().isoformat(), row["current_stop"],
+         new_stop, atr_value, int(ratcheted)))
+    conn.execute(
+        "UPDATE positions SET highest_close = ?, recommended_stop = ?, "
         "updated_at = datetime('now') WHERE id = ?",
         (highest_close, max(new_stop, row["current_stop"]), row["id"]))
     conn.commit()
     conn.close()
+
+
+def apply_stop_update(symbol: str) -> float | None:
+    """Call right after kite_client.modify_gtt_trigger(...) succeeds for
+    this symbol's open position -- copies recommended_stop into
+    current_stop (the applied, broker-real stop) and marks that position's
+    most recent stop_update_log row as applied. Returns the new applied
+    stop, or None if there's no open position / nothing recommended.
+
+    Only the MOST RECENT stop_update_log row is marked applied, not every
+    unapplied one -- if a stop was recommended on day 1 but not applied
+    until day 3 (by which point day 2 had already recommended a higher
+    value), only day 2's row ever actually reached the broker; day 1's
+    row stays unapplied, accurately reflecting that its value was
+    superseded before ever being pushed."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM positions WHERE symbol = ? AND status = 'open'",
+        (symbol,)).fetchone()
+    if row is None or row["recommended_stop"] is None:
+        conn.close()
+        return None
+    new_current = row["recommended_stop"]
+    conn.execute(
+        "UPDATE positions SET current_stop = ?, updated_at = datetime('now') "
+        "WHERE id = ?", (new_current, row["id"]))
+    last_log_id = conn.execute(
+        "SELECT id FROM stop_update_log WHERE position_id = ? "
+        "ORDER BY id DESC LIMIT 1", (row["id"],)).fetchone()
+    if last_log_id is not None:
+        conn.execute("UPDATE stop_update_log SET applied = 1 WHERE id = ?",
+                    (last_log_id["id"],))
+    conn.commit()
+    conn.close()
+    return float(new_current)
 
 
 def get_open_positions() -> dict[str, dict]:
@@ -336,23 +488,38 @@ def upsert_manual_position(symbol: str, entry_price: float, qty: int,
     the current_stop/gtt_trigger_id if one already does (e.g. re-placing a
     GTT that expired or was cancelled). Either way, the position becomes
     fully known to reconciled_positions()/get_open_positions() afterward, so
-    future trailing-stop updates pick it up like any other position."""
+    future trailing-stop updates pick it up like any other position.
+
+    Also seeds a matching trades row (empty snapshot -- no screener data
+    exists for a position this app didn't pick) on the first-insert path
+    only, so this position's eventual close still has an open trade row
+    for close_trade() to find -- otherwise it would only ever be caught by
+    reconciled_positions()'s generic fallback with no trades row to close
+    at all, silently missing it from the tradebook entirely."""
     conn = get_conn()
     row = conn.execute(
         "SELECT id FROM positions WHERE symbol = ? AND status = 'open'",
         (symbol,)).fetchone()
     if row is None:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO positions (symbol, entry_date, entry_price, qty, "
             "highest_close, current_stop, gtt_trigger_id, status) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
             (symbol, dt.date.today().isoformat(), entry_price, qty,
              entry_price, stop, gtt_trigger_id))
-    else:
-        conn.execute(
-            "UPDATE positions SET current_stop = ?, gtt_trigger_id = ?, "
-            "updated_at = datetime('now') WHERE id = ?",
-            (stop, gtt_trigger_id, row["id"]))
+        new_position_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        record_trade_entry(
+            symbol, entry_price, qty, stop,
+            snapshot={"entry_reason": "Backfilled -- bought outside this app "
+                     "(e.g. directly on Kite), stop-loss added here after the fact"},
+            position_id=new_position_id)
+        return
+    conn.execute(
+        "UPDATE positions SET current_stop = ?, gtt_trigger_id = ?, "
+        "updated_at = datetime('now') WHERE id = ?",
+        (stop, gtt_trigger_id, row["id"]))
     conn.commit()
     conn.close()
 
@@ -657,3 +824,207 @@ def update_kite_api_credentials(api_key: str, api_secret: str) -> None:
         (api_key, api_secret))
     conn.commit()
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Job execution log -- unified history for every scheduled/background job
+# (rebalance scan, gap-down check, fundamentals refresh, and the
+# dashboard's manual "Run screen"/"Run today's scan" buttons). Wrap a job's
+# body in the job_run() context manager below rather than calling
+# start_job_run/finish_job_run directly.
+# ---------------------------------------------------------------------------
+
+def start_job_run(job_type: str, trigger_type: str) -> int:
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO job_runs (job_type, trigger_type, started_at, status) "
+        "VALUES (?, ?, ?, 'running')",
+        (job_type, trigger_type, dt.datetime.now().isoformat()))
+    run_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return run_id
+
+
+def finish_job_run(run_id: int, status: str, summary: str | None = None,
+                   error: str | None = None) -> None:
+    conn = get_conn()
+    row = conn.execute("SELECT started_at FROM job_runs WHERE id = ?",
+                       (run_id,)).fetchone()
+    started = dt.datetime.fromisoformat(row["started_at"])
+    finished = dt.datetime.now()
+    conn.execute(
+        "UPDATE job_runs SET finished_at = ?, duration_sec = ?, status = ?, "
+        "summary = ?, error_message = ? WHERE id = ?",
+        (finished.isoformat(), (finished - started).total_seconds(), status,
+         summary, error, run_id))
+    conn.commit()
+    conn.close()
+
+
+@contextlib.contextmanager
+def job_run(job_type: str, trigger_type: str):
+    """Wrap a job's entire body in this. Records a 'running' row
+    immediately, then 'success' or 'failed' (with the full traceback) when
+    the block exits -- and always re-raises on failure, so a systemd unit
+    still exits non-zero / a caller still sees the exception; this only
+    ADDS a persisted record, it never swallows an error.
+
+    Yields a plain dict -- set result["summary"] inside the `with` block to
+    whatever one-line, job-type-specific text should show in the Job Log
+    (e.g. "3 buys, 1 sell, 2 stop updates"); it's read only after the block
+    finishes successfully.
+
+    Usage:
+        with state_db.job_run("rebalance_scan", "scheduled") as result:
+            outcome = propose_rebalance(...)
+            result["summary"] = f"{len(outcome['buys'])} buys, ..."
+    """
+    run_id = start_job_run(job_type, trigger_type)
+    result: dict = {"summary": None}
+    try:
+        yield result
+    except Exception:
+        finish_job_run(run_id, "failed", error=traceback.format_exc())
+        raise
+    else:
+        finish_job_run(run_id, "success", summary=result.get("summary"))
+
+
+def get_job_runs(job_type: str | None = None, status: str | None = None,
+                 since: str | None = None, limit: int = 200) -> pd.DataFrame:
+    """since: an ISO date/datetime string, inclusive lower bound on
+    started_at. All filters optional -- omit to get the unfiltered history
+    (most recent `limit` rows)."""
+    conn = get_conn()
+    where, params = [], []
+    if job_type:
+        where.append("job_type = ?")
+        params.append(job_type)
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    if since:
+        where.append("started_at >= ?")
+        params.append(since)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    df = pd.read_sql(
+        f"SELECT * FROM job_runs {clause} ORDER BY id DESC LIMIT ?",
+        conn, params=params + [limit])
+    conn.close()
+    return df
+
+
+def get_last_job_run(job_type: str) -> dict | None:
+    """For the Job Log page's quick-glance strip -- last run of one job
+    type, whatever its status."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM job_runs WHERE job_type = ? ORDER BY id DESC LIMIT 1",
+        (job_type,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Tradebook -- append-only analytics ledger, separate from `positions`
+# (which stays focused on live trailing-stop bookkeeping). One row per
+# trade, capturing an entry-time technical/fundamental snapshot and a real
+# exit reason -- neither existed anywhere before this.
+# ---------------------------------------------------------------------------
+
+def record_trade_entry(symbol: str, entry_price: float, qty: int, stop: float,
+                       snapshot: dict, position_id: int | None = None,
+                       entry_date: str | None = None) -> int:
+    """snapshot: whatever entry-time context is available, keyed by the
+    trades columns it maps to -- score/rsi/pct_52w_high/vol_expansion/
+    fundamental_score/entry_reason. Missing keys are left null rather than
+    required, since not every caller (e.g. a manual position add) has a
+    full screener row to draw from.
+
+    snapshot["entry_reason"]: a human-readable one-liner built by the
+    caller from the same numbers (e.g. "Ranked #2 of 9 momentum candidates
+    (score 2.39); RSI 58, 92% of 52w high; fundamental score 87/100") --
+    see live_rebalance.py's propose_rebalance() buy loop for how it's
+    constructed. Left null if the caller doesn't have enough context
+    (manual/backfilled positions) rather than fabricated.
+
+    entry_date: defaults to today (the normal case, called right after a
+    live buy) -- pass an explicit ISO date to backfill a trade that
+    happened before this table existed (e.g. from positions.entry_date +
+    rebalance_buys' recorded score for that day)."""
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO trades (position_id, symbol, entry_date, entry_price, "
+        "qty, initial_stop, entry_score, entry_rsi, entry_pct_52w_high, "
+        "entry_vol_expansion, entry_fundamental_score, entry_reason, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
+        (position_id, symbol, entry_date or dt.date.today().isoformat(),
+         entry_price, qty, stop, snapshot.get("score"), snapshot.get("rsi"),
+         snapshot.get("pct_52w_high"), snapshot.get("vol_expansion"),
+         snapshot.get("fundamental_score"), snapshot.get("entry_reason")))
+    trade_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return trade_id
+
+
+def close_trade(symbol: str, exit_price: float | None, exit_reason: str) -> None:
+    """Closes the most recent OPEN trades row for this symbol. exit_price
+    may be None (price genuinely unavailable) -- realized_pnl/
+    realized_ret_pct are then left null, same NULL-tolerant convention
+    positions.realized_pnl already uses. No-ops (does nothing) if there's
+    no open trade for this symbol -- callers that aren't sure one exists
+    (e.g. reconciled_positions' fallback path) can call this unconditionally."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM trades WHERE symbol = ? AND status = 'open' "
+        "ORDER BY id DESC LIMIT 1", (symbol,)).fetchone()
+    if row is None:
+        conn.close()
+        return
+    today = dt.date.today().isoformat()
+    holding_days = (dt.date.today() - dt.date.fromisoformat(row["entry_date"])).days
+    realized_pnl = None
+    realized_ret_pct = None
+    if exit_price is not None:
+        realized_pnl = (exit_price - row["entry_price"]) * row["qty"]
+        realized_ret_pct = (exit_price / row["entry_price"] - 1) * 100
+    conn.execute(
+        "UPDATE trades SET status = 'closed', exit_date = ?, exit_price = ?, "
+        "exit_reason = ?, realized_pnl = ?, realized_ret_pct = ?, "
+        "holding_days = ? WHERE id = ?",
+        (today, exit_price, exit_reason, realized_pnl, realized_ret_pct,
+         holding_days, row["id"]))
+    conn.commit()
+    conn.close()
+
+
+def get_trades(symbol: str | None = None, status: str | None = None,
+              since: str | None = None) -> pd.DataFrame:
+    """Also carries the position's CURRENT recommended_stop as
+    latest_recommended_stop -- the trailing-stop value compute_stop_updates()
+    recalculates daily (from the 16:00 rebalance scan) using that day's ATR,
+    NOT yet necessarily pushed to the real broker GTT (see
+    apply_stop_update()). Null for a closed trade, or a trade whose position
+    was never linked (shouldn't happen for anything recorded through this
+    app's own flows)."""
+    conn = get_conn()
+    where, params = [], []
+    if symbol:
+        where.append("t.symbol = ?")
+        params.append(symbol)
+    if status:
+        where.append("t.status = ?")
+        params.append(status)
+    if since:
+        where.append("t.entry_date >= ?")
+        params.append(since)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    df = pd.read_sql(
+        f"SELECT t.*, p.recommended_stop AS latest_recommended_stop "
+        f"FROM trades t LEFT JOIN positions p ON t.position_id = p.id "
+        f"{clause} ORDER BY t.entry_date DESC, t.id DESC",
+        conn, params=params)
+    conn.close()
+    return df

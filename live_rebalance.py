@@ -67,7 +67,7 @@ def compute_stop_updates(held_symbols: set[str], cfg: dict) -> list[dict]:
                 "recommended_stop": round(new_stop, 2),
                 "gtt_trigger_id": pos.get("gtt_trigger_id"),
             })
-        state_db.update_position_stop(sym, highest_close, new_stop)
+        state_db.update_position_stop(sym, highest_close, atr_now, new_stop)
     return updates
 
 
@@ -193,11 +193,22 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
                 continue
             remaining_cash -= qty * price
             fscore = row.get("fundamental_score")
+            fscore = None if pd.isna(fscore) else round(float(fscore), 1)
+            rank = candidates.index.get_loc(sym) + 1
+            reason = (f"Ranked #{rank} of {len(candidates)} momentum candidates "
+                     f"(score {row['score']:.2f}); RSI {row['rsi']:.0f}, "
+                     f"{row['pct_52w_high'] * 100:.0f}% of 52w high, "
+                     f"vol expansion {row['vol_expansion']:.2f}x")
+            if fscore is not None:
+                reason += f"; fundamental score {fscore:.0f}/100"
             buys.append({
                 "symbol": sym, "qty": qty, "price": round(price, 2),
                 "stop": round(stop, 2), "score": float(row["score"]),
-                "fundamental_score": None if pd.isna(fscore) else round(float(fscore), 1),
+                "rsi": float(row["rsi"]), "pct_52w_high": float(row["pct_52w_high"]),
+                "vol_expansion": float(row["vol_expansion"]),
+                "fundamental_score": fscore,
                 "fundamental_rubric": row.get("fundamental_rubric"),
+                "reason": reason,
             })
     buys_df = pd.DataFrame(buys)
 
@@ -277,6 +288,7 @@ def check_gap_down_stops() -> list[dict]:
         try:
             action["order_id"] = kite_client.square_off_position(sym)
             still_held.discard(sym)
+            state_db.close_trade(sym, ltp, "gap_down_stop")
         except Exception as e:
             action["error"] = f"Market sell FAILED: {e}"
             actions.append(action)
@@ -303,7 +315,9 @@ def main_gap_check():
     """Headless entry point for check_gap_down_stops() -- e.g. from
     trading_service.py's scheduler, shortly after market open. Logs to the
     same LOG_PATH as main()'s rebalance scan, since both are automated runs
-    with no console to watch."""
+    with no console to watch. Also wrapped in state_db.job_run() -- see its
+    docstring -- so the Job Log page has a persisted, filterable record on
+    top of the plain-text tail log."""
     os.makedirs("cache", exist_ok=True)
     log_lines = [f"\n{'=' * 60}\n{dt.datetime.now():%d %b %Y %H:%M:%S} (gap-down check)"
                 f"\n{'=' * 60}"]
@@ -312,25 +326,28 @@ def main_gap_check():
         print(msg)
         log_lines.append(msg)
 
-    try:
-        actions = check_gap_down_stops()
-    except Exception as e:
-        log(f"FAILED -- {e}")
+    with state_db.job_run("gap_check", "scheduled") as jr:
+        try:
+            actions = check_gap_down_stops()
+        except Exception as e:
+            log(f"FAILED -- {e}")
+            with open(LOG_PATH, "a") as f:
+                f.write("\n".join(log_lines) + "\n")
+            raise
+
+        if not actions:
+            log("No positions gapped below their stop.")
+        for a in actions:
+            if a.get("error") and a.get("order_id") is None:
+                log(f"⚠️ {a['symbol']}: {a['error']}")
+            else:
+                log(f"🔴 {a['symbol']}: gapped to ₹{a['ltp']:.2f} (stop ₹{a['stop']:.2f}) -- "
+                   f"market SELL order {a['order_id']}, GTT deleted: {a['gtt_deleted']}"
+                   + (f" -- {a['error']}" if a.get("error") else ""))
         with open(LOG_PATH, "a") as f:
             f.write("\n".join(log_lines) + "\n")
-        return
-
-    if not actions:
-        log("No positions gapped below their stop.")
-    for a in actions:
-        if a.get("error") and a.get("order_id") is None:
-            log(f"⚠️ {a['symbol']}: {a['error']}")
-        else:
-            log(f"🔴 {a['symbol']}: gapped to ₹{a['ltp']:.2f} (stop ₹{a['stop']:.2f}) -- "
-               f"market SELL order {a['order_id']}, GTT deleted: {a['gtt_deleted']}"
-               + (f" -- {a['error']}" if a.get("error") else ""))
-    with open(LOG_PATH, "a") as f:
-        f.write("\n".join(log_lines) + "\n")
+        jr["summary"] = (f"{len(actions)} gap action(s)" if actions
+                        else "no positions gapped below stop")
 
 
 def main():
@@ -338,7 +355,11 @@ def main():
     "Scheduled scan" section. Every run appends a timestamped block to
     LOG_PATH regardless of outcome (including a Kite-auth failure), since a
     scheduled run has no console to watch -- this is the only record of
-    whether today's run happened and what it found."""
+    whether today's run happened and what it found. Also wrapped in
+    state_db.job_run() -- see its docstring -- so the Job Log page has a
+    persisted, filterable record on top of the plain-text tail log; a
+    Kite-auth failure now also propagates (after logging) instead of
+    silently returning, so the systemd unit itself shows failed too."""
     os.makedirs("cache", exist_ok=True)
     log_lines = [f"\n{'=' * 60}\n{dt.datetime.now():%d %b %Y %H:%M:%S}\n{'=' * 60}"]
 
@@ -346,39 +367,42 @@ def main():
         print(msg)
         log_lines.append(msg)
 
-    try:
-        margins = kite_client.get_margins()
-        available_cash = margins["equity"]["available"]["live_balance"]
-    except Exception as e:
-        log(f"FAILED -- Kite connection failed (token may have expired): {e}")
-        log("Refresh the token (python kite_client.py login / token <request_token>) "
-           "before the next scheduled run, or run manually from the dashboard.")
-        state_db.save_rebalance_failure(str(e))
+    with state_db.job_run("rebalance_scan", "scheduled") as jr:
+        try:
+            margins = kite_client.get_margins()
+            available_cash = margins["equity"]["available"]["live_balance"]
+        except Exception as e:
+            log(f"FAILED -- Kite connection failed (token may have expired): {e}")
+            log("Refresh the token (python kite_client.py login / token <request_token>) "
+               "before the next scheduled run, or run manually from the dashboard.")
+            state_db.save_rebalance_failure(str(e))
+            with open(LOG_PATH, "a") as f:
+                f.write("\n".join(log_lines) + "\n")
+            raise
+
+        def cb(stage, frac):
+            pass  # progress bar text is meaningless in a headless/logged run
+
+        result = propose_rebalance(available_cash, progress_cb=cb)
+
+        log(f"Rebalance proposal ({result['run_time']:%d %b %Y %H:%M})")
+        log(f"Open slots: {result['open_slots']}")
+        log("\n-- Proposed SELLS --")
+        log(result["sells"].to_string(index=False) if not result["sells"].empty
+           else "(none)")
+        log("\n-- Proposed BUYS --")
+        log(result["buys"].to_string(index=False) if not result["buys"].empty
+           else "(none)")
+        log("\n-- Recommended stop updates (trailing stop) --")
+        log(result["stop_updates"].to_string(index=False) if not result["stop_updates"].empty
+           else "(none)")
+        log(f"\nSaved to {state_db.DB_PATH}")
+        log("Nothing was placed or modified -- review and execute/apply manually "
+           "in the dashboard's Live Rebalance page or the Trade tab.")
         with open(LOG_PATH, "a") as f:
             f.write("\n".join(log_lines) + "\n")
-        return
-
-    def cb(stage, frac):
-        pass  # progress bar text is meaningless in a headless/logged run
-
-    result = propose_rebalance(available_cash, progress_cb=cb)
-
-    log(f"Rebalance proposal ({result['run_time']:%d %b %Y %H:%M})")
-    log(f"Open slots: {result['open_slots']}")
-    log("\n-- Proposed SELLS --")
-    log(result["sells"].to_string(index=False) if not result["sells"].empty
-       else "(none)")
-    log("\n-- Proposed BUYS --")
-    log(result["buys"].to_string(index=False) if not result["buys"].empty
-       else "(none)")
-    log("\n-- Recommended stop updates (trailing stop) --")
-    log(result["stop_updates"].to_string(index=False) if not result["stop_updates"].empty
-       else "(none)")
-    log(f"\nSaved to {state_db.DB_PATH}")
-    log("Nothing was placed or modified -- review and execute/apply manually "
-       "in the dashboard's Live Rebalance page or the Trade tab.")
-    with open(LOG_PATH, "a") as f:
-        f.write("\n".join(log_lines) + "\n")
+        jr["summary"] = (f"{len(result['buys'])} buys, {len(result['sells'])} sells, "
+                        f"{len(result['stop_updates'])} stop updates")
 
 
 if __name__ == "__main__":

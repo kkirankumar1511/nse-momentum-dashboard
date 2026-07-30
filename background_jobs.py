@@ -27,15 +27,26 @@ from __future__ import annotations
 import datetime as dt
 import threading
 
+import state_db
+
 _JOBS: dict[str, dict] = {}
 
 
-def start_background_job(key: str, fn, *args, **kwargs) -> bool:
+def start_background_job(key: str, fn, *args, job_type: str | None = None,
+                         summarize_fn=None, **kwargs) -> bool:
     """Runs fn(*args, **kwargs, progress_cb=...) in a background thread.
     No-ops (returns False) if a job with this key is already running --
     otherwise returns True. `progress_cb(stage, frac)` and the eventual
     result/error are stashed on the job dict for get_background_job() to
-    read on a later poll."""
+    read on a later poll.
+
+    job_type: also wraps the run in state_db.job_run(job_type, "manual") --
+    same job_runs table the scheduled systemd jobs write to (job_type
+    matches their string, e.g. "rebalance_scan"), so the dashboard's Job
+    Log page shows manual and scheduled runs of the same job type
+    together. Omit to skip persisted logging (falls back to the old
+    in-memory-only behavior). summarize_fn(result) -> str, if given,
+    produces the one-line summary stashed on that job_runs row."""
     existing = _JOBS.get(key)
     if existing is not None and existing["thread"].is_alive():
         return False
@@ -46,9 +57,19 @@ def start_background_job(key: str, fn, *args, **kwargs) -> bool:
     def _progress_cb(stage, frac):
         job["progress"] = (frac, stage)
 
+    def _run_fn():
+        job["result"] = fn(*args, progress_cb=_progress_cb, **kwargs)
+        return job["result"]
+
     def _runner():
         try:
-            job["result"] = fn(*args, progress_cb=_progress_cb, **kwargs)
+            if job_type:
+                with state_db.job_run(job_type, "manual") as jr:
+                    result = _run_fn()
+                    if summarize_fn:
+                        jr["summary"] = summarize_fn(result)
+            else:
+                _run_fn()
         except Exception as e:
             job["error"] = e
         finally:

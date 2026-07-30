@@ -21,6 +21,7 @@ import pandas as pd
 
 import config
 import nse_api
+import state_db
 import xbrl_parser
 
 VALUE_SCORE_CACHE = os.path.join("cache", "fno_value_scores.pkl")
@@ -206,15 +207,19 @@ def main():
     Rebalance's fundamental-score display read from. Fundamentals filings
     change quarterly at most, so a weekly refresh is already generous --
     this just keeps the cache from going stale for months at a time between
-    manual Fundamentals-page runs."""
-    print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Starting weekly fundamentals scan "
-         f"({len(config.UNIVERSE)} symbols)...")
-    result = fno_value_scan(config.UNIVERSE)
-    os.makedirs("cache", exist_ok=True)
-    result.to_pickle(VALUE_SCORE_CACHE)
-    scored = result["total_score"].notna().sum() if "total_score" in result.columns else 0
-    print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Done -- {scored}/{len(result)} "
-         f"scored, saved to {VALUE_SCORE_CACHE}")
+    manual Fundamentals-page runs. Wrapped in state_db.job_run() so the
+    dashboard's Job Log page has a persisted, filterable record of every
+    weekly run, not just this console/systemd-journal output."""
+    with state_db.job_run("fundamentals_refresh", "scheduled") as jr:
+        print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Starting weekly fundamentals scan "
+             f"({len(config.UNIVERSE)} symbols)...")
+        result = fno_value_scan(config.UNIVERSE)
+        os.makedirs("cache", exist_ok=True)
+        result.to_pickle(VALUE_SCORE_CACHE)
+        scored = result["total_score"].notna().sum() if "total_score" in result.columns else 0
+        print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Done -- {scored}/{len(result)} "
+             f"scored, saved to {VALUE_SCORE_CACHE}")
+        jr["summary"] = f"{scored}/{len(result)} scored"
 
 
 if __name__ == "__main__":
