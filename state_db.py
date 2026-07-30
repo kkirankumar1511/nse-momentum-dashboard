@@ -84,7 +84,12 @@ CREATE TABLE IF NOT EXISTS rebalance_runs (
     run_time TEXT NOT NULL,
     open_slots INTEGER,
     status TEXT NOT NULL,
-    error_message TEXT
+    error_message TEXT,
+    target_per_slot REAL,
+    cash_pool REAL,
+    cash_needed_for_full_equal_weight REAL,
+    cash_shortfall REAL,
+    unsettled_proceeds REAL
 );
 
 CREATE TABLE IF NOT EXISTS rebalance_sells (
@@ -95,13 +100,23 @@ CREATE TABLE IF NOT EXISTS rebalance_sells (
 CREATE TABLE IF NOT EXISTS rebalance_buys (
     run_id INTEGER REFERENCES rebalance_runs(id),
     symbol TEXT, qty INTEGER, price REAL, stop REAL, score REAL,
-    fundamental_score REAL, fundamental_rubric TEXT
+    fundamental_score REAL, fundamental_rubric TEXT,
+    rsi REAL, pct_52w_high REAL, vol_expansion REAL, reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS rebalance_stop_updates (
     run_id INTEGER REFERENCES rebalance_runs(id),
     symbol TEXT, qty INTEGER, current_stop REAL, recommended_stop REAL,
     gtt_trigger_id INTEGER
+);
+
+-- Proposed top-ups (screener.allocate_equal_weight_buys) -- additional
+-- shares for an ALREADY-held position that's below its equal-weight
+-- target, funded by cash left over after filling new-buy slots. Distinct
+-- from rebalance_buys (which only ever opens brand-new positions).
+CREATE TABLE IF NOT EXISTS rebalance_top_ups (
+    run_id INTEGER REFERENCES rebalance_runs(id),
+    symbol TEXT, extra_qty INTEGER, price REAL, gtt_trigger_id INTEGER
 );
 
 -- Dashboard login gate. Singleton row, password stored as a salted hash
@@ -212,6 +227,9 @@ def get_conn(db_path: str | None = None) -> sqlite3.Connection:
     _migrate_positions_schema(conn)
     _migrate_stop_update_log_schema(conn)
     _migrate_trades_schema(conn)
+    _migrate_rebalance_buys_schema(conn)
+    _migrate_rebalance_runs_schema(conn)
+    _migrate_equity_log_schema(conn)
     return conn
 
 
@@ -284,6 +302,49 @@ def _migrate_trades_schema(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(trades)")}
     if "entry_reason" not in cols:
         conn.execute("ALTER TABLE trades ADD COLUMN entry_reason TEXT")
+    conn.commit()
+
+
+def _migrate_rebalance_buys_schema(conn: sqlite3.Connection) -> None:
+    """Adds rsi/pct_52w_high/vol_expansion/reason to an already-existing
+    rebalance_buys table -- these were already in propose_rebalance()'s
+    in-memory buys dict but never persisted, so a page reload (reading
+    back via get_last_rebalance_run() instead of a fresh propose_rebalance()
+    call) would silently lose them."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(rebalance_buys)")}
+    for col, coltype in [("rsi", "REAL"), ("pct_52w_high", "REAL"),
+                        ("vol_expansion", "REAL"), ("reason", "TEXT")]:
+        if col not in cols:
+            conn.execute(f"ALTER TABLE rebalance_buys ADD COLUMN {col} {coltype}")
+    conn.commit()
+
+
+def _migrate_rebalance_runs_schema(conn: sqlite3.Connection) -> None:
+    """Adds target_per_slot/cash_pool/cash_needed_for_full_equal_weight/
+    cash_shortfall to an already-existing rebalance_runs table -- without
+    this, those figures only ever lived in the in-memory result dict from
+    the run that just computed them, and would silently vanish the moment
+    a page reload re-read the proposal via get_last_rebalance_run()
+    instead."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(rebalance_runs)")}
+    for col in ["target_per_slot", "cash_pool",
+               "cash_needed_for_full_equal_weight", "cash_shortfall",
+               "unsettled_proceeds"]:
+        if col not in cols:
+            conn.execute(f"ALTER TABLE rebalance_runs ADD COLUMN {col} REAL")
+    conn.commit()
+
+
+def _migrate_equity_log_schema(conn: sqlite3.Connection) -> None:
+    """Adds invested_amount to an already-existing equity_log table -- lets
+    the Overview page's chart overlay cost basis alongside total portfolio
+    value, so growth from new capital vs actual returns is visually
+    distinguishable. Only ever populated going forward (log_equity_snapshot
+    is called once/day) -- there's no way to backfill historical cost
+    basis for days before this column existed."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(equity_log)")}
+    if "invested_amount" not in cols:
+        conn.execute("ALTER TABLE equity_log ADD COLUMN invested_amount REAL")
     conn.commit()
 
 
@@ -479,6 +540,44 @@ def get_open_positions() -> dict[str, dict]:
     return {r["symbol"]: dict(r) for r in rows}
 
 
+def top_up_trade(symbol: str, extra_qty: int, price: float) -> None:
+    """Call right after buying MORE shares of an ALREADY-open position
+    (screener.allocate_equal_weight_buys' top-up mechanic) succeeds --
+    weighted-averages the cost basis into both the positions row (qty,
+    entry_price) and the matching open trades row, mirroring backtest.py's
+    top_up_position(). Distinct from record_new_position(), which only
+    ever opens a brand-new position. No-ops if there's no open position
+    for this symbol."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM positions WHERE symbol = ? AND status = 'open'",
+        (symbol,)).fetchone()
+    if row is None or extra_qty <= 0:
+        conn.close()
+        return
+    new_qty = row["qty"] + extra_qty
+    new_entry_price = (row["entry_price"] * row["qty"] + price * extra_qty) / new_qty
+    conn.execute(
+        "UPDATE positions SET qty = ?, entry_price = ?, updated_at = datetime('now') "
+        "WHERE id = ?", (new_qty, new_entry_price, row["id"]))
+    conn.commit()
+    conn.close()
+
+    trades_conn = get_conn()
+    trade_row = trades_conn.execute(
+        "SELECT * FROM trades WHERE symbol = ? AND status = 'open' "
+        "ORDER BY id DESC LIMIT 1", (symbol,)).fetchone()
+    if trade_row is not None:
+        t_new_qty = trade_row["qty"] + extra_qty
+        t_new_entry = (trade_row["entry_price"] * trade_row["qty"]
+                      + price * extra_qty) / t_new_qty
+        trades_conn.execute(
+            "UPDATE trades SET qty = ?, entry_price = ? WHERE id = ?",
+            (t_new_qty, t_new_entry, trade_row["id"]))
+        trades_conn.commit()
+    trades_conn.close()
+
+
 def upsert_manual_position(symbol: str, entry_price: float, qty: int,
                            stop: float, gtt_trigger_id: int | None) -> None:
     """Used when placing a stop-loss for a position this app didn't itself
@@ -575,15 +674,24 @@ def ensure_first_cash_flow_captured(available_cash: float) -> None:
 # Equity log
 # ---------------------------------------------------------------------------
 
-def log_equity_snapshot(value: float) -> pd.DataFrame:
-    """Upserts today's portfolio value; returns the full log as a DataFrame
-    with the same ["date", "value"] shape the Cockpit chart already expects."""
+def log_equity_snapshot(value: float, invested_amount: float | None = None) -> pd.DataFrame:
+    """Upserts today's portfolio value (and optionally cost basis, for the
+    Overview page's chart overlay); returns the full log as a DataFrame
+    with ["date", "value", "invested_amount"]. Uses COALESCE on conflict
+    rather than a blind overwrite -- this runs on every page load, so a
+    later call that doesn't pass invested_amount (or an older caller that
+    doesn't know about it) won't silently wipe out a value an earlier
+    call already recorded for today."""
     conn = get_conn()
     today = dt.date.today().isoformat()
-    conn.execute("INSERT OR REPLACE INTO equity_log (date, value) VALUES (?, ?)",
-                (today, value))
+    conn.execute(
+        "INSERT INTO equity_log (date, value, invested_amount) VALUES (?, ?, ?) "
+        "ON CONFLICT(date) DO UPDATE SET value = excluded.value, "
+        "invested_amount = COALESCE(excluded.invested_amount, equity_log.invested_amount)",
+        (today, value, invested_amount))
     conn.commit()
-    log = pd.read_sql("SELECT date, value FROM equity_log ORDER BY date", conn)
+    log = pd.read_sql(
+        "SELECT date, value, invested_amount FROM equity_log ORDER BY date", conn)
     conn.close()
     return log
 
@@ -597,9 +705,13 @@ def save_rebalance_run(result: dict) -> int:
     stop_updates, holdings, open_slots) -- returns the new run_id."""
     conn = get_conn()
     cur = conn.execute(
-        "INSERT INTO rebalance_runs (run_time, open_slots, status) "
-        "VALUES (?, ?, 'success')",
-        (result["run_time"].isoformat(), int(result["open_slots"])))
+        "INSERT INTO rebalance_runs (run_time, open_slots, status, "
+        "target_per_slot, cash_pool, cash_needed_for_full_equal_weight, "
+        "cash_shortfall, unsettled_proceeds) VALUES (?, ?, 'success', ?, ?, ?, ?, ?)",
+        (result["run_time"].isoformat(), int(result["open_slots"]),
+         result.get("target_per_slot"), result.get("cash_pool"),
+         result.get("cash_needed_for_full_equal_weight"),
+         result.get("cash_shortfall"), result.get("unsettled_proceeds")))
     run_id = cur.lastrowid
     for _, r in result["sells"].iterrows():
         conn.execute(
@@ -610,16 +722,24 @@ def save_rebalance_run(result: dict) -> int:
         fscore = r.get("fundamental_score")
         conn.execute(
             "INSERT INTO rebalance_buys (run_id, symbol, qty, price, stop, score, "
-            "fundamental_score, fundamental_rubric) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "fundamental_score, fundamental_rubric, rsi, pct_52w_high, "
+            "vol_expansion, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (run_id, r["symbol"], int(r["qty"]), float(r["price"]), float(r["stop"]),
              float(r["score"]), None if pd.isna(fscore) else float(fscore),
-             r.get("fundamental_rubric")))
+             r.get("fundamental_rubric"), r.get("rsi"), r.get("pct_52w_high"),
+             r.get("vol_expansion"), r.get("reason")))
     for _, r in result.get("stop_updates", pd.DataFrame()).iterrows():
         conn.execute(
             "INSERT INTO rebalance_stop_updates (run_id, symbol, qty, current_stop, "
             "recommended_stop, gtt_trigger_id) VALUES (?, ?, ?, ?, ?, ?)",
             (run_id, r["symbol"], int(r["qty"]), float(r["current_stop"]),
              float(r["recommended_stop"]),
+             None if pd.isna(r["gtt_trigger_id"]) else int(r["gtt_trigger_id"])))
+    for _, r in result.get("top_ups", pd.DataFrame()).iterrows():
+        conn.execute(
+            "INSERT INTO rebalance_top_ups (run_id, symbol, extra_qty, price, "
+            "gtt_trigger_id) VALUES (?, ?, ?, ?, ?)",
+            (run_id, r["symbol"], int(r["extra_qty"]), float(r["price"]),
              None if pd.isna(r["gtt_trigger_id"]) else int(r["gtt_trigger_id"])))
     conn.commit()
     conn.close()
@@ -653,16 +773,24 @@ def get_last_rebalance_run() -> dict | None:
         conn, params=(run_id,))
     buys = pd.read_sql(
         "SELECT symbol, qty, price, stop, score, fundamental_score, "
-        "fundamental_rubric FROM rebalance_buys WHERE run_id = ?",
+        "fundamental_rubric, rsi, pct_52w_high, vol_expansion, reason "
+        "FROM rebalance_buys WHERE run_id = ?",
         conn, params=(run_id,))
     stop_updates = pd.read_sql(
         "SELECT symbol, qty, current_stop, recommended_stop, gtt_trigger_id "
         "FROM rebalance_stop_updates WHERE run_id = ?", conn, params=(run_id,))
+    top_ups = pd.read_sql(
+        "SELECT symbol, extra_qty, price, gtt_trigger_id "
+        "FROM rebalance_top_ups WHERE run_id = ?", conn, params=(run_id,))
     conn.close()
     return {
         "run_time": dt.datetime.fromisoformat(run["run_time"]),
         "sells": sells, "buys": buys, "stop_updates": stop_updates,
-        "open_slots": run["open_slots"],
+        "top_ups": top_ups, "open_slots": run["open_slots"],
+        "target_per_slot": run["target_per_slot"], "cash_pool": run["cash_pool"],
+        "cash_needed_for_full_equal_weight": run["cash_needed_for_full_equal_weight"],
+        "cash_shortfall": run["cash_shortfall"],
+        "unsettled_proceeds": run["unsettled_proceeds"],
     }
 
 

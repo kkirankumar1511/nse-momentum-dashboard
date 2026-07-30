@@ -353,6 +353,12 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     # up to a month either way) and consumed daily by step 2b so a slot
     # freed by a stop mid-month doesn't sit in cash until next rebalance.
     watchlist: dict[str, pd.Series] = {}
+    # Full gate-passing set for the current month, INCLUDING held symbols --
+    # watchlist deliberately excludes held ones (it's "what to buy next"),
+    # but allocate_equal_weight_buys()'s top-up mechanic needs to know which
+    # held positions are still legitimately good candidates this month, not
+    # just which ones are newly biddable.
+    current_candidate_syms: list[str] = []
 
     def close_position(sym, price, date, reason):
         nonlocal cash
@@ -362,19 +368,22 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         trades.append(Trade(sym, pos.entry_date, date, pos.entry_price,
                             price * (1 - cost), pos.qty, reason))
 
-    def try_enter(sym, row, price, stop, date):
+    def try_enter(sym, row, price, stop, date, qty_override=None):
         nonlocal cash
         if len(positions) >= cfg["max_positions"] or sym in positions:
             return
-        equity_now = cash + sum(
-            p.qty * float(candles[s].loc[date, "close"])
-            for s, p in positions.items() if date in candles[s].index)
-        if cfg.get("capital_equal_weight_sizing", False):
-            open_slots_remaining = cfg["max_positions"] - len(positions)
-            qty = screener.capital_position_size(
-                equity_now, cash, price, open_slots_remaining, cfg["max_positions"])
+        if qty_override is not None:
+            qty = qty_override
         else:
-            qty = screener.position_size(equity_now, price, stop, cfg)
+            equity_now = cash + sum(
+                p.qty * float(candles[s].loc[date, "close"])
+                for s, p in positions.items() if date in candles[s].index)
+            if cfg.get("capital_equal_weight_sizing", False):
+                open_slots_remaining = cfg["max_positions"] - len(positions)
+                qty = screener.capital_position_size(
+                    equity_now, cash, price, open_slots_remaining, cfg["max_positions"])
+            else:
+                qty = screener.position_size(equity_now, price, stop, cfg)
         qty = min(qty, int(cash / (price * (1 + cost))))
         if qty <= 0:
             return
@@ -384,6 +393,26 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                                   highest_close=entry_price)
         if verbose:
             print(f"{date.date()} BUY  {sym:8s} x{qty} @ {price:.1f} stop {stop:.1f}")
+
+    def top_up_position(sym, extra_qty, price, date):
+        """EXPERIMENTAL, backtest-only -- adds to an ALREADY-open position
+        (screener.allocate_equal_weight_buys' top-up mechanic), weighted-
+        averaging the cost basis. Distinct from try_enter(), which only
+        ever opens a brand-new position."""
+        nonlocal cash
+        if sym not in positions or extra_qty <= 0:
+            return
+        extra_qty = min(extra_qty, int(cash / (price * (1 + cost))))
+        if extra_qty <= 0:
+            return
+        cost_amt = extra_qty * price * (1 + cost)
+        pos = positions[sym]
+        new_qty = pos.qty + extra_qty
+        pos.entry_price = (pos.entry_price * pos.qty + price * (1 + cost) * extra_qty) / new_qty
+        pos.qty = new_qty
+        cash -= cost_amt
+        if verbose:
+            print(f"{date.date()} TOPUP {sym:8s} +{extra_qty} @ {price:.1f} (new qty {new_qty})")
 
     for date in dates:
         # 1) stop checks on today's bar
@@ -439,11 +468,55 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 # stop mid-month doesn't sit in cash until next rebalance.
                 watchlist = {sym: row for sym, row in candidates.iterrows()
                             if sym not in positions}
+                current_candidate_syms = list(candidates.index)
 
         # 2b) fill any open slot from the standing watchlist -- every day,
         # not just at rebalance, so freed-up capital gets redeployed right
         # away instead of idling in cash until next month.
-        if watchlist and len(positions) < cfg["max_positions"]:
+        if watchlist and cfg.get("advanced_equal_weight_sizing", False):
+            # EXPERIMENTAL: screener.allocate_equal_weight_buys() decides
+            # the WHOLE day's allocation in one pass (equal-weight target,
+            # cross-slot borrowing within tolerance, stop-not-substitute on
+            # shortfall, top-up of underweighted existing holdings) instead
+            # of try_enter()'s one-symbol-at-a-time greedy fill below.
+            ordered_syms = [sym for sym, _ in sorted(
+                watchlist.items(), key=lambda kv: kv[1].get("score", 0), reverse=True)
+                if date in candles[sym].index]
+            # Held positions that are STILL legitimately good candidates
+            # this month (not being sold) -- eligible for the allocator's
+            # top-up mechanic. Held symbols are never in `watchlist`
+            # itself (that's specifically "what's biddable"), so without
+            # this the top-up path could never fire at all.
+            held_still_candidates = [sym for sym in current_candidate_syms
+                                     if sym in positions and date in candles[sym].index]
+            allocator_syms = ordered_syms + held_still_candidates
+            prices = {sym: float(candles[sym].loc[:date, "close"].iloc[-1])
+                     for sym in allocator_syms}
+            held_info = {}
+            for sym, pos in positions.items():
+                if date in candles[sym].index:
+                    p = float(candles[sym].loc[date, "close"])
+                    held_info[sym] = (pos.qty, p)
+                    prices.setdefault(sym, p)
+            equity_now = cash + sum(
+                p.qty * float(candles[s].loc[date, "close"])
+                for s, p in positions.items() if date in candles[s].index)
+            alloc = screener.allocate_equal_weight_buys(
+                allocator_syms, prices, held_info, cash_pool=cash,
+                total_equity=equity_now, max_positions=cfg["max_positions"],
+                tolerance_pct=cfg.get("equal_weight_tolerance_pct", 0.10))
+            for sym, (qty, _reason) in alloc["new_buys"].items():
+                if len(positions) >= cfg["max_positions"]:
+                    break
+                price = prices[sym]
+                atr_now = float(indicators.atr(candles[sym].loc[:date], cfg["atr_period"]).iloc[-1])
+                stop = price - cfg["atr_stop_multiple"] * atr_now
+                try_enter(sym, watchlist[sym], price, stop, date, qty_override=qty)
+                if sym in positions:
+                    watchlist.pop(sym, None)
+            for sym, extra_qty in alloc["top_ups"].items():
+                top_up_position(sym, extra_qty, prices[sym], date)
+        elif watchlist and len(positions) < cfg["max_positions"]:
             # Highest-score candidates get first pick of the limited slots.
             ordered = sorted(watchlist.items(),
                             key=lambda kv: kv[1].get("score", 0), reverse=True)

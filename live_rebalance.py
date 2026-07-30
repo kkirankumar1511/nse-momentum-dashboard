@@ -95,6 +95,35 @@ def get_live_holdings() -> pd.DataFrame:
     return grouped[["quantity", "average_price"]]
 
 
+def get_unsettled_quantities() -> dict[str, int]:
+    """Per-symbol quantity that would NOT yield usable cash today if sold --
+    same-day CNC positions (bought today, shows in kite_client.get_positions()
+    until it settles into holdings overnight) plus T1 holdings
+    (kite_client.get_holdings()'s t1_quantity -- bought yesterday, settlement
+    completes the day after that). Zerodha credits a SOLD, already-settled
+    (T0) holding's proceeds as usable margin the same day; a same-day
+    position or T1 holding's sale proceeds only become usable once that
+    settlement cycle finishes -- this is what propose_rebalance() checks
+    before counting a proposed sell's proceeds toward today's buying
+    power (the "T1/BTST" case). get_holdings() itself folds t1_quantity
+    into quantity for DISPLAY purposes (see its docstring) -- the raw
+    t1_quantity column is still present on the DataFrame it returns, just
+    not documented as something callers should look at; this is the one
+    place that does."""
+    unsettled: dict[str, int] = {}
+    pos = kite_client.get_positions()
+    if not pos.empty and "quantity" in pos.columns:
+        for _, r in pos[pos["quantity"] > 0].iterrows():
+            sym = r["tradingsymbol"]
+            unsettled[sym] = unsettled.get(sym, 0) + int(r["quantity"])
+    hold = kite_client.get_holdings()
+    if not hold.empty and "t1_quantity" in hold.columns:
+        for _, r in hold[hold["t1_quantity"] > 0].iterrows():
+            sym = r["tradingsymbol"]
+            unsettled[sym] = unsettled.get(sym, 0) + int(r["t1_quantity"])
+    return unsettled
+
+
 def _holdings_value(held: pd.DataFrame, ranked: pd.DataFrame) -> float:
     """Current mark-to-market value of held positions -- held's own
     average_price is COST basis, not current price, so this isn't just
@@ -176,16 +205,84 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     still_held = set(held.index) - sold_syms
     open_slots = max(cfg["max_positions"] - len(still_held), 0)
 
-    # Equal-weight capital allocation, not the risk-based screener.position_size()
-    # backtest.py uses: per-trade capital = total account equity / max_positions
-    # (so it scales with your capital and max_positions setting directly), capped
-    # by what's actually left in cash divided across the slots still to fill this
-    # run -- see screener.capital_position_size()'s docstring for the full reasoning.
+    # Total portfolio value (cash + everything held, current prices) --
+    # the equal-weight denominator, unchanged either sizing mode.
     total_equity = available_cash + _holdings_value(held, ranked)
-    remaining_cash = available_cash
+    target_per_slot = total_equity / cfg["max_positions"]
+
+    # Sell proceeds use each symbol's CURRENT price (from the screener,
+    # today's close), not the cost-basis avg_price the sells table
+    # displays -- avg_price would understate/overstate what's actually
+    # about to come back as cash. Only the SETTLED portion of each sale
+    # counts toward today's usable pool -- a same-day position or T1
+    # holding (bought yesterday, BTST) still needs its own settlement
+    # cycle before Zerodha treats its sale proceeds as usable margin; see
+    # get_unsettled_quantities()'s docstring.
+    unsettled_qtys = get_unsettled_quantities()
+    sell_proceeds = 0.0
+    unsettled_proceeds = 0.0
+    for sym, qty, avg_price in zip(
+            sells_df.get("symbol", []), sells_df.get("qty", []),
+            sells_df.get("avg_price", [])):
+        price = float(ranked.loc[sym, "price"]) if sym in ranked.index else avg_price
+        unsettled_qty = min(qty, unsettled_qtys.get(sym, 0))
+        settled_qty = qty - unsettled_qty
+        sell_proceeds += price * settled_qty
+        unsettled_proceeds += price * unsettled_qty
+    cash_pool = available_cash + sell_proceeds
 
     buys = []
-    if open_slots > 0:
+    top_ups = []
+    open_positions_now = state_db.get_open_positions()
+    if cfg.get("advanced_equal_weight_sizing", True):
+        # New candidates (not held), rank order, plus held-but-still-
+        # gate-passing symbols (eligible for topping up, not for a fresh
+        # entry -- allocate_equal_weight_buys() filters that itself).
+        new_candidate_syms = [sym for sym in candidates.index if sym not in still_held]
+        held_still_candidates = [sym for sym in candidates.index if sym in still_held]
+        allocator_syms = new_candidate_syms + held_still_candidates
+        prices = {sym: float(candidates.loc[sym, "price"]) for sym in allocator_syms}
+        held_info = {sym: (int(held.loc[sym, "quantity"]), prices[sym])
+                    for sym in held_still_candidates}
+        alloc = screener.allocate_equal_weight_buys(
+            allocator_syms, prices, held_info, cash_pool=cash_pool,
+            total_equity=total_equity, max_positions=cfg["max_positions"],
+            tolerance_pct=cfg.get("equal_weight_tolerance_pct", 0.20))
+
+        for sym, (qty, size_reason) in alloc["new_buys"].items():
+            row = candidates.loc[sym]
+            price = float(row["price"])
+            stop = float(row["suggested_stop"])
+            fscore = row.get("fundamental_score")
+            fscore = None if pd.isna(fscore) else round(float(fscore), 1)
+            rank = candidates.index.get_loc(sym) + 1
+            reason = (f"Ranked #{rank} of {len(candidates)} momentum candidates "
+                     f"(score {row['score']:.2f}); RSI {row['rsi']:.0f}, "
+                     f"{row['pct_52w_high'] * 100:.0f}% of 52w high, "
+                     f"vol expansion {row['vol_expansion']:.2f}x")
+            if fscore is not None:
+                reason += f"; fundamental score {fscore:.0f}/100"
+            if size_reason:
+                reason += f" -- {size_reason}"
+            buys.append({
+                "symbol": sym, "qty": qty, "price": round(price, 2),
+                "stop": round(stop, 2), "score": float(row["score"]),
+                "rsi": float(row["rsi"]), "pct_52w_high": float(row["pct_52w_high"]),
+                "vol_expansion": float(row["vol_expansion"]),
+                "fundamental_score": fscore,
+                "fundamental_rubric": row.get("fundamental_rubric"),
+                "reason": reason,
+            })
+        for sym, extra_qty in alloc["top_ups"].items():
+            pos = open_positions_now.get(sym)
+            top_ups.append({
+                "symbol": sym, "extra_qty": extra_qty,
+                "price": round(prices[sym], 2),
+                "gtt_trigger_id": pos.get("gtt_trigger_id") if pos else None,
+            })
+    elif open_slots > 0:
+        # Rollback path: original one-symbol-at-a-time greedy fill.
+        remaining_cash = available_cash
         for sym, row in candidates.iterrows():
             if len(buys) >= open_slots:
                 break
@@ -218,6 +315,19 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
                 "reason": reason,
             })
     buys_df = pd.DataFrame(buys)
+    top_ups_df = pd.DataFrame(top_ups)
+
+    # How much MORE cash would be needed to fully equal-weight every open
+    # slot and every under-target held position at once -- shown on the
+    # UI so you know exactly how much to add, rather than silently getting
+    # partial fills or a stopped proposal with no explanation.
+    cash_needed = open_slots * target_per_slot
+    for sym in still_held:
+        if sym in candidates.index:
+            current_value = float(held.loc[sym, "quantity"]) * float(candidates.loc[sym, "price"])
+            if current_value < target_per_slot:
+                cash_needed += target_per_slot - current_value
+    cash_shortfall = max(0.0, cash_needed - cash_pool)
 
     # ---- Trailing-stop updates: recommend, never modify a live GTT here.
     # Uses currently ACTUALLY held symbols, not "still_held" (which already
@@ -232,11 +342,17 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
         "run_time": dt.datetime.now(),
         "sells": sells_df,
         "buys": buys_df,
+        "top_ups": top_ups_df,
         "stop_updates": stop_updates_df,
         "holdings": held.reset_index().rename(columns={"tradingsymbol": "symbol"}),
         "open_slots": open_slots,
         "screen_candidates": len(ranked),
         "screen_gate_passers": int(ranked["all_gates"].sum()),
+        "target_per_slot": round(target_per_slot, 2),
+        "cash_pool": round(cash_pool, 2),
+        "cash_needed_for_full_equal_weight": round(cash_needed, 2),
+        "cash_shortfall": round(cash_shortfall, 2),
+        "unsettled_proceeds": round(unsettled_proceeds, 2),
     }
     state_db.save_rebalance_run(result)
     return result
@@ -402,9 +518,24 @@ def main():
         log("\n-- Proposed BUYS --")
         log(result["buys"].to_string(index=False) if not result["buys"].empty
            else "(none)")
+        log("\n-- Proposed TOP-UPS --")
+        log(result["top_ups"].to_string(index=False) if not result["top_ups"].empty
+           else "(none)")
         log("\n-- Recommended stop updates (trailing stop) --")
         log(result["stop_updates"].to_string(index=False) if not result["stop_updates"].empty
            else "(none)")
+        log(f"\nEqual-weight target: Rs.{result['target_per_slot']:,.0f}/slot, "
+           f"Rs.{result['cash_pool']:,.0f} available (cash + proposed sell proceeds)")
+        if result["unsettled_proceeds"] > 0:
+            log(f"Rs.{result['unsettled_proceeds']:,.0f} of today's sell proceeds is "
+               "from a same-day position or T1 (BTST) holding -- not usable until "
+               "settlement completes (excluded from the available figure above).")
+        if result["cash_shortfall"] > 0:
+            log(f"SHORTFALL: Rs.{result['cash_shortfall']:,.0f} more needed to fully "
+               "equal-weight every open slot and under-target holding")
+        else:
+            log("Sufficient cash to fully equal-weight every open slot and "
+               "under-target holding.")
         log(f"\nSaved to {state_db.DB_PATH}")
         log("Nothing was placed or modified -- review and execute/apply manually "
            "in the dashboard's Live Rebalance page or the Trade tab.")

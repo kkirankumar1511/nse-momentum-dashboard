@@ -179,6 +179,116 @@ def capital_position_size(total_equity: float, remaining_cash: float, price: flo
     return max(int(per_slot_budget / price), 0)
 
 
+def allocate_equal_weight_buys(ranked_syms: list[str], prices: dict[str, float],
+                               held: dict[str, tuple[int, float]], cash_pool: float,
+                               total_equity: float, max_positions: int,
+                               tolerance_pct: float = 0.10) -> dict:
+    """EXPERIMENTAL, backtest-only for now -- a from-scratch replacement for
+    capital_position_size()'s one-symbol-at-a-time sizing, which greedily
+    skips an unaffordable top-ranked candidate and substitutes whatever
+    cheaper, lower-ranked stock it finds next (this is what let a rank #9
+    stock get bought over rank #1-8 ones when cash was thin). This function
+    decides the WHOLE day's allocation in one pass instead:
+
+    - Walks ranked_syms (already sorted best-first, gate-passers not yet
+      held) in order, trying to fund each at the equal-weight target
+      (total_equity / max_positions), borrowing headroom from not-yet-
+      allocated LOWER-ranked slots (reserving at least
+      target*(1-tolerance_pct) for each of them) when a candidate is
+      pricier than the target allows.
+    - If a candidate can't be funded at full target even after borrowing,
+      it still gets a REDUCED/partial allocation from whatever's left,
+      flagged with a reason -- never skipped in favor of a cheaper,
+      lower-ranked stock instead.
+    - Only stops entirely (leaving remaining slots unfilled) once there's
+      truly not enough cash left for even one share of the current
+      candidate.
+    - Any cash left over after all open slots are filled (or the stop
+      point reached) tops up existing HELD positions that are below
+      target*(1-tolerance_pct), best-ranked first, capped at
+      target*(1+tolerance_pct) -- so slack capital doesn't sit idle when
+      there's nothing new left to buy.
+
+    prices: current price for every symbol in ranked_syms AND every symbol
+    in `held` (today's actual tradable price, not a stale scan-date one).
+    held: {symbol: (qty, current_price)} for currently-held positions --
+    only ones also present in ranked_syms are eligible for topping up (a
+    held stock that's fallen out of the ranked candidates isn't).
+
+    Returns {"new_buys": {symbol: (qty, reason_or_None)},
+    "top_ups": {symbol: extra_qty}, "stopped_at": symbol_or_None,
+    "remaining_cash": float}."""
+    target = total_equity / max_positions
+    min_alloc = target * (1 - tolerance_pct)
+    max_alloc = target * (1 + tolerance_pct)
+
+    open_slots = max_positions - len(held)
+    remaining_pool = cash_pool
+    new_buys: dict[str, tuple[int, str | None]] = {}
+    stopped_at = None
+
+    eligible = [s for s in ranked_syms if s not in held]
+    for sym in eligible:
+        if len(new_buys) >= open_slots:
+            break
+        price = prices.get(sym)
+        if price is None or price <= 0:
+            continue
+        slots_after = open_slots - len(new_buys) - 1
+        reserved = min_alloc * max(slots_after, 0)
+        available_for_this = max(remaining_pool - reserved, 0.0)
+        alloc = min(max_alloc, available_for_this)
+        qty = int(alloc // price)
+        reason = None
+        if qty <= 0:
+            # The bounded (tolerance-respecting, reservation-respecting)
+            # allocation can't afford even 1 share -- either this
+            # candidate's OWN share price already exceeds what tolerance
+            # allows for one slot (no amount of "partial" fixes that,
+            # shares aren't divisible), or reserving for later slots ate
+            # all the room. Rather than skip to a cheaper, lower-ranked
+            # stock, allow exactly ONE share -- the minimum indivisible
+            # unit, capped there (never more) -- funded from the whole
+            # remaining pool since a higher-ranked candidate has priority
+            # over what's reserved for lower-ranked ones.
+            if remaining_pool >= price:
+                qty = 1
+                reason = (f"exceeds equal-weight target (1 share costs {price:,.0f} "
+                         f"vs {target:,.0f} target) -- bought the minimum 1 share")
+            else:
+                stopped_at = sym
+                break
+        elif qty * price < min_alloc:
+            reason = (f"partial position -- {alloc:,.0f} available (after reserving "
+                     f"for other slots) vs {target:,.0f} equal-weight target")
+        new_buys[sym] = (qty, reason)
+        remaining_pool -= qty * price
+
+    top_ups: dict[str, int] = {}
+    for sym in ranked_syms:
+        if remaining_pool <= 0:
+            break
+        if sym not in held:
+            continue
+        qty_held, price_held_now = held[sym]
+        current_value = qty_held * price_held_now
+        if current_value >= min_alloc:
+            continue
+        price = prices.get(sym, price_held_now)
+        if price <= 0:
+            continue
+        room = max_alloc - current_value
+        spend = min(room, remaining_pool)
+        qty = int(spend // price)
+        if qty <= 0:
+            continue
+        top_ups[sym] = qty
+        remaining_pool -= qty * price
+
+    return {"new_buys": new_buys, "top_ups": top_ups, "stopped_at": stopped_at,
+            "remaining_cash": remaining_pool}
+
+
 def run_screen(with_fundamentals: bool = True,
                fundamentals: pd.DataFrame | None = None,
                progress_cb=None) -> pd.DataFrame:

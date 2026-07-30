@@ -181,7 +181,7 @@ state_db.ensure_dashboard_auth_seeded(config.DASHBOARD_USERNAME, config.DASHBOAR
 
 if not st.session_state.get("dashboard_authenticated", False):
     st.title("🔒 NSE Momentum Cockpit — sign in")
-    with st.form("login_form"):
+    with st.form("login_form", clear_on_submit=True):
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Sign in", type="primary")
@@ -302,6 +302,7 @@ COLUMN_LABELS = {
     "entry_fundamental_score": "Entry fundamental score",
     "exit_reason": "Exit reason", "entry_reason": "Why this trade",
     "latest_recommended_stop": "Latest stop (daily 8:30AM calc)",
+    "extra_qty": "Extra qty",
     "realized_pnl": "Realized P&L",
     "realized_ret_pct": "Realized return %",
 }
@@ -353,11 +354,12 @@ def merged_holdings() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def log_equity_snapshot(value: float) -> pd.DataFrame:
-    """Upserts today's portfolio value, so the Cockpit can chart account
-    growth over time -- Kite has no such history endpoint for a specific
-    strategy's slice of the account. See state_db.py."""
-    return state_db.log_equity_snapshot(value)
+def log_equity_snapshot(value: float, invested_amount: float | None = None) -> pd.DataFrame:
+    """Upserts today's portfolio value (and cost basis, for the chart
+    overlay), so the Cockpit can chart account growth over time -- Kite
+    has no such history endpoint for a specific strategy's slice of the
+    account. See state_db.py."""
+    return state_db.log_equity_snapshot(value, invested_amount)
 
 
 def _annualized_returns(portfolio_value: float,
@@ -418,36 +420,62 @@ def page_cockpit():
     st.caption("Calendar-entry momentum system — everything that matters, at a glance.")
 
     merged = merged_holdings()
+    invested_amount = float((merged["qty"] * merged["avg_price"]).sum()) if not merged.empty else 0.0
     holdings_value = float((merged["qty"] * merged["ltp"]).sum()) if not merged.empty else 0.0
     unrealized_pnl = float(merged["pnl"].sum()) if not merged.empty else 0.0
     portfolio_value = available_cash + holdings_value
 
-    log = log_equity_snapshot(portfolio_value)
+    log = log_equity_snapshot(portfolio_value, invested_amount)
     state_db.ensure_first_cash_flow_captured(available_cash)
     realized_pnl = state_db.get_realized_pnl()
     total_pnl = realized_pnl + unrealized_pnl
     current_xirr, overall_xirr = _annualized_returns(portfolio_value, log)
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Available cash", f"₹{available_cash:,.0f}")
-    k2.metric("Portfolio value", f"₹{portfolio_value:,.0f}")
-    k3.metric("Total P&L", f"₹{total_pnl:,.0f}")
-    k4.metric("Open positions", f"{len(merged)} / {config.STRATEGY['max_positions']}")
+    unrealized_pct = (unrealized_pnl / invested_amount * 100) if invested_amount else None
+    pct_deployed = (invested_amount / portfolio_value * 100) if portfolio_value else None
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Invested amount", f"₹{invested_amount:,.0f}",
+             help="Cost basis of everything you currently hold (qty × avg. buy "
+                  "price) -- how much cash is actually tied up in stocks right now.")
+    k2.metric("Current holdings value", f"₹{holdings_value:,.0f}",
+             delta=(f"₹{unrealized_pnl:+,.0f} ({unrealized_pct:+.1f}%)"
+                    if unrealized_pct is not None else None),
+             help="Same holdings, marked to today's price -- the delta is your "
+                  "unrealized P&L vs the invested amount.")
+    k3.metric("Available cash", f"₹{available_cash:,.0f}",
+             help="Sitting uninvested -- not in any stock right now.")
+    k4.metric("Total capital", f"₹{portfolio_value:,.0f}",
+             help="Available cash + current holdings value -- everything the "
+                  "strategy has to work with.")
+    k5.metric("% deployed", f"{pct_deployed:.0f}%" if pct_deployed is not None else "—",
+             help="Invested amount ÷ total capital -- how much of your money is "
+                  "actually working vs sitting idle as cash. Naturally lower "
+                  "while max_positions is small relative to your account size, "
+                  "or right after a sell before the next buy fills the slot.")
 
-    k5, k6, k7, k8 = st.columns(4)
-    k5.metric("Realized P&L", f"₹{realized_pnl:,.0f}")
-    k6.metric("Unrealized P&L", f"₹{unrealized_pnl:,.0f}")
-    k7.metric("Annualized return (XIRR) — this year",
+    k6, k7, k8, k9 = st.columns(4)
+    k6.metric("Realized P&L", f"₹{realized_pnl:,.0f}")
+    k7.metric("Unrealized P&L", f"₹{unrealized_pnl:,.0f}")
+    k8.metric("Total P&L", f"₹{total_pnl:,.0f}")
+    k9.metric("Open positions", f"{len(merged)} / {config.STRATEGY['max_positions']}")
+
+    k10, k11 = st.columns(2)
+    k10.metric("Annualized return (XIRR) — this year",
              f"{current_xirr * 100:+.1f}%" if current_xirr is not None else "—")
-    k8.metric("Annualized return (XIRR) — overall",
+    k11.metric("Annualized return (XIRR) — overall",
              f"{overall_xirr * 100:+.1f}%" if overall_xirr is not None else "—")
     if overall_xirr is None:
         st.caption("XIRR needs at least one logged deposit and one portfolio "
                   "value snapshot — log a deposit on the Admin page (or fund "
                   "the account) to start tracking annualized return.")
 
+    chart_df = log.set_index("date")[["value", "invested_amount"]].rename(
+        columns={"value": "Total capital (₹)", "invested_amount": "Invested amount (₹)"})
     if len(log) > 1:
-        st.line_chart(log.set_index("date")["value"].rename("Portfolio value (₹)"))
+        st.line_chart(chart_df)
+        if chart_df["Invested amount (₹)"].isna().any():
+            st.caption("Invested amount only started being logged recently — "
+                      "earlier days show a gap until enough history builds up.")
     else:
         st.caption("Portfolio value is logged once a day when you open this page — "
                   "the chart builds up over time as you keep using the dashboard.")
@@ -541,7 +569,7 @@ def page_admin():
               "what makes the Overview page's XIRR figures accurate once "
               "you start adding money over time, instead of just a single "
               "starting-capital snapshot.")
-    with st.form("cash_flow_form"):
+    with st.form("cash_flow_form", clear_on_submit=True):
         cf_date = st.date_input("Date", value=dt.date.today())
         cf_amount = st.number_input(
             "Amount (₹) — positive for a deposit, negative for a withdrawal",
@@ -690,7 +718,7 @@ def page_admin():
     with st.expander("🔑 Change dashboard password"):
         st.caption("Stored as a salted hash in state.db — the password "
                   "itself is never saved anywhere, not even here.")
-        with st.form("change_password_form"):
+        with st.form("change_password_form", clear_on_submit=True):
             new_user = st.text_input("Username", value=config.DASHBOARD_USERNAME)
             new_pw = st.text_input("New password", type="password")
             confirm_pw = st.text_input("Confirm new password", type="password")
@@ -714,7 +742,7 @@ def page_admin():
         masked_key = (config.KITE_API_KEY[:4] + "…" + config.KITE_API_KEY[-4:]
                      if len(config.KITE_API_KEY) > 8 else "(not set)")
         st.caption(f"Current API key: `{masked_key}`")
-        with st.form("kite_api_settings_form"):
+        with st.form("kite_api_settings_form", clear_on_submit=True):
             new_api_key = st.text_input("New API key (leave blank to keep current)")
             new_api_secret = st.text_input("New API secret (leave blank to keep current)",
                                            type="password")
@@ -973,7 +1001,37 @@ def page_live_rebalance():
     rc2.metric("Proposed sells", len(result["sells"]))
     rc3.metric("Open slots after sells", result["open_slots"])
 
+    if "cash_shortfall" in result:
+        target = result.get("target_per_slot", 0)
+        pool = result.get("cash_pool", 0)
+        shortfall = result.get("cash_shortfall", 0)
+        if shortfall > 0:
+            st.warning(
+                f"💰 **₹{shortfall:,.0f} more needed** to fully equal-weight every "
+                f"open slot and under-target holding (target ₹{target:,.0f}/slot, "
+                f"₹{pool:,.0f} available including proposed sell proceeds) — "
+                "buys below may be partial or fewer than ideal until more cash "
+                "is added.")
+        else:
+            st.success(
+                f"✅ Enough cash (₹{pool:,.0f} available including proposed sell "
+                f"proceeds) to fully equal-weight every open slot and "
+                f"under-target holding at ₹{target:,.0f}/slot.")
+        unsettled = result.get("unsettled_proceeds", 0)
+        if unsettled:
+            st.caption(
+                f"ℹ️ ₹{unsettled:,.0f} of today's sell proceeds is from a "
+                "same-day position or T1 (BTST) holding — already excluded "
+                "from the available figure above, since Zerodha won't treat "
+                "it as usable cash until that settlement cycle completes "
+                "(next trading day for T1, the day after for a same-day sale).")
+
     st.subheader(f"🔴 Proposed sells ({len(result['sells'])})")
+    if st.session_state.get("sell_exec_log"):
+        st.success("Sell(s) executed and removed from the list below.")
+        for line in st.session_state["sell_exec_log"]:
+            st.write(line)
+        del st.session_state["sell_exec_log"]
     if not result["sells"].empty:
         st.dataframe(pnl_style(result["sells"], fmt={"avg_price": "{:.2f}"}),
                     width="stretch", hide_index=True)
@@ -982,6 +1040,7 @@ def page_live_rebalance():
             key="confirm_sell_all")
         if st.button("Execute all sells", disabled=not confirm_sell):
             log = []
+            succeeded = []
             for _, r in result["sells"].iterrows():
                 try:
                     oid = kite_client.square_off_position(r["symbol"])
@@ -997,14 +1056,39 @@ def page_live_rebalance():
                     except Exception:
                         ltp = None
                     state_db.close_trade(r["symbol"], ltp, r["reason"])
+                    # A stale GTT left pointing at a position you no longer
+                    # hold can trigger and attempt to sell shares that
+                    # aren't there (order rejection) or confusingly linger
+                    # in the Kite GTT list -- same cleanup
+                    # check_gap_down_stops() already does for its own
+                    # auto-sells.
+                    pos = state_db.get_open_positions().get(r["symbol"])
+                    gtt_id = pos.get("gtt_trigger_id") if pos else None
+                    if gtt_id:
+                        try:
+                            kite_client.delete_gtt(int(gtt_id))
+                            log.append(f"   GTT {gtt_id} deleted")
+                        except Exception as e:
+                            log.append(f"   ⚠️ GTT delete failed: {e} — "
+                                      "remove it manually in the Trade tab")
+                    succeeded.append(r["symbol"])
                 except Exception as e:
                     log.append(f"❌ {r['symbol']}: FAILED — {e}")
-            for line in log:
-                st.write(line)
+            st.session_state["sell_exec_log"] = log
+            if succeeded:
+                result["sells"] = result["sells"][
+                    ~result["sells"]["symbol"].isin(succeeded)].reset_index(drop=True)
+                st.session_state["rebalance_proposal"] = result
+            st.rerun()
     else:
         st.caption("No current holdings fail the rebalance rule today.")
 
     st.subheader(f"🟢 Proposed buys ({len(result['buys'])})")
+    if st.session_state.get("buy_exec_log"):
+        st.success("Buy(s) executed and removed from the list below.")
+        for line in st.session_state["buy_exec_log"]:
+            st.write(line)
+        del st.session_state["buy_exec_log"]
     if not result["buys"].empty:
         st.caption("Fundamental score/sector rubric are shown for your own "
                   "reference, not as a filter — the candidate list above is "
@@ -1022,12 +1106,14 @@ def page_live_rebalance():
             key="confirm_buy_all")
         if st.button("Execute all buys", disabled=not confirm_buy):
             log = []
+            succeeded = []
             for _, r in result["buys"].iterrows():
                 try:
                     oid = kite_client.place_order(r["symbol"], int(r["qty"]), "BUY")
                 except Exception as e:
                     log.append(f"❌ {r['symbol']}: BUY FAILED — {e}")
                     continue
+                succeeded.append(r["symbol"])
                 msg = f"✅ {r['symbol']}: order {oid}"
                 gtt_id = None
                 if place_gtt:
@@ -1060,12 +1146,79 @@ def page_live_rebalance():
                              "entry_reason": r.get("reason")},
                     position_id=position_id)
                 log.append(msg)
-            for line in log:
-                st.write(line)
+            st.session_state["buy_exec_log"] = log
+            if succeeded:
+                result["buys"] = result["buys"][
+                    ~result["buys"]["symbol"].isin(succeeded)].reset_index(drop=True)
+                st.session_state["rebalance_proposal"] = result
+            st.rerun()
     else:
         st.caption("No open slots, or no candidates today.")
 
+    top_ups = result.get("top_ups", pd.DataFrame())
+    st.subheader(f"⬆️ Proposed top-ups ({len(top_ups)})")
+    if st.session_state.get("topup_exec_log"):
+        st.success("Top-up(s) executed and removed from the list below.")
+        for line in st.session_state["topup_exec_log"]:
+            st.write(line)
+        del st.session_state["topup_exec_log"]
+    if not top_ups.empty:
+        st.caption(
+            "Additional shares for positions you already hold that are below "
+            "their equal-weight target, funded by cash left over after the "
+            "buys above — the position's existing stop-loss carries over "
+            "unchanged, only its GTT quantity gets updated to cover the new "
+            "total.")
+        st.dataframe(
+            pnl_style(top_ups, fmt={"price": "{:.2f}"}),
+            width="stretch", hide_index=True)
+        confirm_topup = st.checkbox(
+            "I confirm I want to execute ALL proposed top-ups at market",
+            key="confirm_topup_all")
+        if st.button("Execute all top-ups", disabled=not confirm_topup):
+            log = []
+            succeeded = []
+            for _, r in top_ups.iterrows():
+                try:
+                    oid = kite_client.place_order(r["symbol"], int(r["extra_qty"]), "BUY")
+                except Exception as e:
+                    log.append(f"❌ {r['symbol']}: BUY FAILED — {e}")
+                    continue
+                succeeded.append(r["symbol"])
+                msg = f"✅ {r['symbol']}: order {oid} (+{int(r['extra_qty'])})"
+                gtt_id = r.get("gtt_trigger_id")
+                if pd.notna(gtt_id):
+                    try:
+                        pos = state_db.get_open_positions().get(r["symbol"])
+                        new_total_qty = (pos["qty"] + int(r["extra_qty"])) if pos else int(r["extra_qty"])
+                        ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
+                        kite_client.modify_gtt_trigger(
+                            int(gtt_id), r["symbol"], new_total_qty,
+                            pos["current_stop"] if pos else float(r["price"]), ltp)
+                        msg += f", GTT updated to qty {new_total_qty}"
+                    except Exception as e:
+                        msg += (f" — ⚠️ BUY SUCCEEDED but GTT quantity update FAILED: "
+                               f"{e} (existing GTT still only covers the old "
+                               "quantity — check Unprotected holdings below)")
+                else:
+                    msg += " — ⚠️ no existing GTT to update (position may be unprotected)"
+                state_db.top_up_trade(r["symbol"], int(r["extra_qty"]), float(r["price"]))
+                log.append(msg)
+            st.session_state["topup_exec_log"] = log
+            if succeeded:
+                result["top_ups"] = top_ups[
+                    ~top_ups["symbol"].isin(succeeded)].reset_index(drop=True)
+                st.session_state["rebalance_proposal"] = result
+            st.rerun()
+    else:
+        st.caption("No under-target holdings, or no cash left over to top up with.")
+
     st.subheader(f"🔼 Recommended stop updates ({len(result.get('stop_updates', pd.DataFrame()))})")
+    if st.session_state.get("stopupdate_exec_log"):
+        st.success("Stop update(s) applied and removed from the list below.")
+        for line in st.session_state["stopupdate_exec_log"]:
+            st.write(line)
+        del st.session_state["stopupdate_exec_log"]
     stop_updates = result.get("stop_updates", pd.DataFrame())
     if not stop_updates.empty:
         st.caption("The trailing stop only ever moves up (never back down) "
@@ -1079,6 +1232,7 @@ def page_live_rebalance():
             key="confirm_stop_updates")
         if st.button("Apply stop updates", disabled=not confirm_stops):
             log = []
+            succeeded = []
             for _, r in stop_updates.iterrows():
                 if pd.isna(r["gtt_trigger_id"]):
                     log.append(f"⚠️ {r['symbol']}: no active GTT to update — "
@@ -1095,10 +1249,15 @@ def page_live_rebalance():
                     state_db.apply_stop_update(r["symbol"])
                     log.append(f"✅ {r['symbol']}: stop raised to "
                               f"₹{r['recommended_stop']:.2f}")
+                    succeeded.append(r["symbol"])
                 except Exception as e:
                     log.append(f"❌ {r['symbol']}: FAILED — {e}")
-            for line in log:
-                st.write(line)
+            st.session_state["stopupdate_exec_log"] = log
+            if succeeded:
+                result["stop_updates"] = stop_updates[
+                    ~stop_updates["symbol"].isin(succeeded)].reset_index(drop=True)
+                st.session_state["rebalance_proposal"] = result
+            st.rerun()
     else:
         st.caption("No trailing-stop increases recommended today.")
 
@@ -1211,6 +1370,18 @@ def page_positions_trade():
                 except Exception:
                     ltp = None
                 state_db.close_trade(sq_sym, ltp, "manual_square_off")
+                # A stale GTT left pointing at a position you no longer
+                # hold can trigger and attempt to sell shares that aren't
+                # there, or just confusingly linger in the Kite GTT list.
+                pos = state_db.get_open_positions().get(sq_sym)
+                gtt_id = pos.get("gtt_trigger_id") if pos else None
+                if gtt_id:
+                    try:
+                        kite_client.delete_gtt(int(gtt_id))
+                        st.success(f"GTT {gtt_id} deleted")
+                    except Exception as e:
+                        st.warning(f"⚠️ GTT delete failed: {e} — remove it "
+                                  "manually in Kite or re-check here.")
             except Exception as e:
                 st.error(f"Order failed: {e}")
     else:

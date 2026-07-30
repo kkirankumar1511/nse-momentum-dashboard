@@ -178,6 +178,29 @@ _STRATEGY_DEFAULTS = {
     # decision made independently -- see its own module for why); this flag
     # only controls backtest.py's simulation, for comparing the two.
     "capital_equal_weight_sizing": False,
+
+    # screener.allocate_equal_weight_buys(): a from-scratch replacement for
+    # capital_position_size()'s one-symbol-at-a-time sizing, which greedily
+    # skipped an unaffordable top-ranked candidate for whatever cheaper,
+    # lower-ranked stock it found next (this is what let a rank #9 stock
+    # get bought over rank #1-8 ones when cash was thin -- the real
+    # incident that prompted this feature). Decides the WHOLE day's/run's
+    # allocation in one pass instead: cross-slot borrowing within
+    # equal_weight_tolerance_pct, a partial (not skipped) fill when even
+    # borrowing can't reach full target, a hard stop (no substitution) only
+    # once nothing at all is affordable, and topping up existing
+    # under-target holdings with any leftover cash. A 5-year A/B (equal-
+    # weight sizing, max_positions=10, on top of the fundamental gate +
+    # bonus weight above) found tolerance=0.20 beats the old per-symbol
+    # fill on every metric at once: CAGR 43.06%->44.39%, Sharpe 1.64->1.67,
+    # max drawdown -20.30%->-19.58%, profit factor 2.10->2.12 -- verified
+    # via instrumented run that the top-up path (103/1236 days) and
+    # partial-fill path (127/1236 days) both genuinely fire, not just
+    # theoretically reachable. live_rebalance.py uses this whenever it's
+    # on; False reverts to capital_position_size's original one-at-a-time
+    # behavior for rollback.
+    "advanced_equal_weight_sizing": True,
+    "equal_weight_tolerance_pct": 0.20,
 }
 
 STRATEGY = state_db.get_strategy_config(_STRATEGY_DEFAULTS)
