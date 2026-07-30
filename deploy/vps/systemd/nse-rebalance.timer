@@ -1,8 +1,8 @@
 [Unit]
-Description=Run the NSE rebalance scan daily at 16:00 (weekdays)
+Description=Run the NSE rebalance scan daily at 08:30 (weekdays, before market open -- also refreshes the Screener page's cache)
 
 [Timer]
-OnCalendar=Mon..Fri 16:00
+OnCalendar=Mon..Fri 08:30
 Persistent=false
 Unit=nse-rebalance.service
 

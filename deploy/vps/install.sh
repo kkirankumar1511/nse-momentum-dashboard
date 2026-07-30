@@ -19,7 +19,7 @@ REPO_URL="https://github.com/kkirankumar1511/nse-momentum-dashboard.git"
 BRANCH="master"
 
 echo "== Setting timezone to Asia/Kolkata (IST) =="
-# systemd timers below use IST times (16:00, 09:16, Mon 08:00) -- matching
+# systemd timers below use IST times (08:30, 09:16, Mon 08:00) -- matching
 # the system timezone avoids needing per-timer TimeZone= directives.
 timedatectl set-timezone Asia/Kolkata
 
@@ -85,7 +85,7 @@ echo "4. Install the systemd units:"
 echo "     cp $APP_DIR/deploy/vps/systemd/*.service $APP_DIR/deploy/vps/systemd/*.timer /etc/systemd/system/"
 echo "     systemctl daemon-reload"
 echo "     systemctl enable --now nse-dashboard.service"
-echo "     systemctl enable --now nse-rebalance.timer nse-gap-check.timer nse-fundamentals.timer nse-screen-refresh.timer"
+echo "     systemctl enable --now nse-rebalance.timer nse-gap-check.timer nse-fundamentals.timer"
 echo ""
 echo "5. Update your Kite Connect app's Redirect URL and IP allowlist to"
 echo "   point at this VPS instead of your home Tailscale address."

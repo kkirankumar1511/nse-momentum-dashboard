@@ -301,7 +301,7 @@ COLUMN_LABELS = {
     "entry_vol_expansion": "Entry vol expansion",
     "entry_fundamental_score": "Entry fundamental score",
     "exit_reason": "Exit reason", "entry_reason": "Why this trade",
-    "latest_recommended_stop": "Latest stop (daily 4PM calc)",
+    "latest_recommended_stop": "Latest stop (daily 8:30AM calc)",
     "realized_pnl": "Realized P&L",
     "realized_ret_pct": "Realized return %",
 }

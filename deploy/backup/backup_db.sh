@@ -20,9 +20,11 @@
 #                                     # should never retain the private key
 #   crontab -u nseapp -e
 #     45 16 * * * /opt/nse-momentum-dashboard/deploy/backup/backup_db.sh >> /opt/nse-momentum-dashboard/backups/cron.log 2>&1
-# 16:45 IST -- comfortably after the 16:00 rebalance scan finishes, before
-# the Windows side's 17:00 pull (deploy/backup/pull_backup.ps1), timed to
-# the user's laptop actually being on then rather than overnight.
+# 16:45 IST -- after market close and the day's trading activity is done
+# (the rebalance scan itself now runs at 08:30, but positions/trades/stop
+# updates keep changing all day as orders get executed), before the
+# Windows side's 17:00 pull (deploy/backup/pull_backup.ps1), timed to the
+# user's laptop actually being on then rather than overnight.
 
 set -euo pipefail
 

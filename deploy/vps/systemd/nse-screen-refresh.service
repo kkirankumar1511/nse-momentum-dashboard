@@ -1,8 +1,0 @@
-[Unit]
-Description=NSE daily screener refresh
-
-[Service]
-Type=oneshot
-User=nseapp
-WorkingDirectory=/opt/nse-momentum-dashboard
-ExecStart=/opt/nse-momentum-dashboard/.venv/bin/python screener.py

@@ -1004,7 +1004,7 @@ def get_trades(symbol: str | None = None, status: str | None = None,
               since: str | None = None) -> pd.DataFrame:
     """Also carries the position's CURRENT recommended_stop as
     latest_recommended_stop -- the trailing-stop value compute_stop_updates()
-    recalculates daily (from the 16:00 rebalance scan) using that day's ATR,
+    recalculates daily (from the 08:30 rebalance scan) using that day's ATR,
     NOT yet necessarily pushed to the real broker GTT (see
     apply_stop_update()). Null for a closed trade, or a trade whose position
     was never linked (shouldn't happen for anything recorded through this

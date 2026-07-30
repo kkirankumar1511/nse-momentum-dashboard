@@ -134,6 +134,13 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
         with_fundamentals=True, fundamentals=fundamentals,
         progress_cb=lambda s, f: report(s, 0.10 + f * 0.7))
 
+    # Cache the same ranked table the Screener page's own "Run screen"
+    # button computes -- a rebalance run already does this full scan
+    # internally, so caching it here too means the Screener page shows
+    # this run's fresh data without a second, redundant universe fetch.
+    os.makedirs("cache", exist_ok=True)
+    ranked.to_pickle(screener.SCREEN_CACHE)
+
     candidates = ranked[ranked["all_gates"]]
     keep_zone = set(candidates.head(cfg["max_positions"] * 2).index)
 
@@ -228,6 +235,8 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
         "stop_updates": stop_updates_df,
         "holdings": held.reset_index().rename(columns={"tradingsymbol": "symbol"}),
         "open_slots": open_slots,
+        "screen_candidates": len(ranked),
+        "screen_gate_passers": int(ranked["all_gates"].sum()),
     }
     state_db.save_rebalance_run(result)
     return result
@@ -403,6 +412,18 @@ def main():
             f.write("\n".join(log_lines) + "\n")
         jr["summary"] = (f"{len(result['buys'])} buys, {len(result['sells'])} sells, "
                         f"{len(result['stop_updates'])} stop updates")
+
+    # propose_rebalance() already ran the full screener pipeline and cached
+    # it to screener.SCREEN_CACHE above -- log this as its own screen_run
+    # entry too (not folded into the rebalance_scan entry above) so the Job
+    # Log's "last run" for screen_run also reflects this time, even though
+    # no separate screener pass actually happened.
+    sr_id = state_db.start_job_run("screen_run", "scheduled")
+    state_db.finish_job_run(
+        sr_id, "success",
+        summary=(f"{result['screen_candidates']} candidates "
+                f"({result['screen_gate_passers']} passing all gates) -- "
+                "refreshed alongside the rebalance scan"))
 
 
 if __name__ == "__main__":
