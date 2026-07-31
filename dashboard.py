@@ -335,7 +335,7 @@ COLUMN_LABELS = {
     "entry_vol_expansion": "Entry vol expansion",
     "entry_fundamental_score": "Entry fundamental score",
     "exit_reason": "Exit reason", "entry_reason": "Why this trade",
-    "latest_recommended_stop": "Latest stop (daily rebalance-scan calc)",
+    "latest_recommended_stop": "Latest stop (scan-ratcheted, else initial GTT)",
     "extra_qty": "Extra qty",
     "trigger_price": "GTT trigger price", "updated_at": "Last updated",
     "apply_error": "Why it needs attention",

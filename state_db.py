@@ -1473,16 +1473,20 @@ def close_trade(symbol: str, exit_price: float | None, exit_reason: str) -> None
 
 def get_trades(symbol: str | None = None, status: str | None = None,
               since: str | None = None) -> pd.DataFrame:
-    """Also carries the position's CURRENT recommended_stop as
-    latest_recommended_stop -- the trailing-stop value compute_stop_updates()
+    """Also carries the position's latest known stop as
+    latest_recommended_stop -- COALESCE(p.recommended_stop, p.current_stop):
+    p.recommended_stop is the trailing-stop value compute_stop_updates()
     recalculates once per day, as part of whenever the rebalance scan next
     runs (scheduled time has moved before -- see nse-rebalance.timer -- so
     deliberately not hardcoded here), using that day's ATR, NOT yet
     necessarily pushed to the real broker GTT (see apply_stop_update()).
-    Null for a closed trade, a trade whose position was never linked
-    (shouldn't happen for anything recorded through this app's own flows),
-    or a position bought since the last scan ran -- it'll populate once
-    the next scan sees it as an already-held position."""
+    For a position bought since the last scan ran, that's still NULL, so
+    this falls back to p.current_stop -- the actual applied/initial GTT
+    stop -- rather than showing blank (which read as missing/broken data
+    for a freshly-bought position, when really there's just nothing to
+    ratchet yet). Null only for a closed trade, or a trade whose position
+    was never linked (shouldn't happen for anything recorded through this
+    app's own flows)."""
     conn = get_conn()
     where, params = [], []
     if symbol:
@@ -1496,7 +1500,7 @@ def get_trades(symbol: str | None = None, status: str | None = None,
         params.append(since)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     df = pd.read_sql(
-        f"SELECT t.*, p.recommended_stop AS latest_recommended_stop "
+        f"SELECT t.*, COALESCE(p.recommended_stop, p.current_stop) AS latest_recommended_stop "
         f"FROM trades t LEFT JOIN positions p ON t.position_id = p.id "
         f"{clause} ORDER BY t.entry_date DESC, t.id DESC",
         conn, params=params)
