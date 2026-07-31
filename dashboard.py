@@ -28,7 +28,6 @@ import os
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 
 import backtest as bt
 import config
@@ -222,10 +221,10 @@ if not st.session_state.get("dashboard_authenticated", False):
 _pending_cookie = st.session_state.pop("_pending_remember_cookie", None)
 if _pending_cookie:
     _token, _max_age = _pending_cookie
-    components.html(
+    st.html(
         f'<script>document.cookie = "remember_token={_token}; max-age={_max_age}; '
         f'path=/; SameSite=Lax; Secure";</script>',
-        height=0)
+        unsafe_allow_javascript=True)
 
 # ---------------------------------------------------------------------------
 # Kite connection health check -- only reached after the dashboard login
@@ -2584,9 +2583,9 @@ with st.sidebar:
     if st.button("🚪 Log out", use_container_width=True):
         state_db.delete_remember_token(st.context.cookies.get("remember_token", ""))
         st.session_state["dashboard_authenticated"] = False
-        components.html(
+        st.html(
             '<script>document.cookie = "remember_token=; max-age=0; path=/; Secure";</script>',
-            height=0)
+            unsafe_allow_javascript=True)
         st.rerun()
 
 nav = st.navigation([page_cockpit_p, page_live_rebalance_p, page_positions_trade_p,
