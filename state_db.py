@@ -922,6 +922,59 @@ def get_last_rebalance_run() -> dict | None:
     }
 
 
+def get_rebalance_history(status: list[str] | None = None,
+                          action_type: list[str] | None = None,
+                          symbol: str | None = None,
+                          since: str | None = None,
+                          limit: int = 500) -> pd.DataFrame:
+    """Every proposed sell/buy/top-up/stop-update across every rebalance
+    run, normalized into one filterable table -- action_type distinguishes
+    which of the 4 rebalance_* tables a row came from. qty/price/detail
+    map differently per action_type (top-ups use extra_qty as qty and
+    have no reason; stop-updates use qty + recommended_stop as price and
+    have no reason) -- see the column comments below. status/resolved_at/
+    error_message reflect the proposed/executed/error/expired lifecycle
+    (see _mark_rebalance_items() and save_rebalance_run()'s expiry step).
+
+    All filters optional and ANDed together where given; status/
+    action_type accept a list (OR within the list -- e.g. status=
+    ["error", "expired"] for "anything that didn't execute")."""
+    conn = get_conn()
+    query = """
+        SELECT rr.run_time, rb.run_id, 'sell' AS action_type, rb.symbol,
+               rb.qty, rb.avg_price AS price, rb.reason AS detail,
+               rb.status, rb.resolved_at, rb.error_message
+        FROM rebalance_sells rb JOIN rebalance_runs rr ON rb.run_id = rr.id
+        UNION ALL
+        SELECT rr.run_time, rb.run_id, 'buy', rb.symbol,
+               rb.qty, rb.price, rb.reason,
+               rb.status, rb.resolved_at, rb.error_message
+        FROM rebalance_buys rb JOIN rebalance_runs rr ON rb.run_id = rr.id
+        UNION ALL
+        SELECT rr.run_time, rb.run_id, 'top_up', rb.symbol,
+               rb.extra_qty, rb.price, NULL,
+               rb.status, rb.resolved_at, rb.error_message
+        FROM rebalance_top_ups rb JOIN rebalance_runs rr ON rb.run_id = rr.id
+        UNION ALL
+        SELECT rr.run_time, rb.run_id, 'stop_update', rb.symbol,
+               rb.qty, rb.recommended_stop, NULL,
+               rb.status, rb.resolved_at, rb.error_message
+        FROM rebalance_stop_updates rb JOIN rebalance_runs rr ON rb.run_id = rr.id
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    if status:
+        df = df[df["status"].isin(status)]
+    if action_type:
+        df = df[df["action_type"].isin(action_type)]
+    if symbol:
+        df = df[df["symbol"] == symbol]
+    if since:
+        df = df[df["run_time"] >= since]
+    return df.sort_values("run_time", ascending=False).head(limit).reset_index(drop=True)
+
+
 def _mark_rebalance_items(table: str, run_id: int | None, symbols: list[str],
                           status: str, error_message: str | None = None) -> None:
     """Shared implementation for every mark_rebalance_*_executed/failed()

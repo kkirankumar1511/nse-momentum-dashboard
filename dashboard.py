@@ -259,6 +259,20 @@ def _status_color(val) -> str:
     return ""
 
 
+def _rebalance_status_color(val) -> str:
+    """Rebalance History's proposed/executed/error/expired badge -- green
+    for a completed action, amber for still-pending, red for a failure,
+    gray for a proposal superseded by a newer scan before it was acted on."""
+    colors = {
+        "executed": "#16a34a", "proposed": "#d97706",
+        "error": "#dc2626", "expired": "#6b7280",
+    }
+    color = colors.get(val)
+    if not color:
+        return ""
+    return f"background-color: {color}; color: white; font-weight: 600; border-radius: 4px"
+
+
 # Raw/snake_case field name -> human-readable table header, applied by
 # pnl_style() (and readable_df() for the few tables that don't need P&L
 # coloring or number formatting) so no table in this app ever shows a
@@ -286,6 +300,8 @@ COLUMN_LABELS = {
     "ret_pct": "Return %",
     "date": "Date", "amount": "Amount (₹)", "note": "Note",
     "value": "Current value (₹)", "allocation_pct": "Allocation %",
+    "run_id": "Run ID", "run_time": "Run time", "action_type": "Action",
+    "detail": "Reason/Detail", "resolved_at": "Resolved at",
 
     # Screener / momentum
     "score": "Score", "price": "Price", "rs_3m": "RS 3M", "rs_6m": "RS 6M",
@@ -2321,6 +2337,56 @@ def page_job_log():
 
 
 # ---------------------------------------------------------------------------
+# Page: Rebalance History
+# ---------------------------------------------------------------------------
+
+def page_rebalance_history():
+    st.subheader("📜 Rebalance History")
+    st.caption(
+        "Every sell/buy/top-up/stop-update ever proposed, across every "
+        "rebalance run. Lifecycle: **proposed** -> **executed** | **error** "
+        "(attempted, failed -- reason recorded) | **expired** (superseded by "
+        "a newer scan before ever being acted on). Nothing here is ever "
+        "deleted -- this is the full audit trail, not just what's currently "
+        "pending (see Live Rebalance for that)."
+    )
+
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        action_filter = st.multiselect(
+            "Action", ["sell", "buy", "top_up", "stop_update"], key="rh_action_filter")
+    with f2:
+        status_filter = st.multiselect(
+            "Status", ["proposed", "executed", "error", "expired"], key="rh_status_filter")
+    with f3:
+        symbol_filter = st.text_input("Symbol (exact)", key="rh_symbol_filter")
+    with f4:
+        since_date = st.date_input(
+            "Since", value=dt.date.today() - dt.timedelta(days=30), key="rh_since")
+
+    hist = state_db.get_rebalance_history(
+        status=status_filter or None, action_type=action_filter or None,
+        symbol=symbol_filter.strip() or None, since=since_date.isoformat(), limit=1000)
+
+    st.caption(f"Showing {len(hist)} item(s)")
+    if hist.empty:
+        st.info("No rebalance items match these filters.")
+        return
+
+    styled = pnl_style(hist.drop(columns=["error_message"]),
+                      fmt={"price": "{:.2f}"}, na_rep="—")
+    styled = styled.map(_rebalance_status_color, subset=["Status"])
+    st.dataframe(styled, width="stretch", hide_index=True)
+
+    errors = hist[hist["status"] == "error"]
+    if not errors.empty:
+        with st.expander(f"Errors — full detail ({len(errors)})"):
+            for _, r in errors.iterrows():
+                st.markdown(f"**{r['symbol']}** ({r['action_type']}) — run at {r['run_time']}")
+                st.code(r["error_message"] or "(no error message captured)")
+
+
+# ---------------------------------------------------------------------------
 # Page: Tradebook
 # ---------------------------------------------------------------------------
 
@@ -2407,6 +2473,7 @@ page_backtest_p = st.Page(page_backtest, title="Backtest", icon="🧪")
 page_fundamentals_p = st.Page(page_fundamentals, title="Fundamentals", icon="📊")
 page_tradebook_p = st.Page(page_tradebook, title="Tradebook", icon="📒")
 page_job_log_p = st.Page(page_job_log, title="Job Log", icon="🗂️")
+page_rebalance_history_p = st.Page(page_rebalance_history, title="Rebalance History", icon="📜")
 page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
 
 with st.sidebar:
@@ -2433,5 +2500,6 @@ with st.sidebar:
 
 nav = st.navigation([page_cockpit_p, page_screener_p, page_live_rebalance_p,
                     page_positions_trade_p, page_backtest_p, page_fundamentals_p,
-                    page_tradebook_p, page_job_log_p, page_admin_p])
+                    page_tradebook_p, page_job_log_p, page_rebalance_history_p,
+                    page_admin_p])
 nav.run()
