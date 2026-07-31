@@ -302,6 +302,7 @@ COLUMN_LABELS = {
     "value": "Current value (₹)", "allocation_pct": "Allocation %",
     "run_id": "Run ID", "run_time": "Run time", "action_type": "Action",
     "detail": "Reason/Detail", "resolved_at": "Resolved at",
+    "current_qty": "Current qty",
 
     # Screener / momentum
     "score": "Score", "price": "Price", "rs_3m": "RS 3M", "rs_6m": "RS 6M",
@@ -334,7 +335,7 @@ COLUMN_LABELS = {
     "entry_vol_expansion": "Entry vol expansion",
     "entry_fundamental_score": "Entry fundamental score",
     "exit_reason": "Exit reason", "entry_reason": "Why this trade",
-    "latest_recommended_stop": "Latest stop (daily 8:30AM calc)",
+    "latest_recommended_stop": "Latest stop (daily rebalance-scan calc)",
     "extra_qty": "Extra qty",
     "trigger_price": "GTT trigger price", "updated_at": "Last updated",
     "apply_error": "Why it needs attention",
@@ -1257,7 +1258,16 @@ def page_live_rebalance():
     rc2.metric("Proposed sells", len(result["sells"]))
     rc3.metric("Open slots after sells", result["open_slots"])
 
-    if result.get("cash_shortfall") is not None:
+    # cash_shortfall/target_per_slot/cash_pool are snapshotted once at
+    # proposal time and never recomputed -- once every buy/top-up from
+    # this proposal has actually executed (or there were none to begin
+    # with), this message is describing a cash situation that's no
+    # longer relevant to anything still actionable, so skip it entirely
+    # rather than show a stale "buys below may be partial" next to an
+    # empty buys table.
+    still_actionable = (not result["buys"].empty
+                        or not result.get("top_ups", pd.DataFrame()).empty)
+    if still_actionable and result.get("cash_shortfall") is not None:
         target = result.get("target_per_slot") or 0
         pool = result.get("cash_pool") or 0
         shortfall = result.get("cash_shortfall") or 0
@@ -1464,20 +1474,41 @@ def page_positions_trade():
 
     @st.fragment(run_every=run_every)
     def _live_positions_holdings():
-        st.markdown("**Open positions**")
+        st.markdown("**Today's orders & positions**")
+        st.caption("Every order placed today, enriched with the resulting "
+                  "position's live LTP/P&L where it's still open -- open "
+                  "positions and today's orders showed almost entirely "
+                  "overlapping symbols/qty as separate tables, so this is "
+                  "one combined view instead of two near-duplicates.")
+        orders = kite_client.get_orders()
         live_pos = kite_client.get_positions()
-        if live_pos.empty or (live_pos.get("quantity") == 0).all():
-            st.caption("No open positions.")
+        if orders.empty:
+            st.caption("No orders today.")
         else:
-            live = live_pos[live_pos["quantity"] != 0]
+            pos_by_symbol = {}
+            if not live_pos.empty:
+                for _, r in live_pos[live_pos["quantity"] != 0].iterrows():
+                    pos_by_symbol[r["tradingsymbol"]] = {
+                        "current_qty": r["quantity"], "ltp": r["last_price"],
+                        "pnl": r["pnl"], "product": r["product"]}
+            display = orders[["order_timestamp", "tradingsymbol", "transaction_type",
+                             "quantity", "average_price", "status"]].copy()
+            display["current_qty"] = display["tradingsymbol"].map(
+                lambda s: pos_by_symbol.get(s, {}).get("current_qty"))
+            display["ltp"] = display["tradingsymbol"].map(
+                lambda s: pos_by_symbol.get(s, {}).get("ltp"))
+            display["pnl"] = display["tradingsymbol"].map(
+                lambda s: pos_by_symbol.get(s, {}).get("pnl"))
+            display["product"] = display["tradingsymbol"].map(
+                lambda s: pos_by_symbol.get(s, {}).get("product"))
             st.dataframe(
-                pnl_style(
-                    live[["tradingsymbol", "quantity", "average_price",
-                         "last_price", "pnl", "product"]],
-                    ["pnl"], {"average_price": "{:.2f}", "last_price": "{:.2f}",
-                             "pnl": "{:,.0f}"}),
+                pnl_style(display, ["pnl"],
+                         {"average_price": "{:.2f}", "ltp": "{:.2f}", "pnl": "{:,.0f}"},
+                         na_rep="—"),
                 width="stretch", hide_index=True)
-            st.metric("Total position P&L", f"₹{live['pnl'].sum():,.0f}")
+            total_pnl = live_pos[live_pos["quantity"] != 0]["pnl"].sum() \
+                if not live_pos.empty else 0.0
+            st.metric("Total position P&L", f"₹{total_pnl:,.0f}")
 
         st.markdown("**Holdings (CNC)**")
         live_hold = kite_client.get_holdings()
@@ -1514,18 +1545,6 @@ def page_positions_trade():
     if not hold.empty:
         all_syms += list(hold[hold["quantity"] > 0]["tradingsymbol"])
     all_syms = sorted(set(all_syms))
-
-    st.divider()
-    st.subheader("Today's orders")
-    orders = kite_client.get_orders()
-    if not orders.empty:
-        st.dataframe(
-            pnl_style(orders[["order_timestamp", "tradingsymbol", "transaction_type",
-                             "quantity", "average_price", "status"]],
-                     fmt={"average_price": "{:.2f}"}),
-            width="stretch", hide_index=True)
-    else:
-        st.caption("No orders today.")
 
     st.divider()
     st.subheader(

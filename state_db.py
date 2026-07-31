@@ -221,7 +221,8 @@ CREATE TABLE IF NOT EXISTS trades (
     realized_pnl REAL,
     realized_ret_pct REAL,
     holding_days INTEGER,
-    status TEXT NOT NULL DEFAULT 'open'
+    status TEXT NOT NULL DEFAULT 'open',
+    updated_at TEXT
 );
 """
 
@@ -327,6 +328,8 @@ def _migrate_trades_schema(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(trades)")}
     if "entry_reason" not in cols:
         conn.execute("ALTER TABLE trades ADD COLUMN entry_reason TEXT")
+    if "updated_at" not in cols:
+        conn.execute("ALTER TABLE trades ADD COLUMN updated_at TEXT")
     conn.commit()
 
 
@@ -644,8 +647,8 @@ def top_up_trade(symbol: str, extra_qty: int, price: float) -> None:
         t_new_entry = (trade_row["entry_price"] * trade_row["qty"]
                       + price * extra_qty) / t_new_qty
         trades_conn.execute(
-            "UPDATE trades SET qty = ?, entry_price = ? WHERE id = ?",
-            (t_new_qty, t_new_entry, trade_row["id"]))
+            "UPDATE trades SET qty = ?, entry_price = ?, updated_at = ? WHERE id = ?",
+            (t_new_qty, t_new_entry, dt.datetime.now().isoformat(), trade_row["id"]))
         trades_conn.commit()
     trades_conn.close()
 
@@ -941,24 +944,24 @@ def get_rebalance_history(status: list[str] | None = None,
     ["error", "expired"] for "anything that didn't execute")."""
     conn = get_conn()
     query = """
-        SELECT rr.run_time, rb.run_id, 'sell' AS action_type, rb.symbol,
-               rb.qty, rb.avg_price AS price, rb.reason AS detail,
-               rb.status, rb.resolved_at, rb.error_message
+        SELECT rb.run_id, rr.run_time, rb.status, 'sell' AS action_type,
+               rb.symbol, rb.qty, rb.avg_price AS price, rb.reason AS detail,
+               rb.resolved_at, rb.error_message
         FROM rebalance_sells rb JOIN rebalance_runs rr ON rb.run_id = rr.id
         UNION ALL
-        SELECT rr.run_time, rb.run_id, 'buy', rb.symbol,
-               rb.qty, rb.price, rb.reason,
-               rb.status, rb.resolved_at, rb.error_message
+        SELECT rb.run_id, rr.run_time, rb.status, 'buy',
+               rb.symbol, rb.qty, rb.price, rb.reason,
+               rb.resolved_at, rb.error_message
         FROM rebalance_buys rb JOIN rebalance_runs rr ON rb.run_id = rr.id
         UNION ALL
-        SELECT rr.run_time, rb.run_id, 'top_up', rb.symbol,
-               rb.extra_qty, rb.price, NULL,
-               rb.status, rb.resolved_at, rb.error_message
+        SELECT rb.run_id, rr.run_time, rb.status, 'top_up',
+               rb.symbol, rb.extra_qty, rb.price, NULL,
+               rb.resolved_at, rb.error_message
         FROM rebalance_top_ups rb JOIN rebalance_runs rr ON rb.run_id = rr.id
         UNION ALL
-        SELECT rr.run_time, rb.run_id, 'stop_update', rb.symbol,
-               rb.qty, rb.recommended_stop, NULL,
-               rb.status, rb.resolved_at, rb.error_message
+        SELECT rb.run_id, rr.run_time, rb.status, 'stop_update',
+               rb.symbol, rb.qty, rb.recommended_stop, NULL,
+               rb.resolved_at, rb.error_message
         FROM rebalance_stop_updates rb JOIN rebalance_runs rr ON rb.run_id = rr.id
     """
     df = pd.read_sql(query, conn)
@@ -972,7 +975,14 @@ def get_rebalance_history(status: list[str] | None = None,
         df = df[df["symbol"] == symbol]
     if since:
         df = df[df["run_time"] >= since]
-    return df.sort_values("run_time", ascending=False).head(limit).reset_index(drop=True)
+    df = df.sort_values("run_time", ascending=False).head(limit).reset_index(drop=True)
+    # One consistent "YYYY-MM-DD HH:MM:SS" format for both timestamp
+    # columns -- run_time/resolved_at otherwise show as raw ISO strings
+    # with fractional seconds (e.g. "2026-07-31T09:26:07.540831"), which
+    # read inconsistently next to every other timestamp in this app.
+    for col in ("run_time", "resolved_at"):
+        df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+    return df
 
 
 def _mark_rebalance_items(table: str, run_id: int | None, symbols: list[str],
@@ -1465,11 +1475,14 @@ def get_trades(symbol: str | None = None, status: str | None = None,
               since: str | None = None) -> pd.DataFrame:
     """Also carries the position's CURRENT recommended_stop as
     latest_recommended_stop -- the trailing-stop value compute_stop_updates()
-    recalculates daily (from the 08:30 rebalance scan) using that day's ATR,
-    NOT yet necessarily pushed to the real broker GTT (see
-    apply_stop_update()). Null for a closed trade, or a trade whose position
-    was never linked (shouldn't happen for anything recorded through this
-    app's own flows)."""
+    recalculates once per day, as part of whenever the rebalance scan next
+    runs (scheduled time has moved before -- see nse-rebalance.timer -- so
+    deliberately not hardcoded here), using that day's ATR, NOT yet
+    necessarily pushed to the real broker GTT (see apply_stop_update()).
+    Null for a closed trade, a trade whose position was never linked
+    (shouldn't happen for anything recorded through this app's own flows),
+    or a position bought since the last scan ran -- it'll populate once
+    the next scan sees it as an already-held position."""
     conn = get_conn()
     where, params = [], []
     if symbol:
