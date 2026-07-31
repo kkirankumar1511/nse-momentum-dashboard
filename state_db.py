@@ -241,6 +241,7 @@ def get_conn(db_path: str | None = None) -> sqlite3.Connection:
     _migrate_rebalance_buys_schema(conn)
     _migrate_rebalance_runs_schema(conn)
     _migrate_equity_log_schema(conn)
+    _migrate_backfill_missing_trades(conn)
     return conn
 
 
@@ -313,6 +314,30 @@ def _migrate_trades_schema(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(trades)")}
     if "entry_reason" not in cols:
         conn.execute("ALTER TABLE trades ADD COLUMN entry_reason TEXT")
+    conn.commit()
+
+
+def _migrate_backfill_missing_trades(conn: sqlite3.Connection) -> None:
+    """Any OPEN position without a matching OPEN trades row (bought before
+    the trades/tradebook table existed) silently breaks top_up_trade()'s
+    trades-side update -- it looks for an open trade to blend the top-up's
+    extra shares/cost basis into, finds none, and no-ops, so the top-up
+    shows in positions but never in the Tradebook. Real example: BHEL,
+    LODHA, KALYANKJIL, SONACOMS were all bought before this table existed;
+    their subsequent top-ups silently vanished from the Tradebook.
+    Backfills one open trades row per such position from positions' own
+    currently-known qty/entry_price/stop -- the actual entry-day technical/
+    fundamental snapshot isn't recoverable retroactively, so those columns
+    stay null, same convention every other optional trades column already
+    uses. The NOT EXISTS guard makes this idempotent -- safe on every
+    get_conn() call, only ever inserts once per position."""
+    conn.execute(
+        "INSERT INTO trades (position_id, symbol, entry_date, entry_price, "
+        "qty, initial_stop, entry_reason, status) "
+        "SELECT p.id, p.symbol, p.entry_date, p.entry_price, p.qty, "
+        "p.current_stop, 'Backfilled -- position predates the trades table', "
+        "'open' FROM positions p WHERE p.status = 'open' AND NOT EXISTS ("
+        "SELECT 1 FROM trades t WHERE t.symbol = p.symbol AND t.status = 'open')")
     conn.commit()
 
 
@@ -833,6 +858,7 @@ def get_last_rebalance_run() -> dict | None:
         "FROM rebalance_top_ups WHERE run_id = ?", conn, params=(run_id,))
     conn.close()
     return {
+        "run_id": run_id,
         "run_time": dt.datetime.fromisoformat(run["run_time"]),
         "sells": sells, "buys": buys, "stop_updates": stop_updates,
         "top_ups": top_ups, "open_slots": run["open_slots"],
@@ -841,6 +867,73 @@ def get_last_rebalance_run() -> dict | None:
         "cash_shortfall": run["cash_shortfall"],
         "unsettled_proceeds": run["unsettled_proceeds"],
     }
+
+
+def mark_rebalance_sells_executed(run_id: int | None, symbols: list[str]) -> None:
+    """Removes these symbols from the persisted proposal once their sell
+    actually executes -- otherwise get_last_rebalance_run() keeps serving
+    an already-done sell back to a fresh session/relogin forever (the
+    in-memory st.session_state filtering the buttons already do doesn't
+    survive a relogin, only this does)."""
+    if not symbols or run_id is None:
+        return
+    conn = get_conn()
+    conn.executemany(
+        "DELETE FROM rebalance_sells WHERE run_id = ? AND symbol = ?",
+        [(run_id, s) for s in symbols])
+    conn.commit()
+    conn.close()
+
+
+def mark_rebalance_buys_executed(run_id: int | None, symbols: list[str]) -> None:
+    """See mark_rebalance_sells_executed()."""
+    if not symbols or run_id is None:
+        return
+    conn = get_conn()
+    conn.executemany(
+        "DELETE FROM rebalance_buys WHERE run_id = ? AND symbol = ?",
+        [(run_id, s) for s in symbols])
+    conn.commit()
+    conn.close()
+
+
+def mark_rebalance_top_ups_executed(run_id: int | None, symbols: list[str]) -> None:
+    """See mark_rebalance_sells_executed()."""
+    if not symbols or run_id is None:
+        return
+    conn = get_conn()
+    conn.executemany(
+        "DELETE FROM rebalance_top_ups WHERE run_id = ? AND symbol = ?",
+        [(run_id, s) for s in symbols])
+    conn.commit()
+    conn.close()
+
+
+def mark_rebalance_stop_updates_executed(run_id: int | None, symbols: list[str]) -> None:
+    """See mark_rebalance_sells_executed()."""
+    if not symbols or run_id is None:
+        return
+    conn = get_conn()
+    conn.executemany(
+        "DELETE FROM rebalance_stop_updates WHERE run_id = ? AND symbol = ?",
+        [(run_id, s) for s in symbols])
+    conn.commit()
+    conn.close()
+
+
+def set_rebalance_open_slots(run_id: int | None, open_slots: int) -> None:
+    """Keeps the persisted run's open_slots in sync as sells/buys actually
+    execute (a sell frees a slot, a buy fills one) -- otherwise a stale
+    open_slots value (computed back when the proposal was first generated)
+    keeps showing after a relogin, same staleness as the buy/sell rows
+    themselves."""
+    if run_id is None:
+        return
+    conn = get_conn()
+    conn.execute("UPDATE rebalance_runs SET open_slots = ? WHERE id = ?",
+                (max(int(open_slots), 0), run_id))
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1107,6 +1200,41 @@ def job_run(job_type: str, trigger_type: str):
         raise
     else:
         finish_job_run(run_id, "success", summary=result.get("summary"))
+
+
+def cleanup_stale_manual_jobs() -> int:
+    """Marks any job_runs row still 'running' with trigger_type='manual'
+    as 'failed' (interrupted). Meant to be called exactly ONCE per
+    process, at dashboard startup (see background_jobs.py) -- NOT from
+    inside job_run() or on every get_conn() call, which would wrongly
+    kill a job genuinely still running in this same process.
+
+    Scoped to trigger_type='manual' ONLY, and deliberately not a general
+    "any running row is stale" cleanup: 'manual' jobs only ever run as a
+    background thread inside THIS dashboard process (background_jobs.py),
+    so a 'manual' row still 'running' when the dashboard is just starting
+    up can only be orphaned from a PREVIOUS instance of this same process
+    -- e.g. the systemd service restarting (a code deploy) while a manual
+    "Run screen"/"Run today's scan" thread was still executing, killing
+    the whole process mid-job with no chance for job_run()'s own except/
+    else to ever run. Real example: a screen_run row stuck at 'running'
+    since a deploy-time restart, never auto-clearing. 'scheduled' rows are
+    NOT touched here -- those come from independent, short-lived CLI
+    processes (live_rebalance.py, fundamentals_agent.py) that can be
+    running concurrently with this dashboard process, so blindly marking
+    every 'running' row stale here could kill a genuinely-still-running
+    scheduled job in another process."""
+    conn = get_conn()
+    cur = conn.execute(
+        "UPDATE job_runs SET status = 'failed', finished_at = ?, "
+        "error_message = 'Interrupted -- process restarted while this job "
+        "was running (e.g. a code deploy), so it never reached its own "
+        "completion handler' WHERE status = 'running' AND trigger_type = 'manual'",
+        (dt.datetime.now().isoformat(),))
+    n = cur.rowcount
+    conn.commit()
+    conn.close()
+    return n
 
 
 def get_job_runs(job_type: str | None = None, status: str | None = None,

@@ -568,48 +568,6 @@ def page_cockpit():
         st.caption("Portfolio value is logged once a day when you open this page — "
                   "the chart builds up over time as you keep using the dashboard.")
 
-    with st.expander("Full funds breakdown (from Kite margins API)"):
-        def _breakdown_table(section: dict) -> pd.DataFrame:
-            rows = []
-            for k, v in section.items():
-                try:
-                    v = f"{float(v):,.2f}"
-                except (TypeError, ValueError):
-                    v = str(v)
-                rows.append({"Metric": k.replace("_", " ").title(), "Value": v})
-            return pd.DataFrame(rows)
-
-        try:
-            m = kite_client.get_margins()["equity"]
-            fc1, fc2 = st.columns(2)
-            with fc1:
-                st.write("**Available**")
-                st.dataframe(_breakdown_table(m["available"]),
-                            width="stretch", hide_index=True)
-            with fc2:
-                st.write("**Utilised**")
-                st.dataframe(_breakdown_table(m["utilised"]),
-                            width="stretch", hide_index=True)
-        except Exception as e:
-            st.warning(f"Could not fetch funds breakdown: {e}")
-
-    st.divider()
-    st.subheader("Action needed today")
-    prop = state_db.get_last_rebalance_run()
-    if prop is not None:
-        age_hr = (dt.datetime.now() - prop["run_time"]).total_seconds() / 3600
-        n_sell = len(prop["sells"])
-        n_buy = len(prop["buys"])
-        n_stop = len(prop.get("stop_updates", pd.DataFrame()))
-        if n_sell or n_buy or n_stop:
-            st.warning(f"**{n_sell} sell(s), {n_buy} buy(s), {n_stop} stop "
-                      f"update(s) proposed** (scan run {age_hr:.1f}h ago).")
-        else:
-            st.success(f"No action needed (scan run {age_hr:.1f}h ago).")
-    else:
-        st.info("No rebalance scan run yet.")
-    st.page_link(page_live_rebalance_p, label="Go to Live Rebalance →", icon="📡")
-
     st.divider()
     st.subheader("Holdings")
     if merged.empty:
@@ -676,6 +634,32 @@ def page_cockpit():
                 "future top-up when cash allows.")
         st.page_link(page_positions_trade_p,
                     label="Full GTT details + actions →", icon="🛑")
+
+    st.divider()
+    with st.expander("Full funds breakdown (from Kite margins API)"):
+        def _breakdown_table(section: dict) -> pd.DataFrame:
+            rows = []
+            for k, v in section.items():
+                try:
+                    v = f"{float(v):,.2f}"
+                except (TypeError, ValueError):
+                    v = str(v)
+                rows.append({"Metric": k.replace("_", " ").title(), "Value": v})
+            return pd.DataFrame(rows)
+
+        try:
+            m = kite_client.get_margins()["equity"]
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                st.write("**Available**")
+                st.dataframe(_breakdown_table(m["available"]),
+                            width="stretch", hide_index=True)
+            with fc2:
+                st.write("**Utilised**")
+                st.dataframe(_breakdown_table(m["utilised"]),
+                            width="stretch", hide_index=True)
+        except Exception as e:
+            st.warning(f"Could not fetch funds breakdown: {e}")
 
 # ---------------------------------------------------------------------------
 # Page: Admin
@@ -1300,7 +1284,10 @@ def page_live_rebalance():
             if succeeded:
                 result["sells"] = result["sells"][
                     ~result["sells"]["symbol"].isin(succeeded)].reset_index(drop=True)
+                result["open_slots"] = result.get("open_slots", 0) + len(succeeded)
                 st.session_state["rebalance_proposal"] = result
+                state_db.mark_rebalance_sells_executed(result.get("run_id"), succeeded)
+                state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
             st.rerun()
     else:
         st.caption("No current holdings fail the rebalance rule today.")
@@ -1332,7 +1319,10 @@ def page_live_rebalance():
             if succeeded:
                 result["buys"] = result["buys"][
                     ~result["buys"]["symbol"].isin(succeeded)].reset_index(drop=True)
+                result["open_slots"] = max(result.get("open_slots", 0) - len(succeeded), 0)
                 st.session_state["rebalance_proposal"] = result
+                state_db.mark_rebalance_buys_executed(result.get("run_id"), succeeded)
+                state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
             st.rerun()
     else:
         st.caption("No open slots, or no candidates today.")
@@ -1364,6 +1354,7 @@ def page_live_rebalance():
                 result["top_ups"] = top_ups[
                     ~top_ups["symbol"].isin(succeeded)].reset_index(drop=True)
                 st.session_state["rebalance_proposal"] = result
+                state_db.mark_rebalance_top_ups_executed(result.get("run_id"), succeeded)
             st.rerun()
     else:
         st.caption("No under-target holdings, or no cash left over to top up with.")
@@ -1413,6 +1404,7 @@ def page_live_rebalance():
                 result["stop_updates"] = stop_updates[
                     ~stop_updates["symbol"].isin(succeeded)].reset_index(drop=True)
                 st.session_state["rebalance_proposal"] = result
+                state_db.mark_rebalance_stop_updates_executed(result.get("run_id"), succeeded)
             st.rerun()
     else:
         st.caption("No trailing-stop increases needed attention today — "
@@ -1489,18 +1481,122 @@ def page_positions_trade():
     pos = kite_client.get_positions()
     hold = kite_client.get_holdings()
 
-    st.divider()
-    st.subheader("Place an order")
-    st.caption("Sizing uses your ATR stop so every BUY risks the same % of capital. "
-               "Pick SELL on something you currently hold to square off the whole "
-               "position at market in one click.")
-
     all_syms = []
     if not pos.empty:
         all_syms += list(pos[pos["quantity"] != 0]["tradingsymbol"])
     if not hold.empty:
         all_syms += list(hold[hold["quantity"] > 0]["tradingsymbol"])
     all_syms = sorted(set(all_syms))
+
+    st.divider()
+    st.subheader("Today's orders")
+    orders = kite_client.get_orders()
+    if not orders.empty:
+        st.dataframe(
+            pnl_style(orders[["order_timestamp", "tradingsymbol", "transaction_type",
+                             "quantity", "average_price", "status"]],
+                     fmt={"average_price": "{:.2f}"}),
+            width="stretch", hide_index=True)
+    else:
+        st.caption("No orders today.")
+
+    st.divider()
+    st.subheader(
+        "🛑 GTT / Stop-Loss Management",
+        help="The one place for GTT visibility and actions: every current "
+             "position/holding, its live GTT status straight from Kite "
+             "(the source of truth, not just this app's own tracking), "
+             "and -- for anything unprotected -- the action to place one. "
+             "Computes the same ATR-based stop this app always uses for a "
+             "position bought outside its own buy flow (e.g. placed "
+             "directly on Kite), and backfills this app's own bookkeeping "
+             "so future trailing-stop updates pick it up too.")
+
+    try:
+        active_gtts = kite_client.get_active_gtts()
+        gtt_by_symbol = {}
+        if not active_gtts.empty and "condition" in active_gtts.columns:
+            for _, g in active_gtts.iterrows():
+                cond = g.get("condition") or {}
+                gsym = cond.get("tradingsymbol") if isinstance(cond, dict) else None
+                if not gsym:
+                    continue
+                trigger_vals = cond.get("trigger_values") if isinstance(cond, dict) else None
+                gtt_by_symbol[gsym] = {
+                    "trigger_price": trigger_vals[0] if trigger_vals else None,
+                    "updated_at": g.get("updated_at"),
+                }
+    except Exception as e:
+        st.warning(f"Could not fetch GTTs from Kite: {e}")
+        gtt_by_symbol = {}
+
+    gtt_symbols = set(gtt_by_symbol)
+    gtt_rows = []
+    for sym in all_syms:
+        g = gtt_by_symbol.get(sym)
+        gtt_rows.append({
+            "symbol": sym, "gtt_active": "✅" if g else "❌",
+            "trigger_price": g["trigger_price"] if g else None,
+            "updated_at": g["updated_at"] if g else None,
+        })
+    gtt_table = pd.DataFrame(gtt_rows)
+    if not gtt_table.empty:
+        st.dataframe(
+            pnl_style(gtt_table.sort_values("symbol"), fmt={"trigger_price": "{:.2f}"},
+                     na_rep="—"),
+            width="stretch", hide_index=True)
+
+    unprotected_syms = [s for s in all_syms if s not in gtt_symbols]
+
+    if not unprotected_syms:
+        st.success("Every current position/holding has an active GTT.")
+    else:
+        st.warning(f"{len(unprotected_syms)} unprotected: "
+                  f"{', '.join(unprotected_syms)} — place a stop-loss below.")
+        sl_symbol = st.selectbox("Symbol", unprotected_syms, key="manual_sl_symbol")
+
+        sl_qty, sl_avg_price = 0, 0.0
+        if not pos.empty and sl_symbol in pos["tradingsymbol"].values:
+            r = pos[pos["tradingsymbol"] == sl_symbol].iloc[0]
+            sl_qty, sl_avg_price = int(r["quantity"]), float(r["average_price"])
+        elif not hold.empty and sl_symbol in hold["tradingsymbol"].values:
+            r = hold[hold["tradingsymbol"] == sl_symbol].iloc[0]
+            sl_qty, sl_avg_price = int(r["quantity"]), float(r["average_price"])
+
+        try:
+            sl_ltp = kite_client.get_ltp([sl_symbol])[sl_symbol]
+            sl_df = kite_client.fetch_daily_candles(sl_symbol, days=120)
+            sl_atr = float(indicators.atr(sl_df, cfg["atr_period"]).iloc[-1])
+            sl_stop = sl_ltp - cfg["atr_stop_multiple"] * sl_atr
+        except Exception as e:
+            st.warning(f"Couldn't fetch live data: {e}")
+            sl_ltp, sl_stop = 0.0, 0.0
+
+        slc1, slc2, slc3 = st.columns(3)
+        slc1.metric("Quantity", sl_qty)
+        slc2.metric("LTP", f"₹{sl_ltp:,.2f}")
+        slc3.metric("ATR stop", f"₹{sl_stop:,.2f}",
+                   help=f"{cfg['atr_stop_multiple']}× ATR({cfg['atr_period']}) below LTP")
+
+        sl_confirm = st.checkbox("I confirm this GTT stop-loss", key="manual_sl_confirm")
+        if st.button("Place stop-loss", type="primary",
+                    disabled=not sl_confirm or sl_qty == 0 or sl_stop <= 0,
+                    key="manual_sl_place"):
+            try:
+                gtt_id = kite_client.place_gtt_stoploss(sl_symbol, sl_qty, sl_stop, sl_ltp)
+            except Exception as e:
+                st.error(f"GTT placement failed: {e}")
+            else:
+                state_db.upsert_manual_position(sl_symbol, sl_avg_price, sl_qty,
+                                                sl_stop, gtt_id)
+                st.success(f"GTT stop-loss placed: trigger {gtt_id} at ₹{sl_stop:,.1f}")
+                st.rerun()
+
+    st.divider()
+    st.subheader("Place an order")
+    st.caption("Sizing uses your ATR stop so every BUY risks the same % of capital. "
+               "Pick SELL on something you currently hold to square off the whole "
+               "position at market in one click.")
 
     symbol_choices = sorted(set(all_syms) | set(config.UNIVERSE))
     col1, col2, col3 = st.columns(3)
@@ -1628,110 +1724,6 @@ def page_positions_trade():
                         snapshot={"entry_reason": "Manually placed order (Trade tab), "
                                  "not from the automated scan"},
                         position_id=position_id)
-
-    st.divider()
-    st.subheader(
-        "🛑 GTT / Stop-Loss Management",
-        help="The one place for GTT visibility and actions: every current "
-             "position/holding, its live GTT status straight from Kite "
-             "(the source of truth, not just this app's own tracking), "
-             "and -- for anything unprotected -- the action to place one. "
-             "Computes the same ATR-based stop this app always uses for a "
-             "position bought outside its own buy flow (e.g. placed "
-             "directly on Kite), and backfills this app's own bookkeeping "
-             "so future trailing-stop updates pick it up too.")
-
-    try:
-        active_gtts = kite_client.get_active_gtts()
-        gtt_by_symbol = {}
-        if not active_gtts.empty and "condition" in active_gtts.columns:
-            for _, g in active_gtts.iterrows():
-                cond = g.get("condition") or {}
-                gsym = cond.get("tradingsymbol") if isinstance(cond, dict) else None
-                if not gsym:
-                    continue
-                trigger_vals = cond.get("trigger_values") if isinstance(cond, dict) else None
-                gtt_by_symbol[gsym] = {
-                    "trigger_price": trigger_vals[0] if trigger_vals else None,
-                    "updated_at": g.get("updated_at"),
-                }
-    except Exception as e:
-        st.warning(f"Could not fetch GTTs from Kite: {e}")
-        gtt_by_symbol = {}
-
-    gtt_symbols = set(gtt_by_symbol)
-    gtt_rows = []
-    for sym in all_syms:
-        g = gtt_by_symbol.get(sym)
-        gtt_rows.append({
-            "symbol": sym, "gtt_active": "✅" if g else "❌",
-            "trigger_price": g["trigger_price"] if g else None,
-            "updated_at": g["updated_at"] if g else None,
-        })
-    gtt_table = pd.DataFrame(gtt_rows)
-    if not gtt_table.empty:
-        st.dataframe(
-            pnl_style(gtt_table.sort_values("symbol"), fmt={"trigger_price": "{:.2f}"},
-                     na_rep="—"),
-            width="stretch", hide_index=True)
-
-    unprotected_syms = [s for s in all_syms if s not in gtt_symbols]
-
-    if not unprotected_syms:
-        st.success("Every current position/holding has an active GTT.")
-    else:
-        st.warning(f"{len(unprotected_syms)} unprotected: "
-                  f"{', '.join(unprotected_syms)} — place a stop-loss below.")
-        sl_symbol = st.selectbox("Symbol", unprotected_syms, key="manual_sl_symbol")
-
-        sl_qty, sl_avg_price = 0, 0.0
-        if not pos.empty and sl_symbol in pos["tradingsymbol"].values:
-            r = pos[pos["tradingsymbol"] == sl_symbol].iloc[0]
-            sl_qty, sl_avg_price = int(r["quantity"]), float(r["average_price"])
-        elif not hold.empty and sl_symbol in hold["tradingsymbol"].values:
-            r = hold[hold["tradingsymbol"] == sl_symbol].iloc[0]
-            sl_qty, sl_avg_price = int(r["quantity"]), float(r["average_price"])
-
-        try:
-            sl_ltp = kite_client.get_ltp([sl_symbol])[sl_symbol]
-            sl_df = kite_client.fetch_daily_candles(sl_symbol, days=120)
-            sl_atr = float(indicators.atr(sl_df, cfg["atr_period"]).iloc[-1])
-            sl_stop = sl_ltp - cfg["atr_stop_multiple"] * sl_atr
-        except Exception as e:
-            st.warning(f"Couldn't fetch live data: {e}")
-            sl_ltp, sl_stop = 0.0, 0.0
-
-        slc1, slc2, slc3 = st.columns(3)
-        slc1.metric("Quantity", sl_qty)
-        slc2.metric("LTP", f"₹{sl_ltp:,.2f}")
-        slc3.metric("ATR stop", f"₹{sl_stop:,.2f}",
-                   help=f"{cfg['atr_stop_multiple']}× ATR({cfg['atr_period']}) below LTP")
-
-        sl_confirm = st.checkbox("I confirm this GTT stop-loss", key="manual_sl_confirm")
-        if st.button("Place stop-loss", type="primary",
-                    disabled=not sl_confirm or sl_qty == 0 or sl_stop <= 0,
-                    key="manual_sl_place"):
-            try:
-                gtt_id = kite_client.place_gtt_stoploss(sl_symbol, sl_qty, sl_stop, sl_ltp)
-            except Exception as e:
-                st.error(f"GTT placement failed: {e}")
-            else:
-                state_db.upsert_manual_position(sl_symbol, sl_avg_price, sl_qty,
-                                                sl_stop, gtt_id)
-                st.success(f"GTT stop-loss placed: trigger {gtt_id} at ₹{sl_stop:,.1f}")
-                st.rerun()
-
-    st.divider()
-    st.subheader("Today's orders")
-    orders = kite_client.get_orders()
-    if not orders.empty:
-        st.dataframe(
-            pnl_style(orders[["order_timestamp", "tradingsymbol", "transaction_type",
-                             "quantity", "average_price", "status"]],
-                     fmt={"average_price": "{:.2f}"}),
-            width="stretch", hide_index=True)
-    else:
-        st.caption("No orders today.")
 
 
 # ---------------------------------------------------------------------------
@@ -2412,6 +2404,21 @@ with st.sidebar:
     skipped_note = f" ({n_skipped} skipped)" if n_skipped else ""
     st.caption(f"F&O universe: {len(config.UNIVERSE_RAW)} stocks{skipped_note} · "
               f"{dt.date.today():%d %b %Y}")
+
+    # Lightweight always-visible pending-action indicator -- replaces the
+    # old full-width "Action needed today" section on the Overview page,
+    # which took prime real estate for something that's usually "nothing
+    # to do" and, worse, could show already-executed items as still
+    # pending (the same staleness bug fixed in mark_rebalance_*_executed).
+    _last_run = state_db.get_last_rebalance_run()
+    if _last_run is not None:
+        _n_pending = (len(_last_run["sells"]) + len(_last_run["buys"])
+                     + len(_last_run.get("stop_updates", pd.DataFrame())))
+        if _n_pending:
+            st.page_link(page_live_rebalance_p,
+                        label=f"🔴 {_n_pending} action(s) pending", icon="📡")
+        else:
+            st.caption("✅ No rebalance actions pending")
 
 nav = st.navigation([page_cockpit_p, page_screener_p, page_live_rebalance_p,
                     page_positions_trade_p, page_backtest_p, page_fundamentals_p,

@@ -31,6 +31,14 @@ import state_db
 
 _JOBS: dict[str, dict] = {}
 
+# Runs exactly once per dashboard process (module-level code, not re-run on
+# Streamlit's repeated script reruns thanks to Python's import cache -- same
+# mechanism _JOBS itself relies on, see the module docstring above). Any
+# job_runs row still 'running' with trigger_type='manual' at this point can
+# only be orphaned from a PREVIOUS process instance -- see
+# state_db.cleanup_stale_manual_jobs()'s docstring.
+state_db.cleanup_stale_manual_jobs()
+
 
 def start_background_job(key: str, fn, *args, job_type: str | None = None,
                          summarize_fn=None, **kwargs) -> bool:

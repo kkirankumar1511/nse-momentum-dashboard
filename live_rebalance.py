@@ -395,7 +395,7 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
         "cash_shortfall": round(cash_shortfall, 2),
         "unsettled_proceeds": round(unsettled_proceeds, 2),
     }
-    state_db.save_rebalance_run(result)
+    result["run_id"] = state_db.save_rebalance_run(result)
     return result
 
 
@@ -691,15 +691,23 @@ def main():
         log(f"\nSaved to {state_db.DB_PATH}")
         if config.STRATEGY.get("auto_execute_trades", False):
             log("\n-- Auto-executing trades (auto_execute_trades=True) --")
+            run_id = result.get("run_id")
+            open_slots = result["open_slots"]
             if not result["sells"].empty:
-                sell_log, _ = execute_sells(result["sells"])
+                sell_log, sold = execute_sells(result["sells"])
                 log("\n".join(sell_log))
+                state_db.mark_rebalance_sells_executed(run_id, sold)
+                open_slots += len(sold)
             if not result["buys"].empty:
-                buy_log, _ = execute_buys(result["buys"])
+                buy_log, bought = execute_buys(result["buys"])
                 log("\n".join(buy_log))
+                state_db.mark_rebalance_buys_executed(run_id, bought)
+                open_slots = max(open_slots - len(bought), 0)
             if not result["top_ups"].empty:
-                topup_log, _ = execute_top_ups(result["top_ups"])
+                topup_log, topped_up = execute_top_ups(result["top_ups"])
                 log("\n".join(topup_log))
+                state_db.mark_rebalance_top_ups_executed(run_id, topped_up)
+            state_db.set_rebalance_open_slots(run_id, open_slots)
             log("\nTrades executed automatically -- see the log above for each order.")
         else:
             log("Nothing was placed or modified -- review and execute/apply manually "
