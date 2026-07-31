@@ -406,14 +406,14 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
 # Each returns a list of human-readable log lines.
 # ---------------------------------------------------------------------------
 
-def execute_sells(sells_df: pd.DataFrame) -> tuple[list[str], list[str]]:
+def execute_sells(sells_df: pd.DataFrame) -> tuple[list[str], list[str], dict[str, str]]:
     """Market-sells every row (the rebalance rule's exits), closes the
     tradebook entry with the reason already computed (previously
     discarded the moment the order fired), and deletes any stale GTT left
     pointing at the now-closed position -- same cleanup
     check_gap_down_stops() already does for its own auto-sells. Returns
-    (log_lines, succeeded_symbols)."""
-    log, succeeded = [], []
+    (log_lines, succeeded_symbols, failed_symbols_with_error_message)."""
+    log, succeeded, failed = [], [], {}
     for _, r in sells_df.iterrows():
         try:
             oid = kite_client.square_off_position(r["symbol"])
@@ -434,21 +434,24 @@ def execute_sells(sells_df: pd.DataFrame) -> tuple[list[str], list[str]]:
             succeeded.append(r["symbol"])
         except Exception as e:
             log.append(f"❌ {r['symbol']}: FAILED — {e}")
-    return log, succeeded
+            failed[r["symbol"]] = str(e)
+    return log, succeeded, failed
 
 
-def execute_buys(buys_df: pd.DataFrame, place_gtt: bool = True) -> tuple[list[str], list[str]]:
+def execute_buys(buys_df: pd.DataFrame,
+                 place_gtt: bool = True) -> tuple[list[str], list[str], dict[str, str]]:
     """Market-buys every row (new candidates filling open slots), places a
     GTT stop-loss at the sizing-time stop unless place_gtt=False, and
     seeds this app's own trailing-stop bookkeeping + tradebook entry
     (entry-time technical/fundamental snapshot, already on the row).
-    Returns (log_lines, succeeded_symbols)."""
-    log, succeeded = [], []
+    Returns (log_lines, succeeded_symbols, failed_symbols_with_error_message)."""
+    log, succeeded, failed = [], [], {}
     for _, r in buys_df.iterrows():
         try:
             oid = kite_client.place_order(r["symbol"], int(r["qty"]), "BUY")
         except Exception as e:
             log.append(f"❌ {r['symbol']}: BUY FAILED — {e}")
+            failed[r["symbol"]] = str(e)
             continue
         succeeded.append(r["symbol"])
         msg = f"✅ {r['symbol']}: order {oid}"
@@ -472,20 +475,21 @@ def execute_buys(buys_df: pd.DataFrame, place_gtt: bool = True) -> tuple[list[st
                      "entry_reason": r.get("reason")},
             position_id=position_id)
         log.append(msg)
-    return log, succeeded
+    return log, succeeded, failed
 
 
-def execute_top_ups(top_ups_df: pd.DataFrame) -> tuple[list[str], list[str]]:
+def execute_top_ups(top_ups_df: pd.DataFrame) -> tuple[list[str], list[str], dict[str, str]]:
     """Buys the extra shares for each under-target existing holding, and
     updates its GTT to cover the new total quantity at the same stop
     price (the stop itself never changes here -- only quantity). Returns
-    (log_lines, succeeded_symbols)."""
-    log, succeeded = [], []
+    (log_lines, succeeded_symbols, failed_symbols_with_error_message)."""
+    log, succeeded, failed = [], [], {}
     for _, r in top_ups_df.iterrows():
         try:
             oid = kite_client.place_order(r["symbol"], int(r["extra_qty"]), "BUY")
         except Exception as e:
             log.append(f"❌ {r['symbol']}: BUY FAILED — {e}")
+            failed[r["symbol"]] = str(e)
             continue
         succeeded.append(r["symbol"])
         msg = f"✅ {r['symbol']}: order {oid} (+{int(r['extra_qty'])})"
@@ -507,7 +511,7 @@ def execute_top_ups(top_ups_df: pd.DataFrame) -> tuple[list[str], list[str]]:
             msg += " — ⚠️ no existing GTT to update (position may be unprotected)"
         state_db.top_up_trade(r["symbol"], int(r["extra_qty"]), float(r["price"]))
         log.append(msg)
-    return log, succeeded
+    return log, succeeded, failed
 
 
 def check_gap_down_stops() -> list[dict]:
@@ -694,19 +698,22 @@ def main():
             run_id = result.get("run_id")
             open_slots = result["open_slots"]
             if not result["sells"].empty:
-                sell_log, sold = execute_sells(result["sells"])
+                sell_log, sold, sell_failed = execute_sells(result["sells"])
                 log("\n".join(sell_log))
                 state_db.mark_rebalance_sells_executed(run_id, sold)
+                state_db.mark_rebalance_sells_failed(run_id, sell_failed)
                 open_slots += len(sold)
             if not result["buys"].empty:
-                buy_log, bought = execute_buys(result["buys"])
+                buy_log, bought, buy_failed = execute_buys(result["buys"])
                 log("\n".join(buy_log))
                 state_db.mark_rebalance_buys_executed(run_id, bought)
+                state_db.mark_rebalance_buys_failed(run_id, buy_failed)
                 open_slots = max(open_slots - len(bought), 0)
             if not result["top_ups"].empty:
-                topup_log, topped_up = execute_top_ups(result["top_ups"])
+                topup_log, topped_up, topup_failed = execute_top_ups(result["top_ups"])
                 log("\n".join(topup_log))
                 state_db.mark_rebalance_top_ups_executed(run_id, topped_up)
+                state_db.mark_rebalance_top_ups_failed(run_id, topup_failed)
             state_db.set_rebalance_open_slots(run_id, open_slots)
             log("\nTrades executed automatically -- see the log above for each order.")
         else:

@@ -1279,14 +1279,16 @@ def page_live_rebalance():
             "I confirm I want to execute ALL proposed sells at market",
             key="confirm_sell_all")
         if st.button("Execute all sells", disabled=not confirm_sell or rebalance_running):
-            log, succeeded = lr.execute_sells(result["sells"])
+            log, succeeded, failed = lr.execute_sells(result["sells"])
             st.session_state["sell_exec_log"] = log
-            if succeeded:
+            resolved = succeeded + list(failed)
+            if resolved:
                 result["sells"] = result["sells"][
-                    ~result["sells"]["symbol"].isin(succeeded)].reset_index(drop=True)
+                    ~result["sells"]["symbol"].isin(resolved)].reset_index(drop=True)
                 result["open_slots"] = result.get("open_slots", 0) + len(succeeded)
                 st.session_state["rebalance_proposal"] = result
                 state_db.mark_rebalance_sells_executed(result.get("run_id"), succeeded)
+                state_db.mark_rebalance_sells_failed(result.get("run_id"), failed)
                 state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
             st.rerun()
     else:
@@ -1314,14 +1316,16 @@ def page_live_rebalance():
             "I confirm I want to execute ALL proposed buys at market",
             key="confirm_buy_all")
         if st.button("Execute all buys", disabled=not confirm_buy or rebalance_running):
-            log, succeeded = lr.execute_buys(result["buys"], place_gtt=place_gtt)
+            log, succeeded, failed = lr.execute_buys(result["buys"], place_gtt=place_gtt)
             st.session_state["buy_exec_log"] = log
-            if succeeded:
+            resolved = succeeded + list(failed)
+            if resolved:
                 result["buys"] = result["buys"][
-                    ~result["buys"]["symbol"].isin(succeeded)].reset_index(drop=True)
+                    ~result["buys"]["symbol"].isin(resolved)].reset_index(drop=True)
                 result["open_slots"] = max(result.get("open_slots", 0) - len(succeeded), 0)
                 st.session_state["rebalance_proposal"] = result
                 state_db.mark_rebalance_buys_executed(result.get("run_id"), succeeded)
+                state_db.mark_rebalance_buys_failed(result.get("run_id"), failed)
                 state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
             st.rerun()
     else:
@@ -1348,13 +1352,15 @@ def page_live_rebalance():
             "I confirm I want to execute ALL proposed top-ups at market",
             key="confirm_topup_all")
         if st.button("Execute all top-ups", disabled=not confirm_topup or rebalance_running):
-            log, succeeded = lr.execute_top_ups(top_ups)
+            log, succeeded, failed = lr.execute_top_ups(top_ups)
             st.session_state["topup_exec_log"] = log
-            if succeeded:
+            resolved = succeeded + list(failed)
+            if resolved:
                 result["top_ups"] = top_ups[
-                    ~top_ups["symbol"].isin(succeeded)].reset_index(drop=True)
+                    ~top_ups["symbol"].isin(resolved)].reset_index(drop=True)
                 st.session_state["rebalance_proposal"] = result
                 state_db.mark_rebalance_top_ups_executed(result.get("run_id"), succeeded)
+                state_db.mark_rebalance_top_ups_failed(result.get("run_id"), failed)
             st.rerun()
     else:
         st.caption("No under-target holdings, or no cash left over to top up with.")
@@ -1380,10 +1386,12 @@ def page_live_rebalance():
         if st.button("Apply stop updates", disabled=not confirm_stops or rebalance_running):
             log = []
             succeeded = []
+            failed = {}
             for _, r in stop_updates.iterrows():
                 if pd.isna(r["gtt_trigger_id"]):
                     log.append(f"⚠️ {r['symbol']}: no active GTT to update — "
                               "place one manually first (Trade tab).")
+                    failed[r["symbol"]] = "No active GTT to update"
                     continue
                 try:
                     ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
@@ -1399,12 +1407,15 @@ def page_live_rebalance():
                     succeeded.append(r["symbol"])
                 except Exception as e:
                     log.append(f"❌ {r['symbol']}: FAILED — {e}")
+                    failed[r["symbol"]] = str(e)
             st.session_state["stopupdate_exec_log"] = log
-            if succeeded:
+            resolved = succeeded + list(failed)
+            if resolved:
                 result["stop_updates"] = stop_updates[
-                    ~stop_updates["symbol"].isin(succeeded)].reset_index(drop=True)
+                    ~stop_updates["symbol"].isin(resolved)].reset_index(drop=True)
                 st.session_state["rebalance_proposal"] = result
                 state_db.mark_rebalance_stop_updates_executed(result.get("run_id"), succeeded)
+                state_db.mark_rebalance_stop_updates_failed(result.get("run_id"), failed)
             st.rerun()
     else:
         st.caption("No trailing-stop increases needed attention today — "

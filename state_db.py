@@ -92,22 +92,33 @@ CREATE TABLE IF NOT EXISTS rebalance_runs (
     unsettled_proceeds REAL
 );
 
+-- status lifecycle (all 4 rebalance_* child tables below): 'proposed' ->
+-- 'executed' (succeeded, resolved_at set) | 'error' (attempted, failed --
+-- error_message set) | 'expired' (superseded by a newer rebalance run
+-- before ever being acted on -- see save_rebalance_run()). Rows are never
+-- deleted once inserted -- this preserves the full audit trail (what was
+-- proposed, what actually happened to it) instead of the previous
+-- behavior of physically deleting a row the moment it executed, which
+-- lost that history entirely.
 CREATE TABLE IF NOT EXISTS rebalance_sells (
     run_id INTEGER REFERENCES rebalance_runs(id),
-    symbol TEXT, qty INTEGER, avg_price REAL, reason TEXT
+    symbol TEXT, qty INTEGER, avg_price REAL, reason TEXT,
+    status TEXT NOT NULL DEFAULT 'proposed', resolved_at TEXT, error_message TEXT
 );
 
 CREATE TABLE IF NOT EXISTS rebalance_buys (
     run_id INTEGER REFERENCES rebalance_runs(id),
     symbol TEXT, qty INTEGER, price REAL, stop REAL, score REAL,
     fundamental_score REAL, fundamental_rubric TEXT,
-    rsi REAL, pct_52w_high REAL, vol_expansion REAL, reason TEXT
+    rsi REAL, pct_52w_high REAL, vol_expansion REAL, reason TEXT,
+    status TEXT NOT NULL DEFAULT 'proposed', resolved_at TEXT, error_message TEXT
 );
 
 CREATE TABLE IF NOT EXISTS rebalance_stop_updates (
     run_id INTEGER REFERENCES rebalance_runs(id),
     symbol TEXT, qty INTEGER, current_stop REAL, recommended_stop REAL,
-    gtt_trigger_id INTEGER
+    gtt_trigger_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'proposed', resolved_at TEXT, error_message TEXT
 );
 
 -- Proposed top-ups (screener.allocate_equal_weight_buys) -- additional
@@ -116,7 +127,8 @@ CREATE TABLE IF NOT EXISTS rebalance_stop_updates (
 -- from rebalance_buys (which only ever opens brand-new positions).
 CREATE TABLE IF NOT EXISTS rebalance_top_ups (
     run_id INTEGER REFERENCES rebalance_runs(id),
-    symbol TEXT, extra_qty INTEGER, price REAL, gtt_trigger_id INTEGER
+    symbol TEXT, extra_qty INTEGER, price REAL, gtt_trigger_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'proposed', resolved_at TEXT, error_message TEXT
 );
 
 -- Dashboard login gate. Singleton row, password stored as a salted hash
@@ -240,6 +252,7 @@ def get_conn(db_path: str | None = None) -> sqlite3.Connection:
     _migrate_trades_schema(conn)
     _migrate_rebalance_buys_schema(conn)
     _migrate_rebalance_runs_schema(conn)
+    _migrate_rebalance_status_columns(conn)
     _migrate_equity_log_schema(conn)
     _migrate_backfill_missing_trades(conn)
     return conn
@@ -368,6 +381,29 @@ def _migrate_rebalance_runs_schema(conn: sqlite3.Connection) -> None:
                "unsettled_proceeds"]:
         if col not in cols:
             conn.execute(f"ALTER TABLE rebalance_runs ADD COLUMN {col} REAL")
+    conn.commit()
+
+
+def _migrate_rebalance_status_columns(conn: sqlite3.Connection) -> None:
+    """Adds status/resolved_at/error_message to the 4 already-existing
+    rebalance_* child tables (sells/buys/top_ups/stop_updates) -- see the
+    CREATE TABLE comment above for the status lifecycle. Existing rows
+    (from before this migration) default to 'proposed' via the column
+    default, same as any newly-inserted row -- there's no way to know in
+    hindsight which of those already executed, so they're left as
+    'proposed' rather than guessed at; the next real rebalance run's
+    save_rebalance_run() call will correctly expire any that are still
+    stale by then."""
+    for table in ("rebalance_sells", "rebalance_buys",
+                 "rebalance_top_ups", "rebalance_stop_updates"):
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if "status" not in cols:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN status TEXT NOT NULL DEFAULT 'proposed'")
+        if "resolved_at" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN resolved_at TEXT")
+        if "error_message" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN error_message TEXT")
     conn.commit()
 
 
@@ -776,8 +812,20 @@ def get_equity_log() -> pd.DataFrame:
 
 def save_rebalance_run(result: dict) -> int:
     """Persists a propose_rebalance() result dict (run_time, sells, buys,
-    stop_updates, holdings, open_slots) -- returns the new run_id."""
+    stop_updates, holdings, open_slots) -- returns the new run_id.
+
+    Before inserting the new run's rows, marks any still-'proposed' row
+    from a PREVIOUS run as 'expired' -- a fresh scan supersedes whatever
+    was proposed before (rankings/prices/holdings have moved on), so an
+    old sell/buy/top-up/stop-update nobody acted on shouldn't linger as
+    'proposed' forever once a newer proposal exists."""
     conn = get_conn()
+    now = dt.datetime.now().isoformat()
+    for table in ("rebalance_sells", "rebalance_buys",
+                 "rebalance_top_ups", "rebalance_stop_updates"):
+        conn.execute(
+            f"UPDATE {table} SET status = 'expired', resolved_at = ? "
+            "WHERE status = 'proposed'", (now,))
     cur = conn.execute(
         "INSERT INTO rebalance_runs (run_time, open_slots, status, "
         "target_per_slot, cash_pool, cash_needed_for_full_equal_weight, "
@@ -842,20 +890,25 @@ def get_last_rebalance_run() -> dict | None:
         conn.close()
         return None
     run_id = run["id"]
+    # Only 'proposed' rows -- anything already executed/errored/expired
+    # shouldn't show as still needing action (see _mark_rebalance_items()
+    # and save_rebalance_run()'s expiry step).
     sells = pd.read_sql(
-        "SELECT symbol, qty, avg_price, reason FROM rebalance_sells WHERE run_id = ?",
-        conn, params=(run_id,))
+        "SELECT symbol, qty, avg_price, reason FROM rebalance_sells "
+        "WHERE run_id = ? AND status = 'proposed'", conn, params=(run_id,))
     buys = pd.read_sql(
         "SELECT symbol, qty, price, stop, score, fundamental_score, "
         "fundamental_rubric, rsi, pct_52w_high, vol_expansion, reason "
-        "FROM rebalance_buys WHERE run_id = ?",
+        "FROM rebalance_buys WHERE run_id = ? AND status = 'proposed'",
         conn, params=(run_id,))
     stop_updates = pd.read_sql(
         "SELECT symbol, qty, current_stop, recommended_stop, gtt_trigger_id "
-        "FROM rebalance_stop_updates WHERE run_id = ?", conn, params=(run_id,))
+        "FROM rebalance_stop_updates WHERE run_id = ? AND status = 'proposed'",
+        conn, params=(run_id,))
     top_ups = pd.read_sql(
         "SELECT symbol, extra_qty, price, gtt_trigger_id "
-        "FROM rebalance_top_ups WHERE run_id = ?", conn, params=(run_id,))
+        "FROM rebalance_top_ups WHERE run_id = ? AND status = 'proposed'",
+        conn, params=(run_id,))
     conn.close()
     return {
         "run_id": run_id,
@@ -869,56 +922,65 @@ def get_last_rebalance_run() -> dict | None:
     }
 
 
-def mark_rebalance_sells_executed(run_id: int | None, symbols: list[str]) -> None:
-    """Removes these symbols from the persisted proposal once their sell
-    actually executes -- otherwise get_last_rebalance_run() keeps serving
-    an already-done sell back to a fresh session/relogin forever (the
-    in-memory st.session_state filtering the buttons already do doesn't
-    survive a relogin, only this does)."""
+def _mark_rebalance_items(table: str, run_id: int | None, symbols: list[str],
+                          status: str, error_message: str | None = None) -> None:
+    """Shared implementation for every mark_rebalance_*_executed/failed()
+    below -- sets status + resolved_at (and error_message, for failures)
+    on matching rows INSTEAD OF deleting them, so the full history of
+    what was proposed and what actually happened to it survives (the
+    previous behavior physically deleted a row the moment it executed,
+    losing that trail entirely). get_last_rebalance_run() only ever reads
+    status='proposed' rows, so from the UI's perspective this looks
+    identical to the old delete-based behavior -- executed/error/expired
+    rows just stop showing as still-pending, without being destroyed.
+    `table` is always one of this module's own 4 literal table name
+    constants, never user input."""
     if not symbols or run_id is None:
         return
     conn = get_conn()
+    now = dt.datetime.now().isoformat()
     conn.executemany(
-        "DELETE FROM rebalance_sells WHERE run_id = ? AND symbol = ?",
-        [(run_id, s) for s in symbols])
+        f"UPDATE {table} SET status = ?, resolved_at = ?, error_message = ? "
+        "WHERE run_id = ? AND symbol = ?",
+        [(status, now, error_message, run_id, s) for s in symbols])
     conn.commit()
     conn.close()
+
+
+def mark_rebalance_sells_executed(run_id: int | None, symbols: list[str]) -> None:
+    _mark_rebalance_items("rebalance_sells", run_id, symbols, "executed")
+
+
+def mark_rebalance_sells_failed(run_id: int | None, symbols_errors: dict[str, str]) -> None:
+    for symbol, error in symbols_errors.items():
+        _mark_rebalance_items("rebalance_sells", run_id, [symbol], "error", error)
 
 
 def mark_rebalance_buys_executed(run_id: int | None, symbols: list[str]) -> None:
-    """See mark_rebalance_sells_executed()."""
-    if not symbols or run_id is None:
-        return
-    conn = get_conn()
-    conn.executemany(
-        "DELETE FROM rebalance_buys WHERE run_id = ? AND symbol = ?",
-        [(run_id, s) for s in symbols])
-    conn.commit()
-    conn.close()
+    _mark_rebalance_items("rebalance_buys", run_id, symbols, "executed")
+
+
+def mark_rebalance_buys_failed(run_id: int | None, symbols_errors: dict[str, str]) -> None:
+    for symbol, error in symbols_errors.items():
+        _mark_rebalance_items("rebalance_buys", run_id, [symbol], "error", error)
 
 
 def mark_rebalance_top_ups_executed(run_id: int | None, symbols: list[str]) -> None:
-    """See mark_rebalance_sells_executed()."""
-    if not symbols or run_id is None:
-        return
-    conn = get_conn()
-    conn.executemany(
-        "DELETE FROM rebalance_top_ups WHERE run_id = ? AND symbol = ?",
-        [(run_id, s) for s in symbols])
-    conn.commit()
-    conn.close()
+    _mark_rebalance_items("rebalance_top_ups", run_id, symbols, "executed")
+
+
+def mark_rebalance_top_ups_failed(run_id: int | None, symbols_errors: dict[str, str]) -> None:
+    for symbol, error in symbols_errors.items():
+        _mark_rebalance_items("rebalance_top_ups", run_id, [symbol], "error", error)
 
 
 def mark_rebalance_stop_updates_executed(run_id: int | None, symbols: list[str]) -> None:
-    """See mark_rebalance_sells_executed()."""
-    if not symbols or run_id is None:
-        return
-    conn = get_conn()
-    conn.executemany(
-        "DELETE FROM rebalance_stop_updates WHERE run_id = ? AND symbol = ?",
-        [(run_id, s) for s in symbols])
-    conn.commit()
-    conn.close()
+    _mark_rebalance_items("rebalance_stop_updates", run_id, symbols, "executed")
+
+
+def mark_rebalance_stop_updates_failed(run_id: int | None, symbols_errors: dict[str, str]) -> None:
+    for symbol, error in symbols_errors.items():
+        _mark_rebalance_items("rebalance_stop_updates", run_id, [symbol], "error", error)
 
 
 def set_rebalance_open_slots(run_id: int | None, open_slots: int) -> None:
