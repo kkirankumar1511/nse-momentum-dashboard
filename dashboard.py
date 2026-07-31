@@ -2529,6 +2529,35 @@ page_rebalance_history_p = st.Page(page_rebalance_history, title="Rebalance Hist
 page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
 
 with st.sidebar:
+    # Grouped sidebar nav, built by hand rather than passing a
+    # {section: [pages]} dict straight to st.navigation -- that dict form
+    # only makes a section individually collapsible when position="top";
+    # in the sidebar (which this app uses) it just renders a static label,
+    # with no way to control each section's collapsed/expanded state.
+    # Wrapping each section in a real st.expander gets that control back;
+    # st.navigation itself is still called below with position="hidden" so
+    # routing/query-params/current-page tracking keep working exactly as
+    # before, just with no visible built-in widget.
+    with st.expander("📈 Trading", expanded=True):
+        st.page_link(page_cockpit_p)
+        st.page_link(page_live_rebalance_p)
+        st.page_link(page_positions_trade_p)
+        st.page_link(page_screener_p)
+        st.page_link(page_fundamentals_p)
+
+    with st.expander("🗂️ Audit Trail", expanded=False):
+        st.page_link(page_tradebook_p)
+        st.page_link(page_job_log_p)
+        st.page_link(page_rebalance_history_p)
+
+    with st.expander("🧪 Testing", expanded=False):
+        st.page_link(page_backtest_p)
+
+    with st.expander("⚙️ Admin", expanded=False):
+        st.page_link(page_admin_p)
+
+    st.divider()
+
     st.metric("Available cash", f"₹{available_cash:,.0f}")
     n_skipped = len(config.UNIVERSE_RAW) - len(config.UNIVERSE)
     skipped_note = f" ({n_skipped} skipped)" if n_skipped else ""
@@ -2549,35 +2578,6 @@ with st.sidebar:
                         label=f"🔴 {_n_pending} action(s) pending", icon="📡")
         else:
             st.caption("✅ No rebalance actions pending")
-
-    st.divider()
-
-    # Grouped sidebar nav, built by hand rather than passing a
-    # {section: [pages]} dict straight to st.navigation -- that dict form
-    # only makes a section individually collapsible when position="top";
-    # in the sidebar (which this app uses) it just renders a static label,
-    # with no way to have one section start collapsed. Wrapping "Trading"
-    # in a real st.expander gets the actual default-collapsed behavior
-    # asked for; st.navigation itself is still called below with
-    # position="hidden" so routing/query-params/current-page tracking
-    # keep working exactly as before, just with no visible built-in widget.
-    with st.expander("📈 Trading", expanded=False):
-        st.page_link(page_cockpit_p)
-        st.page_link(page_live_rebalance_p)
-        st.page_link(page_positions_trade_p)
-        st.page_link(page_screener_p)
-        st.page_link(page_fundamentals_p)
-
-    st.caption("**Audit Trail**")
-    st.page_link(page_tradebook_p)
-    st.page_link(page_job_log_p)
-    st.page_link(page_rebalance_history_p)
-
-    st.caption("**Testing**")
-    st.page_link(page_backtest_p)
-
-    st.caption("**Admin**")
-    st.page_link(page_admin_p)
 
     st.divider()
     if st.button("🚪 Log out", use_container_width=True):
