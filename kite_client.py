@@ -25,9 +25,19 @@ from kiteconnect import KiteConnect
 import config
 import state_db
 
+# pykiteconnect defaults to a 7-second read timeout -- too tight for real
+# usage: a batch call (get_ltp for many symbols, historical candles, order
+# placement) occasionally takes longer than that under ordinary Zerodha API
+# load, especially near market open/close, and 7s isn't enough margin to
+# ride that out. Every KiteConnect(...) construction below passes this
+# explicitly rather than relying on the library default -- hit for real as
+# frequent "Read timed out. (read timeout=7)" errors and a sluggish Live
+# Rebalance page (which makes several sequential Kite calls per load).
+KITE_TIMEOUT = 30
+
 
 def get_kite() -> KiteConnect:
-    kite = KiteConnect(api_key=config.KITE_API_KEY)
+    kite = KiteConnect(api_key=config.KITE_API_KEY, timeout=KITE_TIMEOUT)
     if config.KITE_ACCESS_TOKEN:
         kite.set_access_token(config.KITE_ACCESS_TOKEN)
     return kite
@@ -42,7 +52,7 @@ def login_url() -> str:
     own login + 2FA page, then back to this app's registered redirect URL
     with a one-time request_token. No credentials of any kind touch this
     codebase; the actual login always happens on Zerodha's own page."""
-    kite = KiteConnect(api_key=config.KITE_API_KEY)
+    kite = KiteConnect(api_key=config.KITE_API_KEY, timeout=KITE_TIMEOUT)
     return kite.login_url()
 
 
@@ -52,7 +62,7 @@ def print_login_url() -> None:
 
 
 def exchange_request_token(request_token: str) -> str:
-    kite = KiteConnect(api_key=config.KITE_API_KEY)
+    kite = KiteConnect(api_key=config.KITE_API_KEY, timeout=KITE_TIMEOUT)
     session = kite.generate_session(request_token, api_secret=config.KITE_API_SECRET)
     token = session["access_token"]
     state_db.save_kite_access_token(token)
