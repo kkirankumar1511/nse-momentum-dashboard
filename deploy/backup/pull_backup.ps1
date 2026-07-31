@@ -29,8 +29,28 @@
 #      on one task):
 #        $t1 = New-ScheduledTaskTrigger -Daily -At 5:00PM
 #        $t2 = New-ScheduledTaskTrigger -AtLogOn
-#        $a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument '-File "E:\trading-workspace\nse-momentum-dashboard\deploy\backup\pull_backup.ps1"'
-#        Register-ScheduledTask -TaskName "NSE Backup Pull" -Trigger $t1,$t2 -Action $a -RunLevel Highest -Force
+#        $a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument '-ExecutionPolicy Bypass -File "E:\trading-workspace\nse-momentum-dashboard\deploy\backup\pull_backup.ps1"'
+#        Register-ScheduledTask -TaskName "NSE Backup Pull" -Trigger $t1,$t2 -Action $a -RunLevel Limited -Force
+#
+#      Two real bugs hit 2026-07-31, both causing a silent failure the
+#      instant Task Scheduler fired the task (exit code 1, before this
+#      script's own logging ever ran, so nothing showed in pull_backup.log
+#      at all -- only visible via `schtasks /query /tn "NSE Backup Pull" /v`
+#      showing Last Result 1, or by reproducing it live with `schtasks /run`):
+#        - RunLevel was "Highest" (requests UAC elevation) -- a background-
+#          triggered task can't answer a UAC prompt, so it died before
+#          starting. This script never needed admin rights (just scp to a
+#          data drive) -- fixed to RunLevel Limited above.
+#        - Task Scheduler launches a FRESH powershell.exe with no execution
+#          policy override, and LocalMachine's policy here is Undefined
+#          (defaults to Restricted) -- an unsigned .ps1 gets refused outright.
+#          An already-interactive shell can have Process-scope Bypass set,
+#          which is why running the .ps1 directly always "worked" and masked
+#          this. Fixed by adding -ExecutionPolicy Bypass to the action's
+#          arguments (scoped to just this task, not a machine-wide policy
+#          change) -- see the Argument string above.
+#      If re-registering this task, both fixes are already baked into the
+#      Register-ScheduledTask block above -- just run it as shown.
 
 $VpsHost = "100.117.150.114"
 $VpsUser = "root"
