@@ -285,6 +285,7 @@ COLUMN_LABELS = {
     "unrealized_pnl": "Unrealized P&L", "unrealized_ret_pct": "Unrealized return %",
     "ret_pct": "Return %",
     "date": "Date", "amount": "Amount (₹)", "note": "Note",
+    "value": "Current value (₹)", "allocation_pct": "Allocation %",
 
     # Screener / momentum
     "score": "Score", "price": "Price", "rs_3m": "RS 3M", "rs_6m": "RS 6M",
@@ -352,10 +353,18 @@ def pnl_style(df: pd.DataFrame, cols: list[str] | None = None, fmt: dict | None 
 
 
 def merged_holdings() -> pd.DataFrame:
-    """Positions + holdings merged into one live table with current P&L.
-    A same-day CNC buy can transiently appear in both Kite endpoints until it
-    settles into holdings overnight -- acceptable for an at-a-glance cockpit
-    view, not used anywhere money actually moves."""
+    """Positions + holdings merged into one live table with current P&L,
+    GROUPED BY SYMBOL. A same-day CNC buy or top-up transiently appears in
+    BOTH Kite endpoints until it settles into holdings overnight -- a naive
+    concat (the previous behavior here) double-lists that symbol as two
+    partial rows instead of one true combined position. Real example hit
+    live: after executing top-ups, BHEL/LODHA/KALYANKJIL/SONACOMS each
+    briefly split across a position-row and a holding-row the same day,
+    silently understating each row's own qty/value even though the
+    aggregate .sum() totals downstream happened to still be correct.
+    Grouping here means every reader -- the Holdings table, invested/
+    holdings-value totals, and the per-stock allocation view -- always
+    sees one accurate row per symbol."""
     pos = kite_client.get_positions()
     hold = kite_client.get_holdings()
     rows = []
@@ -363,13 +372,21 @@ def merged_holdings() -> pd.DataFrame:
         for _, r in pos[pos["quantity"] != 0].iterrows():
             rows.append({"symbol": r["tradingsymbol"], "qty": r["quantity"],
                         "avg_price": r["average_price"], "ltp": r["last_price"],
-                        "pnl": r["pnl"], "source": "position"})
+                        "pnl": r["pnl"]})
     if not hold.empty and "quantity" in hold.columns:
         for _, r in hold[hold["quantity"] > 0].iterrows():
             rows.append({"symbol": r["tradingsymbol"], "qty": r["quantity"],
                         "avg_price": r["average_price"], "ltp": r["last_price"],
-                        "pnl": r["pnl"], "source": "holding"})
-    return pd.DataFrame(rows)
+                        "pnl": r["pnl"]})
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["cost"] = df["qty"] * df["avg_price"]
+    merged = df.groupby("symbol", as_index=False).agg(
+        qty=("qty", "sum"), cost=("cost", "sum"),
+        ltp=("ltp", "last"), pnl=("pnl", "sum"))
+    merged["avg_price"] = merged["cost"] / merged["qty"]
+    return merged.drop(columns="cost")
 
 
 def log_equity_snapshot(value: float, invested_amount: float | None = None) -> pd.DataFrame:
@@ -602,6 +619,10 @@ def page_cockpit():
         stale = state_db.get_stale_open_symbols(held)
         exit_prices = kite_client.get_ltp(stale) if stale else {}
         state = state_db.reconciled_positions(held, exit_prices)
+        merged["value"] = merged["qty"] * merged["ltp"]
+        total_value = merged["value"].sum()
+        merged["allocation_pct"] = (merged["value"] / total_value * 100
+                                    if total_value else 0.0)
         merged["entry_date"] = merged["symbol"].map(
             lambda s: state.get(s, {}).get("entry_date", "—"))
         merged["days_held"] = merged["symbol"].map(
@@ -612,13 +633,47 @@ def page_cockpit():
         merged["gtt_active"] = merged["symbol"].map(
             lambda s: "✅" if state.get(s, {}).get("gtt_trigger_id") else "❌")
         st.dataframe(
-            pnl_style(merged.sort_values("pnl", ascending=False), ["pnl"],
+            pnl_style(merged.sort_values("value", ascending=False), ["pnl"],
                      {"avg_price": "{:.2f}", "ltp": "{:.2f}", "pnl": "{:,.0f}",
-                      "current_stop": "{:.2f}"}, na_rep="—"),
+                      "current_stop": "{:.2f}", "value": "₹{:,.0f}",
+                      "allocation_pct": "{:.1f}%"}, na_rep="—"),
             width="stretch", hide_index=True)
 
         st.caption("'Current stop'/'GTT active' above are this app's own "
                   "tracked values.")
+
+        st.markdown("**Capital allocation per stock**")
+        max_positions = config.STRATEGY.get("max_positions") or 0
+        target_per_slot = portfolio_value / max_positions if max_positions else None
+        alloc_sorted = merged.sort_values("value", ascending=True)
+        bar_colors = ["#16a34a" if v >= (target_per_slot or 0) else "#f59e0b"
+                     for v in alloc_sorted["value"]]
+        alloc_fig = go.Figure()
+        alloc_fig.add_trace(go.Bar(
+            x=alloc_sorted["value"], y=alloc_sorted["symbol"], orientation="h",
+            marker_color=bar_colors,
+            hovertemplate="₹%{x:,.0f}<extra>%{y}</extra>"))
+        if target_per_slot:
+            alloc_fig.add_vline(
+                x=target_per_slot, line_dash="dash", line_color="#6b7280",
+                annotation_text=f"~Equal-weight target ₹{target_per_slot:,.0f}",
+                annotation_position="top")
+        alloc_fig.update_layout(
+            title=dict(text="Current allocation vs equal-weight target",
+                      x=0, xanchor="left"),
+            height=max(220, 45 * len(alloc_sorted)),
+            margin=dict(l=10, r=10, t=50, b=10),
+            xaxis=dict(title="Current value (₹)", tickprefix="₹",
+                      separatethousands=True),
+            showlegend=False)
+        st.plotly_chart(alloc_fig, width="stretch")
+        if target_per_slot:
+            st.caption(
+                f"Target is an approximation (total capital ÷ {max_positions} "
+                "slots) for a quick visual, not the exact figure Live "
+                "Rebalance computes off cash-pool-at-rebalance-time — green "
+                "= at/above it, amber = under-target and a candidate for a "
+                "future top-up when cash allows.")
         st.page_link(page_positions_trade_p,
                     label="Full GTT details + actions →", icon="🛑")
 
