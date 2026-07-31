@@ -224,7 +224,7 @@ if _pending_cookie:
     _token, _max_age = _pending_cookie
     components.html(
         f'<script>document.cookie = "remember_token={_token}; max-age={_max_age}; '
-        f'path=/; SameSite=Lax";</script>',
+        f'path=/; SameSite=Lax; Secure";</script>',
         height=0)
 
 # ---------------------------------------------------------------------------
@@ -2556,7 +2556,7 @@ with st.sidebar:
         state_db.delete_remember_token(st.context.cookies.get("remember_token", ""))
         st.session_state["dashboard_authenticated"] = False
         components.html(
-            '<script>document.cookie = "remember_token=; max-age=0; path=/;";</script>',
+            '<script>document.cookie = "remember_token=; max-age=0; path=/; Secure";</script>',
             height=0)
         st.rerun()
 
