@@ -2544,6 +2544,7 @@ with st.sidebar:
         st.page_link(page_positions_trade_p)
         st.page_link(page_screener_p)
         st.page_link(page_fundamentals_p)
+        st.page_link(page_admin_p)
 
     with st.expander("🗂️ Audit Trail", expanded=False):
         st.page_link(page_tradebook_p)
@@ -2552,8 +2553,6 @@ with st.sidebar:
 
     with st.expander("🧪 Testing", expanded=False):
         st.page_link(page_backtest_p)
-
-    st.page_link(page_admin_p)
 
     st.divider()
 
