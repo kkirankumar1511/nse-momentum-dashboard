@@ -28,6 +28,7 @@ import os
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 import backtest as bt
 import config
@@ -176,22 +177,55 @@ elif request_token:
 # design, unrelated to cookies) -- see the request_token block above,
 # which re-authenticates that fresh session directly on a successful
 # exchange rather than depending on this form again.
+#
+# "Remember me" bridges the OTHER case a session reset happens: this
+# server process itself restarting (every deploy does this) or the
+# browser's WebSocket dropping (network blip, laptop sleep) -- neither of
+# those is a fresh external redirect, so nothing above re-authenticates
+# them. A valid remember_token cookie (see state_db.create_remember_token)
+# skips the form entirely; it deliberately expires at the next 6 AM
+# (state_db._next_daily_cutoff) rather than after a fixed duration, so a
+# fresh sign-in is still required every morning, same cadence as Kite's
+# own daily token expiry.
 # ---------------------------------------------------------------------------
 state_db.ensure_dashboard_auth_seeded(config.DASHBOARD_USERNAME, config.DASHBOARD_PASSWORD)
 
 if not st.session_state.get("dashboard_authenticated", False):
-    st.title("🔒 KK Trading System — sign in")
-    with st.form("login_form", clear_on_submit=True):
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Sign in", type="primary")
-    if submitted:
-        if state_db.verify_dashboard_login(u, p):
-            st.session_state["dashboard_authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Incorrect username or password.")
-    st.stop()
+    remembered_user = state_db.verify_remember_token(st.context.cookies.get("remember_token", ""))
+    if remembered_user:
+        st.session_state["dashboard_authenticated"] = True
+        st.session_state["dashboard_username"] = remembered_user
+    else:
+        st.title("🔒 KK Trading System — sign in")
+        with st.form("login_form", clear_on_submit=True):
+            u = st.text_input("Username")
+            p = st.text_input("Password", type="password")
+            remember = st.checkbox("Remember me on this device until tomorrow morning",
+                                   value=True)
+            submitted = st.form_submit_button("Sign in", type="primary")
+        if submitted:
+            if state_db.verify_dashboard_login(u, p):
+                st.session_state["dashboard_authenticated"] = True
+                st.session_state["dashboard_username"] = u
+                if remember:
+                    token, max_age = state_db.create_remember_token(u)
+                    st.session_state["_pending_remember_cookie"] = (token, max_age)
+                st.rerun()
+            else:
+                st.error("Incorrect username or password.")
+        st.stop()
+
+# Sets the remember-me cookie via a one-off injected script -- can't be done
+# in the same run as the st.rerun() above (the rerun cuts execution off
+# before a component would ever reach the browser), so the token is stashed
+# in session_state and the cookie gets set here, on the very next run, once.
+_pending_cookie = st.session_state.pop("_pending_remember_cookie", None)
+if _pending_cookie:
+    _token, _max_age = _pending_cookie
+    components.html(
+        f'<script>document.cookie = "remember_token={_token}; max-age={_max_age}; '
+        f'path=/; SameSite=Lax";</script>',
+        height=0)
 
 # ---------------------------------------------------------------------------
 # Kite connection health check -- only reached after the dashboard login
@@ -2516,6 +2550,15 @@ with st.sidebar:
                         label=f"🔴 {_n_pending} action(s) pending", icon="📡")
         else:
             st.caption("✅ No rebalance actions pending")
+
+    st.divider()
+    if st.button("🚪 Log out", use_container_width=True):
+        state_db.delete_remember_token(st.context.cookies.get("remember_token", ""))
+        st.session_state["dashboard_authenticated"] = False
+        components.html(
+            '<script>document.cookie = "remember_token=; max-age=0; path=/;";</script>',
+            height=0)
+        st.rerun()
 
 nav = st.navigation([page_cockpit_p, page_screener_p, page_live_rebalance_p,
                     page_positions_trade_p, page_backtest_p, page_fundamentals_p,

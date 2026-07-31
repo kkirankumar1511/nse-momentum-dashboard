@@ -141,6 +141,19 @@ CREATE TABLE IF NOT EXISTS dashboard_auth (
     salt TEXT NOT NULL
 );
 
+-- 'Remember me' cookie tokens (see create_remember_token()/
+-- verify_remember_token() below) -- lets a browser skip the login form
+-- across a service restart/reconnect within the same day. Only a SHA-256
+-- hash of the token is stored, same reasoning as dashboard_auth's hashed
+-- password: a stolen DB copy can't be replayed as a valid cookie.
+CREATE TABLE IF NOT EXISTS remember_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
 -- Strategy parameters (config.STRATEGY), editable from the dashboard's
 -- Admin page instead of only via a config.py code edit + restart. One row
 -- per key, value JSON-encoded so int/float/bool/str all round-trip cleanly
@@ -1104,13 +1117,17 @@ def verify_dashboard_login(username: str, password: str) -> bool:
 def update_dashboard_password(username: str, new_password: str) -> None:
     """Overwrites the singleton row -- used by the dashboard's own
     change-password form, so a password can be changed without touching
-    .env or restarting the process."""
+    .env or restarting the process. Also revokes every outstanding
+    'remember me' token -- a changed password should invalidate any
+    session remembered under the old one, not leave it silently valid
+    until its own expiry."""
     conn = get_conn()
     salt = secrets.token_bytes(16)
     conn.execute(
         "UPDATE dashboard_auth SET username = ?, password_hash = ?, salt = ? "
         "WHERE id = 1",
         (username, _hash_password(new_password, salt), salt.hex()))
+    conn.execute("DELETE FROM remember_tokens")
     conn.commit()
     conn.close()
 
@@ -1119,6 +1136,77 @@ def is_using_default_dashboard_password(default_username: str, default_password:
     """For the loud on-screen warning -- true only while still on the
     seeded Admin/Admin-style default, false the moment it's ever changed."""
     return verify_dashboard_login(default_username, default_password)
+
+
+# ---------------------------------------------------------------------------
+# "Remember me" -- an opt-in browser cookie that survives a service restart
+# or reconnect (Streamlit's own session_state does not -- see dashboard.py's
+# login gate) so a same-day reconnect doesn't require re-entering the
+# password. Deliberately expires at the next 6 AM rather than after a fixed
+# duration -- lines up with Kite's own daily ~6 AM access-token expiry, so
+# "log in once, stay in for the rest of today, sign in fresh again
+# tomorrow morning" holds for both systems together instead of two
+# different, confusing cutoffs.
+# ---------------------------------------------------------------------------
+
+def _next_daily_cutoff(now: dt.datetime | None = None) -> dt.datetime:
+    now = now or dt.datetime.now()
+    cutoff = now.replace(hour=6, minute=0, second=0, microsecond=0)
+    if now >= cutoff:
+        cutoff += dt.timedelta(days=1)
+    return cutoff
+
+
+def create_remember_token(username: str) -> tuple[str, int]:
+    """Issues a fresh remember-me token for `username`, valid until the
+    next 6 AM. Returns (raw_token, max_age_seconds) -- the raw token is
+    handed to the browser as a cookie value and never itself stored; only
+    its SHA-256 hash lives in the DB (see module note above)."""
+    conn = get_conn()
+    conn.execute("DELETE FROM remember_tokens WHERE expires_at < ?",
+                (dt.datetime.now().isoformat(),))
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    expires_at = _next_daily_cutoff()
+    conn.execute(
+        "INSERT INTO remember_tokens (username, token_hash, created_at, expires_at) "
+        "VALUES (?, ?, ?, ?)",
+        (username, token_hash, dt.datetime.now().isoformat(), expires_at.isoformat()))
+    conn.commit()
+    conn.close()
+    max_age = max(1, int((expires_at - dt.datetime.now()).total_seconds()))
+    return token, max_age
+
+
+def verify_remember_token(token: str) -> str | None:
+    """Returns the matching username if `token` is a valid, unexpired
+    remember-me cookie value; None if it's missing, expired, or doesn't
+    match anything on record (tampered/stale)."""
+    if not token:
+        return None
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT username, expires_at FROM remember_tokens WHERE token_hash = ?",
+        (token_hash,)).fetchone()
+    conn.close()
+    if row is None or dt.datetime.fromisoformat(row["expires_at"]) < dt.datetime.now():
+        return None
+    return row["username"]
+
+
+def delete_remember_token(token: str) -> None:
+    """Revokes one specific device's remember-me cookie -- used on explicit
+    log-out, so signing out actually ends that browser's remembered
+    session instead of just clearing session_state until the next
+    reconnect silently signs it back in."""
+    if not token:
+        return
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    conn = get_conn()
+    conn.execute("DELETE FROM remember_tokens WHERE token_hash = ?", (token_hash,))
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
