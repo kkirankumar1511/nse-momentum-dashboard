@@ -2553,8 +2553,7 @@ with st.sidebar:
     with st.expander("🧪 Testing", expanded=False):
         st.page_link(page_backtest_p)
 
-    with st.expander("⚙️ Admin", expanded=False):
-        st.page_link(page_admin_p)
+    st.page_link(page_admin_p)
 
     st.divider()
 
