@@ -221,6 +221,16 @@ def place_order(symbol: str, qty: int, side: str,
 
     side: "BUY" | "SELL"
     product: "CNC" (delivery, right for 3-6 month holds) or "MIS" (intraday)
+
+    Some stocks reject a plain MARKET order via the API outright (e.g.
+    under a periodic call auction or specific surveillance measures) with
+    "Market orders without market protection are not allowed via API" --
+    a real failure hit live on ADANIENSOL. Zerodha's own fix is exactly
+    what the error says: use a LIMIT order instead. Rather than let the
+    whole buy/sell fail, retry ONCE as a marketable limit (0.5% past LTP
+    -- buy up, sell down) tight enough to fill immediately in practice for
+    an F&O-liquid name, but bounded so a fast-moving price can't blow
+    through it the way an unprotected market fill could.
     """
     kite = get_kite()
     kwargs = dict(
@@ -234,7 +244,16 @@ def place_order(symbol: str, qty: int, side: str,
     )
     if order_type == "LIMIT" and price:
         kwargs["price"] = price
-    return kite.place_order(**kwargs)
+    try:
+        return kite.place_order(**kwargs)
+    except Exception as e:
+        if order_type == "MARKET" and "market protection" in str(e).lower():
+            ltp = get_ltp([symbol])[symbol]
+            buffer = 1.005 if side == "BUY" else 0.995
+            kwargs["order_type"] = "LIMIT"
+            kwargs["price"] = round(ltp * buffer, 1)
+            return kite.place_order(**kwargs)
+        raise
 
 
 def place_gtt_stoploss(symbol: str, qty: int, trigger_price: float,
