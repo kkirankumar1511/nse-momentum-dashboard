@@ -452,6 +452,35 @@ _OVERVIEW_CSS = """
     justify-content:flex-start !important;
 }
 .st-key-value_score_detail_sym input { text-align:left !important; }
+/* number_input's +/- stepper buttons default to 38px tall against a 27.5px
+   text field, ballooning the WHOLE bordered box to 40px -- taller than
+   every other input type's ~29.5px (text/date/select all share that
+   height since their content is just the 27.5px field + 1px border each
+   side). Shrinking the steppers to match is what actually fixes the
+   input row's overall height, not the outer container. */
+[data-testid="stNumberInputStepUp"], [data-testid="stNumberInputStepDown"] {
+    height:27.5px !important; min-height:0 !important; padding:0 6px !important;
+}
+/* The steppers' own flex-row wrapper (unnamed testid, second child of
+   stNumberInputContainer) still centers them in a taller box than the
+   buttons themselves need -- align-items:center collapses that extra
+   space instead of stretching to fit some invisible minimum. */
+[data-testid="stNumberInputContainer"] > div:last-child {
+    align-items:center !important; height:27.5px !important;
+}
+/* stNumberInputContainer itself also carries an explicit height:35px
+   (Streamlit's own emotion-cache rule, sized for the ORIGINAL 38px-tall
+   steppers) -- shrinking just the children above doesn't override an
+   explicit height on the parent, so the box itself needs the same
+   29.5px every other input type's wrapper measures (27.5px content +
+   1px border each side). */
+[data-testid="stNumberInputContainer"] {
+    height:29.5px !important; align-items:center !important;
+}
+/* Download buttons sit flush against their card's bottom edge when
+   they're the last element -- a bit of breathing room matches the
+   padding every other end-of-card element gets. */
+[data-testid="stDownloadButton"] { margin-bottom:8px; }
 /* Requested directly via an emotion-hash class found in dev tools --
    unlike the testid/library-class selectors elsewhere in this file,
    emotion hashes like this can change on a Streamlit version bump or
@@ -3813,7 +3842,14 @@ def page_job_log():
         started = dt.datetime.fromisoformat(last["started_at"])
         age_hr = (dt.datetime.now() - started).total_seconds() / 3600
         badge = {"success": "✅", "failed": "❌", "running": "⏳"}.get(last["status"], "❓")
-        note = last.get("summary") or last.get("error_message") or ""
+        # error_message stores the FULL traceback (real debugging value in
+        # the DB/expander below) -- but a raw multi-hundred-line dump in
+        # this compact metric card is unreadable. A traceback's last
+        # non-empty line is always "ExceptionType: message", so that alone
+        # is what shows here; the full detail is one click away below.
+        _err_msg = last.get("error_message") or ""
+        _err_last_line = _err_msg.strip().splitlines()[-1] if _err_msg.strip() else ""
+        note = last.get("summary") or _err_last_line
         _job_cards.append(_ov_metric_html(
             label, f"{badge} {age_hr:.1f}h ago", note,
             "ov-neg" if last["status"] == "failed" else "", _job_tones.get(last["status"], "coral")))

@@ -1,8 +1,91 @@
-# Optional -- only needed for HTTPS remote access (e.g. over Tailscale).
-# Copy to .streamlit/config.toml and fill in your own paths/hostname.
-# Not required for local-only use at http://127.0.0.1:8501.
+# Copy to .streamlit/config.toml, then fill in your own SSL cert/key paths
+# below (only needed for HTTPS remote access, e.g. over Tailscale -- not
+# required for local-only use at http://127.0.0.1:8501, just delete the
+# [server] cert lines in that case). Everything else here (client/theme)
+# applies regardless of SSL and should be copied as-is.
 
 [server]
 sslCertFile = ".streamlit/certs/your-device.your-tailnet.ts.net.crt"
 sslKeyFile = ".streamlit/certs/your-device.your-tailnet.ts.net.key"
 headless = true
+
+[client]
+toolbarMode = "minimal"
+
+# Theme matching the UX design mockup (momentum-dashboard-ux-design-v4).
+# Light/dark palettes mirror the mockup's CSS variables exactly; the
+# compact sizing (fonts, paddings, gaps) is finished off by _OVERVIEW_CSS
+# in dashboard.py, which uses the same variable values.
+[theme]
+font = "'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif"
+baseFontSize = 14
+baseRadius = "8px"
+buttonRadius = "8px"
+linkUnderline = false
+headingFontSizes = ["19px", "17px", "15px", "13.5px", "12.5px", "11.5px"]
+headingFontWeights = [700, 700, 700, 600, 600, 600]
+# chartCategoricalColors is only valid at this top level, not per light/
+# dark theme -- this Streamlit version rejects the light/dark-nested copies
+# below with a startup warning, so it's set once here instead. Same
+# palette dashboard.py's own _OV_HEX_CYCLE uses for Plotly figures.
+chartCategoricalColors = ["#534ab7", "#7f77dd", "#1d9e75", "#5dcaa5", "#ef9f27", "#378add", "#d85a30", "#d4537e"]
+
+[theme.light]
+primaryColor = "#185fa5"
+backgroundColor = "#f6f5f0"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1a1a18"
+borderColor = "#a8a69c"
+linkColor = "#185fa5"
+codeBackgroundColor = "#eeede6"
+dataframeBorderColor = "#e0ded5"
+dataframeHeaderBackgroundColor = "#eeede6"
+redColor = "#a32d2d"
+redBackgroundColor = "#fcebeb"
+greenColor = "#0f6e56"
+greenBackgroundColor = "#e1f5ee"
+orangeColor = "#854f0b"
+orangeBackgroundColor = "#faeeda"
+yellowColor = "#854f0b"
+yellowBackgroundColor = "#faeeda"
+blueColor = "#185fa5"
+blueBackgroundColor = "#e6f1fb"
+violetColor = "#534ab7"
+violetBackgroundColor = "#eeedfe"
+grayColor = "#5f5e5a"
+grayBackgroundColor = "#eeede6"
+
+[theme.light.sidebar]
+backgroundColor = "#eeede6"
+secondaryBackgroundColor = "#ffffff"
+borderColor = "#e0ded5"
+
+[theme.dark]
+primaryColor = "#378add"
+backgroundColor = "#161619"
+secondaryBackgroundColor = "#2a2a2e"
+textColor = "#ececea"
+borderColor = "#5c5c60"
+linkColor = "#85b7eb"
+codeBackgroundColor = "#222225"
+dataframeBorderColor = "#38383c"
+dataframeHeaderBackgroundColor = "#222225"
+redColor = "#f09595"
+redBackgroundColor = "#471414"
+greenColor = "#5dcaa5"
+greenBackgroundColor = "#08402f"
+orangeColor = "#fac775"
+orangeBackgroundColor = "#3d2404"
+yellowColor = "#fac775"
+yellowBackgroundColor = "#3d2404"
+blueColor = "#85b7eb"
+blueBackgroundColor = "#0b3a66"
+violetColor = "#afa9ec"
+violetBackgroundColor = "#292361"
+grayColor = "#a8a7a2"
+grayBackgroundColor = "#222225"
+
+[theme.dark.sidebar]
+backgroundColor = "#222225"
+secondaryBackgroundColor = "#2a2a2e"
+borderColor = "#38383c"
