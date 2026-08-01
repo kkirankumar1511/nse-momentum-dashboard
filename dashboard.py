@@ -22,7 +22,10 @@ monthly rebalance + daily stop checks). No AI/LLM anywhere in this app.
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
+import html as html_lib
+import math
 import os
 
 import pandas as pd
@@ -251,59 +254,627 @@ FUNDAMENTALS_HISTORY_CACHE = os.path.join("cache", "fundamentals_history.pkl")
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _pnl_color(val) -> str:
-    """Green for gains, red for losses -- used on every P&L-shaped column
-    (pnl, ret_pct, unrealized_*, Alpha %, ...) across the whole app so a
-    losing row is never just a plain number next to a winning one."""
-    if pd.isna(val):
-        return ""
-    if val > 0:
-        return "color: #16a34a; font-weight: 600"
-    if val < 0:
-        return "color: #dc2626; font-weight: 600"
-    return ""
-
-
-def colored_metric(label: str, value: float, fmt: str = "₹{:,.0f}") -> None:
-    """A st.metric substitute for headline P&L-shaped numbers. st.metric
-    only ever colors its DELTA text green/red, never the main value --
-    which meant Realized/Unrealized/Total P&L sat there in plain,
-    sign-less text no different from a loss to a gain. Same green/red
-    convention as _pnl_color/pnl_style (#16a34a / #dc2626), rendered as
-    markdown since no dataframe/delta is involved here. Only the number
-    is colored, not the label, so it still reads fine in both light and
-    dark themes."""
-    color = "#16a34a" if value >= 0 else "#dc2626"
-    st.markdown(
-        f"<div style='font-size:0.875rem; opacity:0.75; margin-bottom:0.1rem'>{label}</div>"
-        f"<div style='font-size:1.75rem; font-weight:600; color:{color}; "
-        f"line-height:1.2'>{fmt.format(value)}</div>",
-        unsafe_allow_html=True)
-
-
-def _status_color(val) -> str:
-    """Open positions get a green badge, closed a neutral gray -- used on
-    the Tradebook's status column so open/closed reads at a glance instead
-    of as plain text next to everything else."""
-    if val == "open":
-        return "background-color: #16a34a; color: white; font-weight: 600; border-radius: 4px"
-    if val == "closed":
-        return "background-color: #6b7280; color: white; font-weight: 600; border-radius: 4px"
-    return ""
-
-
-def _rebalance_status_color(val) -> str:
-    """Rebalance History's proposed/executed/error/expired badge -- green
-    for a completed action, amber for still-pending, red for a failure,
-    gray for a proposal superseded by a newer scan before it was acted on."""
-    colors = {
-        "executed": "#16a34a", "proposed": "#d97706",
-        "error": "#dc2626", "expired": "#6b7280",
+_OVERVIEW_CSS = """
+<style>
+:root {
+    --ov-surface-2: #ffffff; --ov-text-primary: #1a1a18;
+    --ov-text-secondary: #5f5e5a; --ov-text-muted: #8a8983;
+    --ov-green-d: #0f6e56; --ov-green: #1d9e75; --ov-green-l: #e1f5ee;
+    --ov-red-d: #a32d2d; --ov-red: #e24b4a; --ov-red-l: #fcebeb;
+    --ov-amber-d: #854f0b; --ov-amber: #ef9f27; --ov-amber-l: #faeeda;
+    --ov-blue-d: #185fa5; --ov-blue: #378add; --ov-blue-l: #e6f1fb;
+    --ov-purple-d: #534ab7; --ov-purple: #7f77dd; --ov-purple-l: #eeedfe;
+    --ov-teal: #5dcaa5; --ov-coral: #d85a30;
+    --ov-pink-d: #993556; --ov-pink: #d4537e; --ov-pink-l: #fbeaf0;
+    --ov-surface-1: #eeede6; --ov-border: #e0ded5; --ov-border-strong: #a8a69c;
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --ov-surface-2: #2a2a2e; --ov-text-primary: #ececea;
+        --ov-text-secondary: #a8a7a2; --ov-text-muted: #7c7b76;
+        --ov-green-l: #08402f; --ov-red-l: #471414; --ov-amber-l: #3d2404;
+        --ov-blue-l: #0b3a66; --ov-purple-l: #292361; --ov-pink-l: #451527;
+        --ov-green-d: #5dcaa5; --ov-red-d: #f09595; --ov-amber-d: #fac775;
+        --ov-blue-d: #85b7eb; --ov-purple: #afa9ec; --ov-purple-d: #afa9ec;
+        --ov-teal: #5dcaa5; --ov-coral: #f0997b; --ov-pink-d: #ed93b1;
+        --ov-surface-1: #222225; --ov-border: #38383c; --ov-border-strong: #5c5c60;
     }
-    color = colors.get(val)
-    if not color:
-        return ""
-    return f"background-color: {color}; color: white; font-weight: 600; border-radius: 4px"
+}
+/* ---- global compaction: match the mockup's density ----
+   Streamlit defaults measured on 1.59.2: main padding 96/80/160px, block
+   gap 16px, buttons 40px min-height, metric values 36px, alert padding
+   16px, divider margin 32px -- all far looser than the mockup (page
+   padding 14-20px, gaps 6-10px, 12px buttons, 16px metric values). */
+[data-testid="stMainBlockContainer"] {
+    padding: 1.2rem 1.4rem 3rem !important;
+    max-width: 1120px !important; margin: 0 auto;
+}
+/* [data-testid="stAppToolbar"] never matched anything -- the actual
+   testid Streamlit renders is "stHeader" (the outer bar) / "stToolbar"
+   (the Deploy/menu strip inside it); "stAppToolbar" is only a CSS class
+   name, not the testid. toolbarMode="minimal" already suppresses Deploy/
+   hamburger content on its own. This bar only renders (non-null, with an
+   OPAQUE background) once the sidebar is collapsed, specifically to host
+   the expand-sidebar arrow -- that's what was painting over the brandbar
+   chips right after collapsing. Keep the bar (needed for that arrow) but
+   force it transparent so it never covers content underneath. */
+[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; }
+[data-testid="stMainBlockContainer"] [data-testid="stVerticalBlock"] { gap: 0.45rem; }
+[data-testid="stMainBlockContainer"] hr { margin: 10px 0 !important; }
+[data-testid="stCaptionContainer"] p { font-size: 11px !important; }
+
+.stButton button, [data-testid="stFormSubmitButton"] button,
+[data-testid="stDownloadButton"] button {
+    min-height: 1.9rem !important; padding: 3px 12px !important;
+}
+.stButton button p, [data-testid="stFormSubmitButton"] button p,
+[data-testid="stDownloadButton"] button p { font-size: 12px !important; font-weight: 500 !important; }
+
+[data-testid="stWidgetLabel"] { min-height: 0 !important; margin-bottom: 1px !important; }
+[data-testid="stWidgetLabel"] p {
+    font-size: 11px !important; color: var(--ov-text-muted) !important; font-weight: 500 !important;
+}
+.stCheckbox { min-height: 0 !important; }
+.stCheckbox p, .stRadio p { font-size: 12px !important; }
+.stNumberInput input, .stTextInput input, .stDateInput input {
+    padding: 5px 10px !important; font-size: 12.5px !important;
+}
+.stNumberInput button { min-height: 0 !important; }
+[data-baseweb="select"] > div { min-height: 2rem !important; font-size: 12.5px !important; }
+/* 1.59's selectbox is a custom input+button combo, no data-baseweb hook */
+[data-testid="stSelectbox"] > div > div { height: 2.1rem !important; min-height: 2.1rem !important; }
+[data-baseweb="menu"] li { font-size: 12.5px !important; }
+.stMultiSelect [data-baseweb="tag"] { font-size: 11px !important; }
+
+[data-testid="stAlertContainer"] { padding: 6px 10px !important; border-radius: 6px !important; }
+[data-testid="stAlertContainer"] p { font-size: 11.5px !important; margin-bottom: 0 !important; }
+
+[data-testid="stMetric"] {
+    background: var(--ov-surface-2); border-top: 2px solid var(--ov-blue);
+    border-radius: 8px; padding: 8px 10px;
+}
+[data-testid="stMetricValue"] { font-size: 16px !important; font-weight: 700; padding-bottom: 0 !important; }
+[data-testid="stMetricLabel"] p {
+    font-size: 11px !important; color: var(--ov-text-muted) !important; font-weight: 500 !important;
+}
+[data-testid="stMetricDelta"] { font-size: 11px !important; }
+
+[data-testid="stExpander"] details {
+    background: var(--ov-surface-2); border: 1px solid var(--ov-border) !important;
+    border-radius: 10px !important;
+}
+[data-testid="stExpander"] summary { min-height: 0 !important; padding: 8px 13px !important; }
+[data-testid="stExpander"] summary p, [data-testid="stExpander"] summary span {
+    font-size: 12.5px !important; font-weight: 600 !important;
+}
+[data-testid="stExpander"] details > div { padding: 2px 13px 10px !important; }
+
+[data-testid="stForm"] {
+    background: var(--ov-surface-2); border: 1px solid var(--ov-border-strong) !important;
+    border-radius: 10px !important; padding: 10px 13px !important;
+}
+.st-key-ov_sync button {
+    font-size:12px !important; padding:5px 11px !important; min-height:0 !important;
+    height:auto !important; border-radius:8px !important; width:auto !important;
+}
+/* Sync button is taken out of the chips' flex flow entirely (see the
+   .st-key-ov-topbar rule below) -- pinned to this container's top-right
+   corner instead of sharing a row/column with the chips, so it can't
+   overlap the logo or squeeze the chips into wrapping no matter the
+   window width. That's what repeated column/flex-ratio attempts here
+   kept fighting. */
+.st-key-ov_sync { position:absolute !important; top:2px !important; right:0 !important; }
+/* Divider line under the whole brandbar row, and the positioning
+   context for the absolutely-placed Sync button above. */
+.st-key-ov-topbar {
+    position:relative !important;
+    border-bottom:1px solid var(--ov-border) !important;
+    padding-bottom:12px !important; margin-bottom:6px !important;
+    padding-right:40px !important;
+}
+.st-key-ov_logout button {
+    background:var(--ov-red) !important; color:#fff !important; border:none !important;
+    border-radius:999px !important; font-weight:700 !important; text-transform:uppercase !important;
+    letter-spacing:.03em !important; font-size:11px !important; padding:5px 13px !important;
+    min-height:0 !important; height:auto !important; width:auto !important;
+}
+/* "Run today's scan" header button (Live Rebalance, manual mode) -- push
+   it to the right edge of its column. align-items:flex-end on the outer
+   stColumn still left a gap before the true page edge; margin-left:auto
+   on the button's own element container is the same technique that
+   reliably worked for the Sync icon button earlier -- it pushes flush
+   right regardless of the parent's flex-direction. */
+[data-testid="stColumn"]:has(.st-key-lr_run_scan_hdr) { display:flex !important; }
+.st-key-lr_run_scan_hdr { margin-left:auto !important; width:fit-content !important; }
+/* Segmented control's real root is [data-testid="stButtonGroup"] (found
+   by reading Streamlit's own source -- button_group.py/ButtonGroup.*.js
+   -- after several guesses at the wrong element failed). It has exactly
+   two children: the label (with an optional help/tooltip icon) and the
+   pill row; by default these stack vertically, which is why "Auto-
+   refresh" kept landing above the pills instead of beside them. */
+.st-key-pt_refresh_interval [data-testid="stButtonGroup"] {
+    display:flex !important; flex-direction:row !important;
+    align-items:center !important; gap:8px !important; flex-wrap:nowrap !important;
+    justify-content:flex-end !important;
+}
+.st-key-pt_refresh_interval label {
+    padding:3px 8px !important; font-size:11px !important; white-space:nowrap !important;
+}
+/* The "(?)" help icon next to the label -- shrink it to match the
+   compact pills instead of its default (larger) size. */
+.st-key-pt_refresh_interval [data-testid="stTooltipIcon"] {
+    width:14px !important; height:14px !important; font-size:11px !important;
+}
+/* Verified via a real headless-browser DOM inspection (Playwright) that
+   stButtonGroup was ALREADY stretched to full column width thanks to
+   this width cascade -- so margin-left:auto had nothing to push into
+   (no slack space existed anywhere in the chain). The actual fix is the
+   justify-content:flex-end added above, on stButtonGroup's OWN flex
+   layout, pushing its label+pills to ITS OWN right edge. */
+.st-key-pt_refresh_row,
+.st-key-pt_refresh_row [data-testid="stVerticalBlock"],
+.st-key-pt_refresh_row [data-testid="stElementContainer"] {
+    width:100% !important;
+}
+.st-key-ov_logout button:hover { filter:brightness(0.9) !important; color:#fff !important; }
+.st-key-ov_logout button p { color:#fff !important; }
+/* Screener header: "Fetch fundamental score" checkbox + "Run screen"
+   button, side by side and right-aligned instead of stacked. Confirmed
+   via DOM inspection that st.container(key=...)'s class lands directly
+   on the stVerticalBlock that arranges its own children -- no need to
+   reach into a nested selector here. */
+.st-key-screen_run_row {
+    display:flex !important; flex-direction:row !important;
+    align-items:center !important; justify-content:flex-end !important; gap:12px !important;
+}
+/* Fundamentals header: the info popover + "Run value score scan" button,
+   side by side and right-aligned, same technique. */
+.st-key-fund_scan_row {
+    display:flex !important; flex-direction:row !important;
+    align-items:center !important; justify-content:flex-end !important; gap:12px !important;
+}
+/* Every text/number/date/select/multiselect input's actual bordered
+   wrapper has border:1px solid #fff by default (found via DOM inspection)
+   -- an invisible white border against the light background, which is why
+   "no border appears" on ANY form field app-wide. Selectboxes render as
+   react-aria-ComboBox; multiselect renders classic BaseWeb instead (its
+   bordered box is the DIRECT child of [data-baseweb="select"]); text/
+   number/date inputs use stable testids. All safe to select on directly
+   and applied app-wide rather than per-key. */
+.react-aria-ComboBox > div,
+[data-testid="stTextInputRootElement"],
+[data-testid="stNumberInputContainer"],
+[data-testid="stDateInput"] div[data-baseweb="input"],
+[data-baseweb="select"] > div {
+    border:1px solid var(--ov-border-strong) !important;
+}
+.st-key-value_score_detail_sym .react-aria-ComboBox > div {
+    justify-content:flex-start !important;
+}
+.st-key-value_score_detail_sym input { text-align:left !important; }
+/* Requested directly via an emotion-hash class found in dev tools --
+   unlike the testid/library-class selectors elsewhere in this file,
+   emotion hashes like this can change on a Streamlit version bump or
+   even a rebuild, so if this stops matching later that's why. */
+.st-emotion-cache-eqh6wq { margin-bottom:0rem !important; }
+.st-key-fund_sector_filter { max-width:140px !important; }
+/* Slider track thickness -- found via DOM inspection (rail is normally
+   only 3.5px tall). The component-identity suffix classes (e23vpic5 = rail,
+   e23vpic3 = thumb/fill) are shared by EVERY slider instance, unlike the
+   emotion-cache-XXXXXX prefix which is regenerated per-instance based on
+   the rail's inline width % -- so targeting the prefix only thickened
+   whichever slider happened to hash-collide with the rule. Scoped under
+   the stable [data-testid="stSlider"] testid as a fallback safety net. */
+[data-testid="stSlider"] [class*="e23vpic5"],
+[data-testid="stSlider"] [class*="e23vpic3"] {
+    height:8px !important;
+}
+/* Live Rebalance's "Execute all ..." action buttons -- solid color,
+   full-width, matching the mockup's rose/green execute bars. Disabled
+   state keeps the color but dims it so it doesn't read as just another
+   plain gray Streamlit button once the confirm checkbox is ticked. */
+.st-key-lr_execute_sells button {
+    background:var(--ov-red) !important; color:#fff !important; border:none !important;
+}
+.st-key-lr_execute_sells button:hover:not(:disabled) { filter:brightness(0.92) !important; color:#fff !important; }
+.st-key-lr_execute_sells button p { color:#fff !important; }
+.st-key-lr_execute_buys button {
+    background:var(--ov-green) !important; color:#fff !important; border:none !important;
+}
+.st-key-lr_execute_buys button:hover:not(:disabled) { filter:brightness(0.92) !important; color:#fff !important; }
+.st-key-lr_execute_buys button p { color:#fff !important; }
+.st-key-lr_execute_sells button:disabled, .st-key-lr_execute_buys button:disabled {
+    opacity:0.45 !important; color:#fff !important;
+}
+.st-key-lr_execute_sells button:disabled p, .st-key-lr_execute_buys button:disabled p { color:#fff !important; }
+/* Admin's "Delete entry" button (Ledger) -- outlined red, distinct from
+   the blue primary "Save changes" button next to it. */
+.st-key-admin_ledger_delete_btn button { color:var(--ov-red) !important; border-color:var(--ov-red) !important; }
+.st-key-admin_ledger_delete_btn button p { color:var(--ov-red) !important; }
+.st-key-admin_ledger_delete_btn button:hover { background:var(--ov-red-l) !important; }
+/* Admin Ledger's manually-built table (st.columns per row instead of
+   _ov_table_html) -- needed so each row's radio-select button can be a
+   real Streamlit widget lined up with plain-text cells. .ov-manual-th/
+   .ov-manual-cell mirror .ov-table's th/td font sizing so it still reads
+   as "the same table style" as every other page. */
+.ov-manual-th { font-weight:600; font-size:12px; color:var(--ov-text-muted); }
+.ov-manual-th.r, .ov-manual-cell.r { display:block; text-align:right; }
+.ov-manual-cell { font-size:12px; color:var(--ov-text-primary); }
+/* No border-bottom here -- _ov_table_html's header row has none either;
+   the single separator line under it comes from the first data row's own
+   border-top below, same as every other table. A border here too was
+   drawing a doubled/thicker line under the header than every other table. */
+.st-key-admin_ledger_head { padding-bottom:2px; }
+/* Markdown wraps a lone <span> in a <p>, which carries the browser's
+   default ~1em paragraph margin -- that's what was ballooning each row to
+   ~47px tall instead of the ~30px every other table uses. */
+.st-key-admin_ledger_rows [data-testid="stMarkdownContainer"] p,
+.st-key-admin_ledger_head [data-testid="stMarkdownContainer"] p {
+    margin:0 !important;
+}
+.st-key-admin_ledger_rows { gap:0 !important; }
+.st-key-admin_ledger_rows [data-testid="stHorizontalBlock"] {
+    border-top:1px solid var(--ov-border); padding:2px 0; align-items:center;
+}
+.st-key-admin_ledger_rows [data-testid="stButton"] button {
+    background:transparent !important; border:none !important; padding:0 !important;
+    min-height:0 !important; height:auto !important; font-size:15px !important;
+    color:var(--ov-text-secondary) !important; line-height:1 !important;
+}
+.st-key-admin_ledger_rows [data-testid="stButton"] button:hover {
+    color:var(--ov-blue) !important; background:transparent !important;
+}
+/* Positions & Trade's "Place stop-loss" and "Square off"/"Execute order"
+   buttons -- solid blue, full-width, matching the mockup. */
+.st-key-manual_sl_place button, .st-key-trade_execute button {
+    background:var(--ov-blue) !important; color:#fff !important; border:none !important;
+}
+.st-key-manual_sl_place button:hover:not(:disabled),
+.st-key-trade_execute button:hover:not(:disabled) { filter:brightness(0.92) !important; color:#fff !important; }
+.st-key-manual_sl_place button p, .st-key-trade_execute button p { color:#fff !important; }
+.st-key-manual_sl_place button:disabled, .st-key-trade_execute button:disabled {
+    opacity:0.45 !important; color:#fff !important;
+}
+.st-key-manual_sl_place button:disabled p, .st-key-trade_execute button:disabled p { color:#fff !important; }
+/* No extra left offset here -- the sidebar's own default content padding
+   already lines this up with the page-link tabs/section labels above it. */
+.st-key-ov_logout { margin:0 4px !important; }
+.ov-header { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
+.ov-h1 { font-size:19px; font-weight:700; margin:0; color:var(--ov-text-primary); }
+.ov-sub { font-size:12px; color:var(--ov-text-muted); font-weight:400; }
+.ov-chips { display:flex; gap:6px; align-items:center; flex-wrap:wrap; flex-shrink:0; }
+.ov-chip { font-size:11.5px; padding:4px 10px; border-radius:11px; font-weight:500; white-space:nowrap; }
+.ov-info-icon { cursor:help; font-size:13px; margin-left:4px; }
+.ov-chip-accent { background:var(--ov-blue-l); color:var(--ov-blue-d); }
+.ov-chip-success { background:var(--ov-green-l); color:var(--ov-green-d); }
+.ov-chip-amber { background:var(--ov-amber-l); color:var(--ov-amber-d); }
+.ov-chip-danger { background:var(--ov-red-l); color:var(--ov-red-d); }
+.ov-chip-muted { background:var(--ov-surface-1); color:var(--ov-text-secondary); }
+.ov-grid-metrics { display:grid; grid-template-columns:repeat(auto-fit, minmax(100px,1fr)); gap:8px; margin-bottom:10px; }
+.ov-metric { background:var(--ov-surface-2); border-radius:8px; padding:8px 10px; border-top:2px solid var(--ov-border); }
+.ov-metric.t-blue { border-top-color:var(--ov-blue); }
+.ov-metric.t-purple { border-top-color:var(--ov-purple); }
+.ov-metric.t-teal { border-top-color:var(--ov-teal); }
+.ov-metric.t-amber { border-top-color:var(--ov-amber); }
+.ov-metric.t-green { border-top-color:var(--ov-green); }
+.ov-metric.t-coral { border-top-color:var(--ov-coral); }
+.ov-metric.t-red { border-top-color:var(--ov-red); }
+.ov-metric.t-pink { border-top-color:var(--ov-pink); }
+.ov-metric .ov-label { font-size:11px; color:var(--ov-text-muted); margin:0; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ov-metric .ov-value { font-size:16px; font-weight:700; margin:1px 0 0; color:var(--ov-text-primary); }
+.ov-metric .ov-note { font-size:11px; color:var(--ov-text-secondary); margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ov-pos { color:var(--ov-green-d) !important; }
+.ov-neg { color:var(--ov-red-d) !important; }
+[class*="st-key-ov-card-"] {
+    border-radius:10px !important; background:var(--ov-surface-2) !important;
+    border:1px solid var(--ov-border) !important;
+    padding:10px 13px !important; gap:0.35rem !important;
+}
+.ov-card { background:var(--ov-surface-2); border:1px solid var(--ov-border); border-radius:10px; padding:10px 13px; margin-bottom:10px; }
+.ov-two-col { display:grid; grid-template-columns:repeat(auto-fit, minmax(290px,1fr)); gap:10px; margin-bottom:10px; }
+.ov-two-col .ov-card { margin-bottom:0; }
+.ov-muted { color:var(--ov-text-muted); font-size:11.5px; margin:0 0 4px; font-weight:600; text-transform:uppercase; letter-spacing:.03em; }
+.ov-card-title {
+    font-size:13px; font-weight:700; margin:0 0 10px; display:flex; align-items:center;
+    gap:7px; color:var(--ov-text-primary); padding-bottom:8px;
+    border-bottom:1px solid var(--ov-border);
+}
+.ov-dot { width:7px; height:7px; border-radius:50%; display:inline-block; }
+.ov-card-meta { font-size:11px; color:var(--ov-text-secondary); }
+.ov-order-preview {
+    font-size:11.5px; font-weight:700; color:var(--ov-blue-d); margin-left:auto;
+}
+.ov-table { width:100%; font-size:12px; border-collapse:collapse; }
+/* Only horizontal (row) separators, matching the mockup -- no vertical
+   lines between columns, ever, regardless of any inherited default. */
+.ov-table th, .ov-table td { border-left:none !important; border-right:none !important; }
+.ov-table th { font-weight:600; padding:4px 8px; text-align:left; color:var(--ov-text-muted); white-space:nowrap; }
+/* white-space:nowrap is the actual fix for tables blowing up to ~68px
+   row height on wide tables (e.g. Fundamentals' "Ranked" with ~19
+   columns) -- a cell like "31-MAR-2026" was wrapping to 3 lines when its
+   column got squeezed too narrow, and since a table row's height is the
+   MAX of all its cells, that one wrapped cell stretched the entire row.
+   Forcing single-line cells means the table just scrolls horizontally
+   (.ov-tbl-scroll already supports that) instead of wrapping vertically. */
+.ov-table td { padding:5px 8px; border-top:1px solid var(--ov-border); color:var(--ov-text-primary); white-space:nowrap; }
+.ov-table th.r, .ov-table td.r { text-align:right; }
+/* Wide tables (e.g. Fundamentals' "Ranked" with ~19 columns) get cut off
+   hard at the container's right edge when they need to scroll, while
+   narrower tables (e.g. Holdings) end cleanly with nothing to scroll --
+   that abrupt cutoff on the wide ones was reading as an inconsistent
+   "extra border" rather than an obviously-scrollable table. A visible,
+   styled scrollbar (instead of the browser's default, easy to miss one)
+   makes the scrollability clear so it looks intentional either way. */
+.ov-tbl-scroll {
+    overflow-x:auto; margin-bottom:6px;
+    scrollbar-width:thin; scrollbar-color:var(--ov-border-strong) transparent;
+}
+.ov-tbl-scroll::-webkit-scrollbar { height:6px; }
+.ov-tbl-scroll::-webkit-scrollbar-track { background:transparent; }
+.ov-tbl-scroll::-webkit-scrollbar-thumb { background:var(--ov-border-strong); border-radius:3px; }
+/* "Review rebalance orders" sits directly under the proposal rows with
+   no breathing room, making the last row read as if the button were
+   cutting it off -- give the button's own element-container a top gap. */
+[class*="st-key-ov_review_rebal"] { margin-top:10px !important; }
+.ov-sym { font-weight:700; }
+.ov-badge { padding:1px 8px; border-radius:9px; font-size:11px; font-weight:600; white-space:nowrap; }
+.ov-badge-green { background:var(--ov-green-l); color:var(--ov-green-d); }
+.ov-badge-red { background:var(--ov-red-l); color:var(--ov-red-d); }
+.ov-badge-amber { background:var(--ov-amber-l); color:var(--ov-amber-d); }
+.ov-badge-blue { background:var(--ov-blue-l); color:var(--ov-blue-d); }
+.ov-badge-purple { background:var(--ov-purple-l); color:var(--ov-purple-d); }
+.ov-badge-pink { background:var(--ov-pink-l); color:var(--ov-pink-d); }
+.ov-badge-gray { background:var(--ov-surface-1); color:var(--ov-text-secondary); }
+.ov-row { display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid var(--ov-border); font-size:12px; color:var(--ov-text-primary); gap:8px; }
+.ov-row:last-of-type { border-bottom:none; }
+.ov-minibar { position:relative; height:7px; background:var(--ov-surface-1); border-radius:4px; }
+.ov-minibar .ov-fill { position:absolute; left:0; top:0; height:7px; border-radius:4px; }
+.ov-minibar .ov-tick { position:absolute; left:80%; top:-2px; width:2px; height:11px; background:var(--ov-border-strong); }
+.ov-allocbar { display:flex; height:16px; border-radius:6px; overflow:hidden; margin-bottom:6px; }
+.ov-sector-row { margin-bottom:7px; }
+.ov-sector-row:last-child { margin-bottom:0; }
+.ov-sector-head { display:flex; justify-content:space-between; font-size:11.5px; margin-bottom:2px; color:var(--ov-text-primary); gap:6px; }
+.ov-sector-bar { height:7px; background:var(--ov-surface-1); border-radius:4px; }
+.ov-sector-fill { height:7px; border-radius:4px; }
+/* padding-left is 5px, not 10px, so the 3px left border + padding lands
+   at ~8px total inset -- matching the table cells' own 8px padding
+   above it, instead of sitting ~5px further right/misaligned. */
+.ov-alert { margin-top:0; padding:4px 8px 4px 5px; border-radius:6px; background:var(--ov-amber-l); color:var(--ov-amber-d); font-size:11px; border-left:3px solid var(--ov-amber); }
+.ov-alert-success { background:var(--ov-green-l); color:var(--ov-green-d); border-left-color:var(--ov-green); }
+.ov-alert-info { background:var(--ov-blue-l); color:var(--ov-blue-d); border-left-color:var(--ov-blue); }
+.ov-donut-wrap { display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+.ov-donut-legend { flex:1; min-width:170px; }
+.ov-sw { display:inline-block; width:9px; height:9px; border-radius:2px; vertical-align:-1px; margin-right:4px; }
+
+/* ---- sidebar / side menu, matching the mockup's .side/.side-label/.tab ---- */
+[data-testid="stSidebar"] { background:var(--ov-surface-1) !important; }
+[data-testid="stSidebar"] [data-testid="stElementContainer"] {
+    margin-bottom:0 !important;
+}
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap:0.1rem !important; }
+/* The pill is the ANCHOR (stPageLink-NavLink), not the outer stPageLink
+   container -- padding/hover/active must live on the anchor or the
+   highlight renders as a thin strip inside a padded box. */
+section[data-testid="stSidebar"][aria-expanded="true"] {
+    width:205px !important; max-width:205px !important; min-width:205px !important;
+    box-sizing:border-box !important; overflow-x:hidden !important;
+}
+[data-testid="stSidebarContent"], [data-testid="stSidebarUserContent"] {
+    overflow-x:hidden !important; max-width:100% !important; box-sizing:border-box !important;
+    padding-top:12px !important;
+}
+[data-testid="stSidebarHeader"] { height:auto !important; min-height:0 !important; }
+[data-testid="stSidebar"] [data-testid="stPageLink"] {
+    padding:0 !important; margin:0 !important; min-height:0 !important;
+}
+[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"] {
+    border-radius:8px !important; padding:5px 10px !important; width:100%;
+    background:transparent;
+}
+[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"]:hover { background:var(--ov-surface-2) !important; }
+[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"] span {
+    font-size:12.5px !important; font-weight:600 !important; color:var(--ov-text-secondary) !important;
+}
+/* Active page: blue pill, exactly like the mockup's checked tab. The
+   aria-current attribute is stamped by the small script in the sidebar
+   block (Streamlit itself gives the current link no stable marker). */
+[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"][aria-current="page"] {
+    background:var(--ov-blue-l) !important;
+}
+[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"][aria-current="page"] span {
+    color:var(--ov-blue-d) !important;
+}
+[data-testid="stSidebar"] hr { margin:8px 0 !important; }
+[data-testid="stSidebarUserContent"] { padding-bottom:1rem !important; }
+.ov-side-label {
+    font-size:10.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--ov-text-muted); margin:0 4px !important;
+}
+/* Space around a section label lives on ITS OWN element-container (via
+   margin-top/padding-bottom), not on the <p> itself -- a margin on the
+   <p> sits inside a container whose margin-bottom is already forced to 0
+   above, which was silently eating the intended gap. margin-top pushes
+   the label away from the PREVIOUS section's last tab; padding-bottom
+   (never collapses) pushes the FIRST tab of this section away from the
+   label text, on top of the small 0.1rem inter-tab gap. */
+[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(.ov-side-label) {
+    margin-top:12px !important;
+    padding-bottom:12px !important;
+}
+/* "Trading" is now the sidebar's first element (brand moved to the top
+   page brandbar) -- a smaller top gap for the very first label than the
+   shared 12px the rule above gives Audit Trail/Testing, since there's no
+   preceding tab to separate it from, just the sidebar's own edge. */
+[data-testid="stSidebar"] [data-testid="stElementContainer"]:first-child:has(.ov-side-label) {
+    margin-top:4px !important;
+}
+.ov-brand { font-size:15px; font-weight:700; color:var(--ov-text-primary); line-height:1.3; }
+.ov-brand .ov-sub {
+    display:block; font-weight:400; font-size:12px; color:var(--ov-text-muted); margin-top:1px;
+}
+.ov-topbar-logo { display:block; height:50px; width:auto; }
+</style>
+"""
+
+_OV_TONE_CYCLE = ["blue", "purple", "teal", "amber", "green", "coral"]
+_OV_HEX_CYCLE = ["#534ab7", "#7f77dd", "#1d9e75", "#5dcaa5", "#ef9f27",
+                "#378add", "#d85a30", "#d4537e"]
+
+
+def _ov_table_html(df: pd.DataFrame, columns: list[str] | None = None,
+                   badges: dict | None = None, pnl_cols: list[str] | None = None,
+                   num_fmt: dict | None = None, sym_cols: list[str] | None = None,
+                   na_rep: str = "—") -> str:
+    """Renders a DataFrame as the mockup's compact .ov-table -- plain HTML,
+    no Streamlit dataframe chrome (sort/resize/selection). Used for every
+    purely-DISPLAY table site-wide: none of these ever used row-selection
+    or in-place editing, only the Overview holdings table (click-through to
+    Tradebook) and the equity chart do, and those stay real Streamlit
+    widgets -- this never trades away functionality, just chrome.
+
+    columns: ordered column list to show (default: every column in df).
+    badges: {col: {value: css_class}} or {col: callable(value) -> css_class}
+        -- renders that cell as a colored pill instead of plain text.
+    pnl_cols: columns whose sign colors the cell green/red (also bolded).
+    num_fmt: {col: format_spec} for numeric columns (right-aligned).
+    sym_cols: columns rendered bold (e.g. the symbol column).
+    """
+    columns = columns or list(df.columns)
+    num_fmt = num_fmt or {}
+    badges = badges or {}
+    pnl_cols = set(pnl_cols or [])
+    sym_cols = set(sym_cols or [])
+    right_cols = set(num_fmt) | pnl_cols
+
+    def _label(c):
+        return COLUMN_LABELS.get(c, c.replace("_", " ").title())
+
+    header = "".join(
+        f'<th{" class=\"r\"" if c in right_cols else ""}>{html_lib.escape(_label(c))}</th>'
+        for c in columns)
+
+    rows_html = []
+    for _, row in df.iterrows():
+        cells = []
+        for c in columns:
+            v = row[c]
+            r_attr = ' class="r"' if c in right_cols else ""
+            sym_cls = "ov-sym" if c in sym_cols else ""
+            if pd.isna(v):
+                cells.append(f'<td{r_attr}><span class="{sym_cls}">{na_rep}</span></td>')
+            elif c in badges:
+                mapping = badges[c]
+                css = mapping(v) if callable(mapping) else mapping.get(v, "ov-badge-gray")
+                cells.append(f'<td{r_attr}><span class="ov-badge {css}">'
+                            f'{html_lib.escape(str(v))}</span></td>')
+            elif c in pnl_cols:
+                fv = float(v)
+                cls = "ov-pos" if fv >= 0 else "ov-neg"
+                fmt = num_fmt.get(c, "{:+,.2f}")
+                cells.append(f'<td{r_attr}><span class="{cls} ov-sym">'
+                            f'{fmt.format(fv)}</span></td>')
+            elif c in num_fmt:
+                cells.append(f'<td{r_attr}><span class="{sym_cls}">'
+                            f'{num_fmt[c].format(v)}</span></td>')
+            else:
+                cells.append(f'<td><span class="{sym_cls}">{html_lib.escape(str(v))}</span></td>')
+        rows_html.append(f"<tr>{''.join(cells)}</tr>")
+
+    return (f'<div class="ov-tbl-scroll"><table class="ov-table">'
+           f'<tr>{header}</tr>{"".join(rows_html)}</table></div>')
+
+
+def _ov_page_slice(df: pd.DataFrame, key: str, page_size: int = 10) -> pd.DataFrame:
+    """Returns just the current page's slice of `df` -- tables render
+    everything via raw HTML (_ov_table_html), so there's no native
+    st.dataframe pagination to lean on; this keeps long tables (e.g. the
+    full screener universe) from dumping hundreds of rows at once. Pairs
+    with _ov_pagination_controls() using the SAME (df, key, page_size) --
+    call that AFTER the table so the Prev/Next strip sits below it, not
+    above. Page position is kept in st.session_state under a name derived
+    from `key`, so multiple tables on the same page paginate independently."""
+    n = len(df)
+    n_pages = max(1, math.ceil(n / page_size))
+    state_key = f"_ov_page_{key}"
+    page = min(st.session_state.get(state_key, 0), n_pages - 1)
+    start = page * page_size
+    return df.iloc[start:start + page_size]
+
+
+def _ov_pagination_controls(df: pd.DataFrame, key: str, page_size: int = 10) -> None:
+    """Prev/Next control strip for the table already sliced by
+    _ov_page_slice() with this SAME (df, key, page_size) -- render this
+    right after the table so it appears below it."""
+    n = len(df)
+    n_pages = max(1, math.ceil(n / page_size))
+    if n_pages <= 1:
+        return
+    state_key = f"_ov_page_{key}"
+    page = min(st.session_state.get(state_key, 0), n_pages - 1)
+    pc1, pc2, pc3 = st.columns([1, 3, 1])
+    with pc1:
+        if st.button("← Prev", key=f"{key}_pg_prev", disabled=page <= 0,
+                    use_container_width=True):
+            st.session_state[state_key] = page - 1
+            st.rerun()
+    with pc2:
+        st.markdown(
+            f'<p class="ov-card-meta" style="text-align:center;margin:6px 0;">'
+            f'Page {page + 1} of {n_pages} ({n} rows)</p>', unsafe_allow_html=True)
+    with pc3:
+        if st.button("Next →", key=f"{key}_pg_next", disabled=page >= n_pages - 1,
+                    use_container_width=True):
+            st.session_state[state_key] = page + 1
+            st.rerun()
+
+
+def _ov_order_status_cls(v: str) -> str:
+    """Badge color for a raw Kite order status string."""
+    v = str(v).upper()
+    if v in ("COMPLETE", "COMPLETED"):
+        return "ov-badge-green"
+    if v in ("OPEN", "TRIGGER PENDING", "PENDING", "PUT ORDER REQ RECEIVED"):
+        return "ov-badge-amber"
+    if v in ("REJECTED", "CANCELLED"):
+        return "ov-badge-red"
+    return "ov-badge-gray"
+
+
+def _ov_donut_svg(values: list[float], center_label: str) -> str:
+    """A hand-drawn ring-arc donut (stacked stroke-dasharray circles) --
+    matches the compact hand-styled look used elsewhere on this page
+    instead of a full Plotly figure (no hover/click needed here, so the
+    lighter-weight static SVG costs nothing functionally)."""
+    total = sum(values) or 1.0
+    r = 44
+    circumference = 2 * math.pi * r
+    offset = 0.0
+    circles = []
+    for i, value in enumerate(values):
+        color = _OV_HEX_CYCLE[i % len(_OV_HEX_CYCLE)]
+        dash = value / total * circumference
+        gap = circumference - dash
+        circles.append(
+            f'<circle cx="60" cy="60" r="{r}" fill="none" stroke="{color}" '
+            f'stroke-width="18" stroke-dasharray="{dash:.1f} {gap:.1f}" '
+            f'stroke-dashoffset="{-offset:.1f}" transform="rotate(-90 60 60)"/>')
+        offset += dash
+    return (f'<svg viewBox="0 0 120 120" width="104" height="104" role="img">'
+           + "".join(circles) +
+           f'<text x="60" y="57" text-anchor="middle" style="font-size:14px;font-weight:700;" '
+           f'fill="currentColor">{center_label}</text></svg>')
+
+
+def _ov_metric_html(label: str, value: str, note: str | None = None,
+                    note_cls: str = "", tone: str = "blue",
+                    value_cls: str = "") -> str:
+    """One metric-card's HTML -- callers join several of these into one
+    `<div class="ov-grid-metrics">...</div>` and render with a SINGLE
+    st.markdown call, so the whole dense metrics strip is one lightweight
+    DOM write instead of 9 separate bordered st.container widgets."""
+    note_html = f'<p class="ov-note {note_cls}">{note}</p>' if note else ""
+    return (f'<div class="ov-metric t-{tone}"><p class="ov-label">{label}</p>'
+           f'<p class="ov-value {value_cls}">{value}</p>{note_html}</div>')
 
 
 # Raw/snake_case field name -> human-readable table header, applied by
@@ -326,7 +897,7 @@ COLUMN_LABELS = {
     "suggested_stop": "Suggested stop", "stop": "Stop",
     "gtt_active": "GTT active", "gtt_trigger_id": "GTT trigger ID",
     "days_held": "Days held", "holding_days": "Days held",
-    "source": "Source", "reason": "Reason",
+    "source": "Source", "reason": "Reason", "skip": "Skip?",
     "product": "Product", "status": "Status",
     "transaction_type": "Type", "order_timestamp": "Time",
     "unrealized_pnl": "Unrealized P&L", "unrealized_ret_pct": "Unrealized return %",
@@ -335,15 +906,15 @@ COLUMN_LABELS = {
     "value": "Current value (₹)", "allocation_pct": "Allocation %",
     "run_id": "Run ID", "run_time": "Run time", "action_type": "Action",
     "detail": "Reason/Detail", "resolved_at": "Resolved at",
-    "current_qty": "Current qty",
+    "current_qty": "Current qty", "rank": "Momentum rank",
 
     # Screener / momentum
     "score": "Score", "price": "Price", "rs_3m": "RS 3M", "rs_6m": "RS 6M",
     "pct_52w_high": "% of 52W high", "rsi": "RSI",
     "vol_expansion": "Vol expansion", "atr_pct": "ATR %",
     "fundamental_score": "Fundamental score", "fundamental_rubric": "Sector rubric",
-    "trend_ok": "Trend OK", "near_high_ok": "Near high OK", "rsi_ok": "RSI OK",
-    "quality_ok": "Quality OK", "quality_fails": "Quality fails",
+    "trend_ok": "Trend", "near_high_ok": "Near-high", "rsi_ok": "RSI",
+    "quality_ok": "Quality", "quality_fails": "Quality fails",
 
     # Fundamentals (Value Score)
     "total_score": "Score (0-100)", "rubric": "Sector", "roe": "ROE %",
@@ -375,31 +946,6 @@ COLUMN_LABELS = {
     "realized_pnl": "Realized P&L",
     "realized_ret_pct": "Realized return %",
 }
-
-
-def readable_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Renames every column present in COLUMN_LABELS to its human-readable
-    label. Columns not in the dict (already-readable, author-chosen labels
-    like a yearly-performance table's "Strategy %") pass through unchanged."""
-    return df.rename(columns=COLUMN_LABELS)
-
-
-def pnl_style(df: pd.DataFrame, cols: list[str] | None = None, fmt: dict | None = None,
-             na_rep: str = "—"):
-    """Renames columns via readable_df(), then applies optional numeric
-    formatting and green/red P&L coloring -- the one function every styled
-    table in this app goes through. `cols`/`fmt` are given in the ORIGINAL
-    (pre-rename) field names -- remapped internally, so call sites don't
-    need to track the renamed labels themselves."""
-    df = readable_df(df)
-    cols = [COLUMN_LABELS.get(c, c) for c in (cols or []) if COLUMN_LABELS.get(c, c) in df.columns]
-    fmt = {COLUMN_LABELS.get(k, k): v for k, v in (fmt or {}).items()}
-    styler = df.style
-    if fmt:
-        styler = styler.format(fmt, na_rep=na_rep)
-    if cols:
-        styler = styler.map(_pnl_color, subset=cols)
-    return styler
 
 
 def merged_holdings() -> pd.DataFrame:
@@ -500,14 +1046,198 @@ def _annualized_returns(portfolio_value: float,
 # Page: Overview
 # ---------------------------------------------------------------------------
 
-def page_cockpit():
-    st.subheader("🏠 Overview")
-    st.caption("Calendar-entry momentum system — everything that matters, at a glance.")
+def _is_market_hours(now: dt.datetime | None = None) -> bool:
+    """NSE cash-market hours, weekday-only approximation (no holiday
+    calendar) -- good enough for gating a display-only auto-refresh so it
+    doesn't keep polling Kite every 30s all night for numbers that can't
+    have changed."""
+    now = now or dt.datetime.now()
+    return now.weekday() < 5 and dt.time(9, 15) <= now.time() <= dt.time(15, 30)
 
+
+@st.cache_data(ttl="6h", show_spinner=False)
+def _benchmark_cagr_since(start_date_iso: str) -> float | None:
+    """NIFTY 50's own annualized return (XIRR of a single buy-and-hold from
+    `start_date_iso` to today) -- the correct apples-to-apples comparison
+    for 'Alpha vs NIFTY50' against the portfolio's own overall XIRR (both
+    annualized, so a young account and an old one are compared fairly).
+    Cached 6h: this is a real Kite historical-data network call and index
+    closes don't meaningfully change within a session."""
+    try:
+        start_date = dt.date.fromisoformat(start_date_iso)
+        days = max((dt.date.today() - start_date).days + 5, 30)
+        bench = kite_client.benchmark_candles(days)
+        if bench.empty:
+            return None
+        if bench.index.tz is not None:
+            bench = bench.set_axis(bench.index.tz_localize(None))
+        bench = bench[bench.index >= pd.Timestamp(start_date)]
+        if len(bench) < 2:
+            return None
+        start_price = float(bench["close"].iloc[0])
+        end_price = float(bench["close"].iloc[-1])
+        return indicators.xirr([(start_date, -1.0), (dt.date.today(), end_price / start_price)])
+    except Exception:
+        return None
+
+
+@st.cache_data
+def _asset_data_uri(filename: str) -> str | None:
+    """Any assets/ image as an inline data URI -- embedded rather than
+    referenced by path since Streamlit doesn't serve arbitrary project
+    directories by default. Cached so each file is only read/base64-
+    encoded once per process, not on every script rerun."""
+    path = os.path.join("assets", filename)
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return "data:image/png;base64," + base64.b64encode(f.read()).decode("ascii")
+
+
+def _sidebar_logo_data_uri() -> str | None:
+    return _asset_data_uri("logo.png")
+
+
+def _max_drawdown_pct(equity_log: pd.DataFrame) -> float | None:
+    """Largest peak-to-trough decline in the logged total-capital series so
+    far, as a negative percentage -- pure arithmetic on data the equity
+    chart already reads, no new storage or network call."""
+    if equity_log.empty or len(equity_log) < 2:
+        return None
+    vals = equity_log["value"].astype(float)
+    running_peak = vals.cummax()
+    drawdown = (vals - running_peak) / running_peak.replace(0, pd.NA)
+    dd = drawdown.min()
+    return float(dd) * 100 if pd.notna(dd) else None
+
+
+def _load_screen_cache() -> pd.DataFrame | None:
+    """The last screener run's ranked table (written by both the Screener
+    page's 'Run screen' button and every rebalance scan -- see
+    screener.run_screen()'s caching note). Used for a live 'rank' column
+    on Holdings and the Watchlist card; gracefully returns None if no scan
+    has ever run yet rather than erroring the whole Overview page."""
+    try:
+        if os.path.exists(SCREEN_CACHE):
+            return pd.read_pickle(SCREEN_CACHE)
+    except Exception:
+        pass
+    return None
+
+
+@st.fragment(run_every="30s" if _is_market_hours() else None)
+def _live_kpi_row():
+    """The Overview page's top KPI strip, isolated into its own fragment so
+    it can tick on a timer without rerunning (and re-fetching Kite data
+    for) the rest of the page -- equity chart, holdings table, funds
+    breakdown all stay exactly as they render today. Every value here is
+    independently re-fetched fresh each tick via the SAME functions the
+    page already used (merged_holdings(), kite_client.get_margins(),
+    state_db.get_realized_pnl()/get_equity_log(), _annualized_returns()) --
+    no calculation logic duplicated or changed, just called again on a
+    schedule. The 30s timer itself is only armed during market hours (see
+    the decorator above) so an open tab doesn't keep re-rendering/polling
+    Kite all night for numbers that can't have moved; the still-present
+    _is_market_hours() branch below covers the same tab staying open
+    across the market open/close transition within one session."""
+    if _is_market_hours():
+        live_merged = merged_holdings()
+        try:
+            live_cash = kite_client.get_margins()["equity"]["available"]["live_balance"]
+        except Exception:
+            live_cash = available_cash
+    else:
+        live_merged = merged_holdings()
+        live_cash = available_cash
+
+    live_invested = float((live_merged["qty"] * live_merged["avg_price"]).sum()) if not live_merged.empty else 0.0
+    live_holdings_value = float((live_merged["qty"] * live_merged["ltp"]).sum()) if not live_merged.empty else 0.0
+    live_unrealized_pnl = float(live_merged["pnl"].sum()) if not live_merged.empty else 0.0
+    live_portfolio_value = live_cash + live_holdings_value
+    live_realized_pnl = state_db.get_realized_pnl()
+    live_total_pnl = live_realized_pnl + live_unrealized_pnl
+    live_current_xirr, live_overall_xirr = _annualized_returns(
+        live_portfolio_value, state_db.get_equity_log())
+
+    unrealized_pct = (live_unrealized_pnl / live_invested * 100) if live_invested else None
+    pct_deployed = (live_invested / live_portfolio_value * 100) if live_portfolio_value else None
+
+    # Day's gain/loss: today's live total capital vs the most recent
+    # logged snapshot BEFORE today (i.e. last night's close) -- the same
+    # equity_log the performance chart already reads, no new storage.
+    _day_log = state_db.get_equity_log()
+    _prior_day_log = _day_log[_day_log["date"] < dt.date.today().isoformat()]
+    _day_start_value = float(_prior_day_log.iloc[-1]["value"]) if not _prior_day_log.empty else None
+    day_change = (live_portfolio_value - _day_start_value) if _day_start_value else None
+    day_change_pct = (day_change / _day_start_value * 100) if _day_start_value else None
+
+    max_dd = _max_drawdown_pct(_day_log)
+    alpha = None
+    if live_overall_xirr is not None and not _day_log.empty:
+        bench_cagr = _benchmark_cagr_since(_day_log.iloc[0]["date"])
+        if bench_cagr is not None:
+            alpha = (live_overall_xirr - bench_cagr) * 100
+
+    _refresh_note = ("🟢 live" if _is_market_hours() else "⚪ market closed")
+    st.markdown(
+        '<div class="ov-header" style="margin-bottom:14px;">'
+        '<div><span class="ov-h1">Overview</span> '
+        '<span class="ov-sub">· everything at a glance</span></div>'
+        f'<span class="ov-card-meta">{_refresh_note} · '
+        f'last updated {dt.datetime.now():%H:%M:%S}</span>'
+        '</div>', unsafe_allow_html=True)
+
+    metrics_html = "".join([
+        _ov_metric_html(
+            "Total capital", f"₹{live_portfolio_value:,.0f}",
+            (f"{day_change:+,.0f} today" if day_change is not None else "no prior snapshot yet"),
+            "ov-pos" if (day_change or 0) >= 0 else "ov-neg", "blue"),
+        _ov_metric_html("Invested", f"₹{live_invested:,.0f}", "Cost basis", "", "purple"),
+        _ov_metric_html(
+            "Holdings", f"₹{live_holdings_value:,.0f}",
+            (f"{unrealized_pct:+.1f}% MTM" if unrealized_pct is not None else None),
+            "ov-pos" if (unrealized_pct or 0) >= 0 else "ov-neg", "teal"),
+        _ov_metric_html(
+            "Cash", f"₹{live_cash:,.0f}",
+            (f"{pct_deployed:.0f}% deployed" if pct_deployed is not None else None),
+            "", "amber"),
+        _ov_metric_html(
+            "Total P&L", f"₹{live_total_pnl:+,.0f}",
+            f"₹{live_unrealized_pnl:+,.0f} unrealized",
+            "ov-pos" if live_unrealized_pnl >= 0 else "ov-neg", "green",
+            "ov-pos" if live_total_pnl >= 0 else "ov-neg"),
+        _ov_metric_html(
+            "XIRR — year",
+            f"{live_current_xirr * 100:+.1f}%" if live_current_xirr is not None else "—",
+            "Annualized", "", "green",
+            "ov-pos" if (live_current_xirr or 0) >= 0 else "ov-neg"),
+        _ov_metric_html(
+            "XIRR — overall",
+            f"{live_overall_xirr * 100:+.1f}%" if live_overall_xirr is not None else "—",
+            "Inception", "", "green",
+            "ov-pos" if (live_overall_xirr or 0) >= 0 else "ov-neg"),
+        _ov_metric_html(
+            "Alpha vs NIFTY50", f"{alpha:+.1f}%" if alpha is not None else "—",
+            "vs index CAGR, same period", "", "blue",
+            "ov-pos" if (alpha or 0) >= 0 else "ov-neg"),
+        _ov_metric_html(
+            "Max drawdown", f"{max_dd:.1f}%" if max_dd is not None else "—",
+            "Peak to trough", "", "coral"),
+    ])
+    st.markdown(f'<div class="ov-grid-metrics">{metrics_html}</div>', unsafe_allow_html=True)
+
+    if live_overall_xirr is None:
+        st.caption("XIRR needs at least one logged deposit and one portfolio "
+                  "value snapshot — log a deposit on the Admin page (or fund "
+                  "the account) to start tracking annualized return.")
+
+
+def page_cockpit():
     merged = merged_holdings()
+    if not merged.empty:
+        merged["value"] = merged["qty"] * merged["ltp"]
     invested_amount = float((merged["qty"] * merged["avg_price"]).sum()) if not merged.empty else 0.0
-    holdings_value = float((merged["qty"] * merged["ltp"]).sum()) if not merged.empty else 0.0
-    unrealized_pnl = float(merged["pnl"].sum()) if not merged.empty else 0.0
+    holdings_value = float(merged["value"].sum()) if not merged.empty else 0.0
     portfolio_value = available_cash + holdings_value
 
     if portfolio_value > 0:
@@ -523,167 +1253,316 @@ def page_cockpit():
                   "snapshot (likely a Kite connection issue, not a real "
                   "zero balance). Check the Kite login if this persists.")
     state_db.ensure_first_cash_flow_captured(available_cash)
-    realized_pnl = state_db.get_realized_pnl()
-    total_pnl = realized_pnl + unrealized_pnl
-    current_xirr, overall_xirr = _annualized_returns(portfolio_value, log)
 
-    unrealized_pct = (unrealized_pnl / invested_amount * 100) if invested_amount else None
-    pct_deployed = (invested_amount / portfolio_value * 100) if portfolio_value else None
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Invested amount", f"₹{invested_amount:,.0f}",
-             help="Cost basis of everything you currently hold (qty × avg. buy "
-                  "price) -- how much cash is actually tied up in stocks right now.")
-    k2.metric("Current holdings value", f"₹{holdings_value:,.0f}",
-             delta=(f"₹{unrealized_pnl:+,.0f} ({unrealized_pct:+.1f}%)"
-                    if unrealized_pct is not None else None),
-             help="Same holdings, marked to today's price -- the delta is your "
-                  "unrealized P&L vs the invested amount.")
-    k3.metric("Available cash", f"₹{available_cash:,.0f}",
-             help="Sitting uninvested -- not in any stock right now.")
-    k4.metric("Total capital", f"₹{portfolio_value:,.0f}",
-             help="Available cash + current holdings value -- everything the "
-                  "strategy has to work with.")
-    k5.metric("% deployed", f"{pct_deployed:.0f}%" if pct_deployed is not None else "—",
-             help="Invested amount ÷ total capital -- how much of your money is "
-                  "actually working vs sitting idle as cash. Naturally lower "
-                  "while max_positions is small relative to your account size, "
-                  "or right after a sell before the next buy fills the slot.")
+    _live_kpi_row()
 
-    k6, k7, k8, k9 = st.columns(4)
-    with k6:
-        colored_metric("Realized P&L", realized_pnl)
-    with k7:
-        colored_metric("Unrealized P&L", unrealized_pnl)
-    with k8:
-        colored_metric("Total P&L", total_pnl)
-    k9.metric("Open positions", f"{len(merged)} / {config.STRATEGY['max_positions']}")
+    col_chart, col_positions = st.columns(2)
 
-    k10, k11 = st.columns(2)
-    with k10:
-        st.caption("Annualized return (XIRR) — this year")
-        if current_xirr is not None:
-            colored_metric("", current_xirr * 100, fmt="{:+.1f}%")
-        else:
-            st.markdown("—")
-    with k11:
-        st.caption("Annualized return (XIRR) — overall")
-        if overall_xirr is not None:
-            colored_metric("", overall_xirr * 100, fmt="{:+.1f}%")
-        else:
-            st.markdown("—")
-    if overall_xirr is None:
-        st.caption("XIRR needs at least one logged deposit and one portfolio "
-                  "value snapshot — log a deposit on the Admin page (or fund "
-                  "the account) to start tracking annualized return.")
+    with col_chart:
+      with st.container(border=True, key="ov-card-chart"):
+        if len(log) > 1:
+            plot_log_full = log.copy()
+            plot_log_full["date"] = pd.to_datetime(plot_log_full["date"])
 
-    if len(log) > 1:
-        plot_log = log.copy()
-        plot_log["date"] = pd.to_datetime(plot_log["date"])
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=plot_log["date"], y=plot_log["value"], name="Total capital (₹)",
-            mode="lines+markers", line=dict(color="#16a34a", width=2),
-            marker=dict(size=5),
-            hovertemplate="₹%{y:,.0f}<extra>Total capital</extra>"))
-        if plot_log["invested_amount"].notna().any():
+            _range_days = {"1W": 7, "1M": 30, "3M": 90, "6M": 182, "1Y": 365, "All": None}
+            _range_choice = st.segmented_control(
+                "Range", list(_range_days), default="All", required=True,
+                key="perf_range", label_visibility="collapsed")
+            _cutoff_days = _range_days[_range_choice]
+            if _cutoff_days:
+                _cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=_cutoff_days)
+                plot_log = plot_log_full[plot_log_full["date"] >= _cutoff].reset_index(drop=True)
+                if len(plot_log) < 2:
+                    # Not enough history in the selected window yet -- fall
+                    # back to the full series rather than show a near-empty
+                    # chart for a brand-new account.
+                    plot_log = plot_log_full
+            else:
+                plot_log = plot_log_full
+
+            fig = go.Figure()
             fig.add_trace(go.Scatter(
-                x=plot_log["date"], y=plot_log["invested_amount"],
-                name="Invested amount (₹)", mode="lines+markers",
-                line=dict(color="#6b7280", width=1.5, dash="dot"),
+                x=plot_log["date"], y=plot_log["value"], name="Total capital (₹)",
+                mode="lines+markers", line=dict(color="#16a34a", width=2),
                 marker=dict(size=5),
-                hovertemplate="₹%{y:,.0f}<extra>Invested amount</extra>"))
-        # No fill-to-zero and an explicit, padded y-range -- with a small
-        # account and only a few days of history, the day-to-day move is
-        # tiny relative to the absolute total (e.g. ~2.5% over 4 days), so
-        # an axis forced to include ₹0 (which "fill: tozeroy" does) squashes
-        # that real movement into an invisible sliver at the top: the chart
-        # LOOKS flat/broken even though the underlying data is fine. Padding
-        # off the actual min/max instead makes real day-to-day change
-        # visible regardless of how large the total balance is.
-        all_vals = pd.concat([plot_log["value"], plot_log["invested_amount"]]).dropna()
-        y_lo, y_hi = float(all_vals.min()), float(all_vals.max())
-        pad = (y_hi - y_lo) * 0.15 or max(y_hi * 0.02, 100.0)
-        fig.update_layout(
-            title=dict(text="Portfolio value over time", x=0, xanchor="left"),
-            height=420, margin=dict(l=10, r=10, t=60, b=10),
-            hovermode="x unified",
-            yaxis=dict(tickprefix="₹", separatethousands=True,
-                      range=[y_lo - pad, y_hi + pad]),
-            legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0))
-        st.plotly_chart(fig, width="stretch")
-        if plot_log["invested_amount"].isna().any():
-            st.caption("Invested amount only started being logged recently — "
-                      "earlier days show a gap until enough history builds up.")
-    else:
-        st.caption("Portfolio value is logged once a day when you open this page — "
-                  "the chart builds up over time as you keep using the dashboard.")
+                hovertemplate="₹%{y:,.0f}<extra>Total capital</extra>"))
+            if plot_log["invested_amount"].notna().any():
+                fig.add_trace(go.Scatter(
+                    x=plot_log["date"], y=plot_log["invested_amount"],
+                    name="Invested amount (₹)", mode="lines+markers",
+                    line=dict(color="#6b7280", width=1.5, dash="dot"),
+                    marker=dict(size=5),
+                    hovertemplate="₹%{y:,.0f}<extra>Invested amount</extra>"))
+            # No fill-to-zero and an explicit, padded y-range -- with a small
+            # account and only a few days of history, the day-to-day move is
+            # tiny relative to the absolute total (e.g. ~2.5% over 4 days), so
+            # an axis forced to include ₹0 (which "fill: tozeroy" does) squashes
+            # that real movement into an invisible sliver at the top: the chart
+            # LOOKS flat/broken even though the underlying data is fine. Padding
+            # off the actual min/max instead makes real day-to-day change
+            # visible regardless of how large the total balance is.
+            all_vals = pd.concat([plot_log["value"], plot_log["invested_amount"]]).dropna()
+            y_lo, y_hi = float(all_vals.min()), float(all_vals.max())
+            pad = (y_hi - y_lo) * 0.15 or max(y_hi * 0.02, 100.0)
+            fig.update_layout(
+                title=dict(text="Portfolio value over time", x=0, xanchor="left"),
+                height=340, margin=dict(l=10, r=10, t=50, b=10),
+                hovermode="x unified",
+                yaxis=dict(tickprefix="₹", separatethousands=True,
+                          range=[y_lo - pad, y_hi + pad]),
+                legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0))
+            chart_selection = st.plotly_chart(
+                fig, width="stretch", on_select="rerun", selection_mode="points",
+                key="equity_chart_select")
+            if plot_log["invested_amount"].isna().any():
+                st.caption("Invested amount only started being logged recently — "
+                          "earlier days show a gap until enough history builds up.")
+            st.caption("Click a point on the chart above for that day's detail.")
 
-    st.divider()
-    st.subheader("Holdings")
-    if merged.empty:
-        st.caption("No open positions or holdings.")
-    else:
-        held = set(merged["symbol"])
-        stale = state_db.get_stale_open_symbols(held)
-        exit_prices = kite_client.get_ltp(stale) if stale else {}
-        state = state_db.reconciled_positions(held, exit_prices)
-        merged["value"] = merged["qty"] * merged["ltp"]
-        total_value = merged["value"].sum()
-        merged["allocation_pct"] = (merged["value"] / total_value * 100
-                                    if total_value else 0.0)
-        merged["entry_date"] = merged["symbol"].map(
-            lambda s: state.get(s, {}).get("entry_date", "—"))
-        merged["days_held"] = merged["symbol"].map(
-            lambda s: (dt.date.today() - dt.date.fromisoformat(state[s]["entry_date"])).days
-            if s in state else None)
-        merged["current_stop"] = merged["symbol"].map(
-            lambda s: state.get(s, {}).get("current_stop"))
-        merged["gtt_active"] = merged["symbol"].map(
-            lambda s: "✅" if state.get(s, {}).get("gtt_trigger_id") else "❌")
-        st.dataframe(
-            pnl_style(merged.sort_values("value", ascending=False), ["pnl"],
-                     {"avg_price": "{:.2f}", "ltp": "{:.2f}", "pnl": "{:,.0f}",
-                      "current_stop": "{:.2f}", "value": "₹{:,.0f}",
-                      "allocation_pct": "{:.1f}%"}, na_rep="—"),
-            width="stretch", hide_index=True)
+            _clicked_points = chart_selection.selection.points if chart_selection else []
+            if _clicked_points:
+                _idx = _clicked_points[0]["point_index"]
+                _day = plot_log.iloc[_idx]
+                _prev = plot_log.iloc[_idx - 1] if _idx > 0 else None
+                with st.expander(f"📅 {_day['date']:%d %b %Y} detail", expanded=True):
+                    dc1, dc2, dc3 = st.columns(3)
+                    dc1.metric("Total capital", f"₹{_day['value']:,.0f}",
+                              delta=(f"₹{_day['value'] - _prev['value']:+,.0f} vs prev. day"
+                                    if _prev is not None else None))
+                    _day_invested = _day["invested_amount"]
+                    _prev_invested = _prev["invested_amount"] if _prev is not None else None
+                    dc2.metric("Invested amount",
+                              f"₹{_day_invested:,.0f}" if pd.notna(_day_invested) else "—",
+                              delta=(f"₹{_day_invested - _prev_invested:+,.0f} vs prev. day"
+                                    if pd.notna(_day_invested) and pd.notna(_prev_invested)
+                                    else None))
+                    _pct_deployed_day = (_day_invested / _day["value"] * 100
+                                         if pd.notna(_day_invested) and _day["value"] else None)
+                    dc3.metric("% deployed",
+                              f"{_pct_deployed_day:.0f}%" if _pct_deployed_day is not None else "—")
+        else:
+            st.caption("Portfolio value is logged once a day when you open this page — "
+                      "the chart builds up over time as you keep using the dashboard.")
 
-        st.caption("'Current stop'/'GTT active' above are this app's own "
-                  "tracked values.")
+    with col_positions:
+        with st.container(border=True, key="ov-card-positions"):
+            st.markdown(
+                '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+                '<span class="ov-dot" '
+                'style="background:var(--ov-purple);"></span>Positions '
+                '<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+                'By momentum rank</span></p>', unsafe_allow_html=True)
+            if merged.empty:
+                st.caption("No open positions or holdings.")
+            else:
+                _screen = _load_screen_cache()
+                _rank_map = {}
+                if _screen is not None and "score" in _screen.columns:
+                    _rank_map = {sym: i + 1 for i, sym in enumerate(_screen.index)}
+                _keep_zone = (config.STRATEGY.get("max_positions") or 0) * 2
 
-        st.markdown("**Capital allocation per stock**")
+                pos_desc = merged.sort_values("value", ascending=False).reset_index(drop=True)
+                pos_desc["rank"] = pos_desc["symbol"].map(_rank_map)
+
+                def _rank_badge_cls(v: str) -> str:
+                    if v == "—":
+                        return "ov-badge-gray"
+                    return "ov-badge-green" if int(v) <= _keep_zone else "ov-badge-red"
+
+                pos_desc["rank_fmt"] = pos_desc["rank"].apply(
+                    lambda v: str(int(v)) if pd.notna(v) else "—")
+                st.markdown(
+                    _ov_table_html(
+                        pos_desc, columns=["symbol", "value", "rank_fmt", "pnl"],
+                        sym_cols=["symbol"], pnl_cols=["pnl"],
+                        num_fmt={"value": "₹{:,.0f}"},
+                        badges={"rank_fmt": _rank_badge_cls}),
+                    unsafe_allow_html=True)
+
+                # Real, data-driven equivalent of the mockup's "likely
+                # exit" alert -- flags currently-held symbols the LAST
+                # rebalance scan actually proposed selling, not a guess.
+                _last_run_pos = state_db.get_last_rebalance_run()
+                if _last_run_pos is not None:
+                    _sells_pos = _last_run_pos.get("sells", pd.DataFrame())
+                    _at_risk = [s for s in pos_desc["symbol"] if not _sells_pos.empty
+                               and s in set(_sells_pos["symbol"])]
+                    if _at_risk:
+                        st.markdown(
+                            f'<div class="ov-alert">⚠ Likely exit next rebalance: '
+                            f'{", ".join(_at_risk)}</div>', unsafe_allow_html=True)
+
+    if not merged.empty:
+        # ---- Capital allocation per stock (weight vs equal-weight target,
+        # as a mini-bar drift gauge) + Asset allocation by sector (hand-
+        # drawn donut + legend) -- both pure static HTML/SVG (neither had a
+        # click-handler even as Plotly figures), rendered as ONE markdown
+        # call each so the two-column CSS grid actually lays them out
+        # side by side.
         max_positions = config.STRATEGY.get("max_positions") or 0
-        target_per_slot = portfolio_value / max_positions if max_positions else None
-        alloc_sorted = merged.sort_values("value", ascending=True)
-        bar_colors = ["#16a34a" if v >= (target_per_slot or 0) else "#f59e0b"
-                     for v in alloc_sorted["value"]]
-        alloc_fig = go.Figure()
-        alloc_fig.add_trace(go.Bar(
-            x=alloc_sorted["value"], y=alloc_sorted["symbol"], orientation="h",
-            marker_color=bar_colors,
-            hovertemplate="₹%{x:,.0f}<extra>%{y}</extra>"))
-        if target_per_slot:
-            alloc_fig.add_vline(
-                x=target_per_slot, line_dash="dash", line_color="#6b7280",
-                annotation_text=f"~Equal-weight target ₹{target_per_slot:,.0f}",
-                annotation_position="top")
-        alloc_fig.update_layout(
-            title=dict(text="Current allocation vs equal-weight target",
-                      x=0, xanchor="left"),
-            height=max(220, 45 * len(alloc_sorted)),
-            margin=dict(l=10, r=10, t=50, b=10),
-            xaxis=dict(title="Current value (₹)", tickprefix="₹",
-                      separatethousands=True),
-            showlegend=False)
-        st.plotly_chart(alloc_fig, width="stretch")
-        if target_per_slot:
-            st.caption(
-                f"Target is an approximation (total capital ÷ {max_positions} "
-                "slots) for a quick visual, not the exact figure Live "
-                "Rebalance computes off cash-pool-at-rebalance-time — green "
-                "= at/above it, amber = under-target and a candidate for a "
-                "future top-up when cash allows.")
-        st.page_link(page_positions_trade_p,
-                    label="Full GTT details + actions →", icon="🛑")
+        target_pct = 100.0 / max_positions if max_positions else None
+        total_value = float(merged["value"].sum())
+        alloc_desc = merged.sort_values("value", ascending=False).reset_index(drop=True)
+
+        allocbar_segments, alloc_rows = [], []
+        for i, row in alloc_desc.iterrows():
+            color = _OV_HEX_CYCLE[i % len(_OV_HEX_CYCLE)]
+            weight_pct = (row["value"] / total_value * 100) if total_value else 0.0
+            allocbar_segments.append(f'<div style="width:{weight_pct:.2f}%;background:{color};"></div>')
+            if target_pct:
+                drift = weight_pct - target_pct
+                fill_pct = min(100.0, (weight_pct / target_pct) * 80)
+                drift_cls = "ov-pos" if drift >= 0 else "ov-neg"
+                alloc_rows.append(
+                    f'<tr><td class="ov-sym">{row["symbol"]}</td><td>{weight_pct:.1f}%</td>'
+                    f'<td><div class="ov-minibar"><div class="ov-fill" '
+                    f'style="width:{fill_pct:.1f}%;background:{color};"></div>'
+                    f'<div class="ov-tick"></div></div></td>'
+                    f'<td class="r {drift_cls}">{drift:+.1f}%</td></tr>')
+            else:
+                alloc_rows.append(
+                    f'<tr><td class="ov-sym">{row["symbol"]}</td>'
+                    f'<td>{weight_pct:.1f}%</td><td></td><td class="r">—</td></tr>')
+        target_meta = f"Target {target_pct:.0f}% ±" if target_pct else ""
+        alloc_html = (
+            '<div class="ov-card"><p class="ov-card-title">'
+            '<span class="ov-dot" style="background:var(--ov-blue);"></span>'
+            f'Capital allocation per stock <span class="ov-card-meta" '
+            f'style="font-weight:400;margin-left:auto;">{target_meta}</span></p>'
+            f'<div class="ov-allocbar">{"".join(allocbar_segments)}</div>'
+            '<table class="ov-table"><tr><th>Symbol</th><th>Weight</th>'
+            '<th style="width:38%;">vs target</th><th class="r">Drift</th></tr>'
+            + "".join(alloc_rows) + '</table></div>')
+
+        donut_html = ""
+        try:
+            membership = su.get_sector_membership(verbose=False)
+            sector_of = merged["symbol"].map(lambda s: (membership.get(s) or ["Unclassified"])[0])
+            symbols_by_sector = merged.assign(sector=sector_of).groupby("sector")["symbol"] \
+                .apply(lambda s: ", ".join(s))
+            sector_group = (merged.assign(sector=sector_of).groupby("sector")["value"]
+                            .sum().sort_values(ascending=False))
+            donut_total = float(sector_group.sum()) or 1.0
+            legend_rows = []
+            for i, (sector, value) in enumerate(sector_group.items()):
+                color = _OV_HEX_CYCLE[i % len(_OV_HEX_CYCLE)]
+                pct = value / donut_total * 100
+                legend_rows.append(
+                    '<div class="ov-sector-row"><div class="ov-sector-head">'
+                    f'<span><span class="ov-sw" style="background:{color};"></span>'
+                    f'{sector} · {symbols_by_sector[sector]}</span>'
+                    f'<span class="ov-sym">{pct:.1f}%</span></div>'
+                    '<div class="ov-sector-bar"><div class="ov-sector-fill" '
+                    f'style="width:{pct:.1f}%;background:{color};"></div></div></div>')
+            n_sectors = len(sector_group)
+            svg = _ov_donut_svg(list(sector_group.values), str(n_sectors))
+            max_sector_pct = float((sector_group / donut_total * 100).max())
+            if max_sector_pct <= 25:
+                alert_html = ('<div class="ov-alert ov-alert-success">✓ Diversified — '
+                             'no sector above 25%</div>')
+            else:
+                top_sector = (sector_group / donut_total * 100).idxmax()
+                alert_html = (f'<div class="ov-alert">⚠ Concentrated — {top_sector} is '
+                             f'{max_sector_pct:.0f}% of the portfolio</div>')
+            donut_html = (
+                '<div class="ov-card"><p class="ov-card-title">'
+                '<span class="ov-dot" style="background:var(--ov-purple);"></span>'
+                'Asset allocation by sector <span class="ov-card-meta" '
+                'style="font-weight:400;margin-left:auto;">Concentration check</span></p>'
+                f'<div class="ov-donut-wrap">{svg}'
+                f'<div class="ov-donut-legend">{"".join(legend_rows)}</div></div>'
+                f'{alert_html}</div>')
+        except Exception as e:
+            donut_html = (
+                '<div class="ov-card"><p class="ov-card-title">Asset allocation by sector</p>'
+                f'<p class="ov-card-meta">Sector data unavailable right now: {e}</p></div>')
+
+        st.markdown(f'<div class="ov-two-col">{alloc_html}{donut_html}</div>',
+                   unsafe_allow_html=True)
+
+        # ---- Rebalance preview (real data from the last scan) + Watchlist
+        # (next-in-queue candidates from the cached screener ranking), laid
+        # out side by side like the allocation/donut row above -- these two
+        # have real Streamlit widgets inside (a button, cached data calls),
+        # so they need actual st.columns rather than the flattened
+        # single-markdown ov-two-col trick used for the pure-HTML cards.
+        _last_run = state_db.get_last_rebalance_run()
+        col_rebal, col_watch = st.columns(2)
+        with col_rebal:
+            with st.container(border=True, key="ov-card-rebal"):
+                _scan_meta = (f"as of {_last_run['run_time']:%d %b %H:%M}"
+                             if _last_run is not None else "")
+                st.markdown(
+                    '<p class="ov-card-title"><span class="ov-dot" '
+                    'style="background:var(--ov-amber);"></span>Rebalance preview '
+                    f'<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+                    f'{_scan_meta}</span></p>', unsafe_allow_html=True)
+                rebal_rows = []
+                if _last_run is not None:
+                    sells_df = _last_run.get("sells", pd.DataFrame())
+                    buys_df = _last_run.get("buys", pd.DataFrame())
+                    sold_syms = set(sells_df["symbol"]) if not sells_df.empty else set()
+                    for _, r in sells_df.iterrows():
+                        rebal_rows.append(
+                            '<div class="ov-row"><span><span class="ov-badge ov-badge-red">'
+                            f'Exit</span>&nbsp; {r["symbol"]}</span>'
+                            f'<span class="ov-card-meta">{r.get("reason", "")}</span></div>')
+                    for _, r in buys_df.iterrows():
+                        price = r.get("price")
+                        price_str = f"~₹{price:,.0f}" if pd.notna(price) else ""
+                        rebal_rows.append(
+                            '<div class="ov-row"><span><span class="ov-badge ov-badge-green">'
+                            f'Enter</span>&nbsp; {r["symbol"]}</span>'
+                            f'<span class="ov-card-meta">{price_str}</span></div>')
+                    hold_syms = ([s for s in merged["symbol"] if s not in sold_syms]
+                                if not merged.empty else [])
+                    if hold_syms:
+                        rebal_rows.append(
+                            '<div class="ov-row"><span><span class="ov-badge ov-badge-gray">'
+                            f'Hold</span>&nbsp; {", ".join(hold_syms)}</span>'
+                            '<span class="ov-card-meta">Within cutoff</span></div>')
+                if rebal_rows:
+                    st.markdown("".join(rebal_rows), unsafe_allow_html=True)
+                else:
+                    st.markdown('<p class="ov-card-meta">'
+                               + ("No changes proposed in the last scan." if _last_run is not None
+                                  else "No scan has run yet.") + "</p>", unsafe_allow_html=True)
+                if st.button("Review rebalance orders →", key="ov_review_rebal",
+                            type="primary", use_container_width=True):
+                    st.switch_page(page_live_rebalance_p)
+
+        with col_watch:
+            with st.container(border=True, key="ov-card-watchlist"):
+                st.markdown('<p class="ov-card-title"><span class="ov-dot" '
+                           'style="background:var(--ov-teal);"></span>'
+                           'Watchlist — next in queue</p>', unsafe_allow_html=True)
+                _screen = _load_screen_cache()
+                watch_rows = []
+                if _screen is not None and "all_gates" in _screen.columns:
+                    held_syms = set(merged["symbol"])
+                    buy_syms = (set(_last_run["buys"]["symbol"])
+                               if _last_run is not None and not _last_run.get(
+                                   "buys", pd.DataFrame()).empty else set())
+                    candidates = _screen[_screen["all_gates"]]
+                    for i, sym in enumerate(candidates.index):
+                        if sym in held_syms:
+                            continue
+                        rank = i + 1
+                        if sym in buy_syms:
+                            watch_rows.append(
+                                f'<div class="ov-row"><span class="ov-sym">{sym}</span>'
+                                f'<span class="ov-badge ov-badge-green">Rank {rank} · entering</span></div>')
+                        else:
+                            watch_rows.append(
+                                f'<div class="ov-row"><span class="ov-sym">{sym}</span>'
+                                f'<span class="ov-card-meta">Rank {rank} · reserve</span></div>')
+                        if len(watch_rows) >= 4:
+                            break
+                if watch_rows:
+                    st.markdown("".join(watch_rows), unsafe_allow_html=True)
+                else:
+                    st.markdown('<p class="ov-card-meta">Run a scan (Live Rebalance or '
+                               'Screener) to populate the watchlist.</p>', unsafe_allow_html=True)
 
     st.divider()
     with st.expander("Full funds breakdown (from Kite margins API)"):
@@ -701,307 +1580,383 @@ def page_cockpit():
             m = kite_client.get_margins()["equity"]
             fc1, fc2 = st.columns(2)
             with fc1:
-                st.write("**Available**")
-                st.dataframe(_breakdown_table(m["available"]),
-                            width="stretch", hide_index=True)
+                with st.container(border=True, key="ov-card-funds-available"):
+                    st.markdown('<p class="ov-card-title">Available</p>', unsafe_allow_html=True)
+                    st.markdown(_ov_table_html(_breakdown_table(m["available"])),
+                               unsafe_allow_html=True)
             with fc2:
-                st.write("**Utilised**")
-                st.dataframe(_breakdown_table(m["utilised"]),
-                            width="stretch", hide_index=True)
+                with st.container(border=True, key="ov-card-funds-utilised"):
+                    st.markdown('<p class="ov-card-title">Utilised</p>', unsafe_allow_html=True)
+                    st.markdown(_ov_table_html(_breakdown_table(m["utilised"])),
+                               unsafe_allow_html=True)
         except Exception as e:
             st.warning(f"Could not fetch funds breakdown: {e}")
+
+# ---------------------------------------------------------------------------
+# Page: Ledger
+# ---------------------------------------------------------------------------
+
+def page_ledger():
+    st.markdown(
+        '<div class="ov-header"><div><span class="ov-h1">💰 Ledger</span> '
+        '<span class="ov-sub">· The deposit/withdrawal ledger used for XIRR</span></div></div>',
+        unsafe_allow_html=True)
+
+    ledger = state_db.get_cash_flows()
+    _ledger_sel_id = st.session_state.get("_admin_ledger_sel_id")
+    _editing = (_ledger_sel_id is not None and not ledger.empty
+               and _ledger_sel_id in ledger["id"].values)
+
+    _cashflow_tip = html_lib.escape(
+        "Kite's API can't see bank transfers — this ledger is what keeps "
+        "XIRR accurate as you add money over time.")
+    with st.container(border=True, key="ov-card-admin-cashflow"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-green);"></span>💰 Log a deposit / withdrawal'
+            f'<span class="ov-info-icon" title="{_cashflow_tip}">ℹ️</span>'
+            + ('<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+               'Editing the entry selected below</span>' if _editing else '')
+            + '</p>', unsafe_allow_html=True)
+        if _editing:
+            _edit_row = ledger.set_index("id").loc[_ledger_sel_id]
+            _def_date = pd.to_datetime(_edit_row["date"]).date()
+            _def_amount = float(_edit_row["amount"])
+            _def_note = _edit_row["note"] or ""
+        else:
+            _def_date, _def_amount, _def_note = dt.date.today(), 0.0, ""
+        with st.form(f"cash_flow_form_{_ledger_sel_id if _editing else 'new'}",
+                     clear_on_submit=not _editing):
+            cff1, cff2 = st.columns(2)
+            cf_date = cff1.date_input("Date", value=_def_date)
+            cf_amount = cff2.number_input(
+                "Amount (₹) — + deposit / − withdrawal",
+                value=_def_amount, step=1000.0, format="%.2f")
+            cf_note = st.text_input("Note (optional)", value=_def_note)
+            if _editing:
+                fb1, fb2 = st.columns(2)
+                cf_submitted = fb1.form_submit_button(
+                    "Save changes", type="primary", use_container_width=True)
+                cf_delete_clicked = fb2.form_submit_button(
+                    "Delete entry", key="admin_ledger_delete_btn", use_container_width=True)
+            else:
+                cf_submitted = st.form_submit_button("Log cash flow", type="primary")
+                cf_delete_clicked = False
+        if cf_submitted:
+            if cf_amount == 0:
+                st.error("Amount can't be zero.")
+            elif _editing:
+                state_db.update_cash_flow(_ledger_sel_id, cf_date.isoformat(),
+                                          float(cf_amount), cf_note)
+                st.session_state["_admin_ledger_sel_id"] = None
+                st.success("Updated.")
+                st.rerun()
+            else:
+                state_db.record_cash_flow(cf_date.isoformat(), float(cf_amount), cf_note)
+                st.success("Logged.")
+                st.rerun()
+        if cf_delete_clicked:
+            state_db.delete_cash_flow(_ledger_sel_id)
+            st.session_state["_admin_ledger_sel_id"] = None
+            st.success("Deleted.")
+            st.rerun()
+        if _editing:
+            if st.button("+ Log a new entry instead", key="admin_ledger_new_entry_btn"):
+                st.session_state["_admin_ledger_sel_id"] = None
+                st.rerun()
+
+    with st.container(border=True, key="ov-card-admin-ledger"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-green);"></span>Ledger'
+            '<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+            'Select a row to edit or delete it above</span></p>',
+            unsafe_allow_html=True)
+        if ledger.empty:
+            st.caption("No cash flows logged yet.")
+        else:
+            display_ledger = ledger.sort_values("date", ascending=False).reset_index(drop=True)
+            display_ledger["date"] = pd.to_datetime(display_ledger["date"]).dt.date
+            ledger_page = _ov_page_slice(display_ledger, key="admin_ledger")
+
+            with st.container(key="admin_ledger_head"):
+                hh1, hh2, hh3, hh4 = st.columns([0.4, 1.3, 1.3, 2.4])
+                hh2.markdown('<span class="ov-manual-th">Date</span>', unsafe_allow_html=True)
+                hh3.markdown('<span class="ov-manual-th r">Amount (₹)</span>', unsafe_allow_html=True)
+                hh4.markdown('<span class="ov-manual-th">Note</span>', unsafe_allow_html=True)
+            with st.container(key="admin_ledger_rows"):
+                for _, r in ledger_page.iterrows():
+                    rid = int(r["id"])
+                    rc1, rc2, rc3, rc4 = st.columns([0.4, 1.3, 1.3, 2.4])
+                    with rc1:
+                        if st.button("●" if rid == _ledger_sel_id else "○",
+                                    key=f"admin_ledger_radio_{rid}",
+                                    help="Select to edit/delete"):
+                            st.session_state["_admin_ledger_sel_id"] = (
+                                None if rid == _ledger_sel_id else rid)
+                            st.rerun()
+                    amt = float(r["amount"])
+                    amt_cls = "ov-pos" if amt >= 0 else "ov-neg"
+                    rc2.markdown(f'<span class="ov-manual-cell">{r["date"]}</span>',
+                                unsafe_allow_html=True)
+                    rc3.markdown(
+                        f'<span class="ov-manual-cell r {amt_cls} ov-sym">{amt:+,.2f}</span>',
+                        unsafe_allow_html=True)
+                    rc4.markdown(
+                        f'<span class="ov-manual-cell">{html_lib.escape(r["note"] or "—")}</span>',
+                        unsafe_allow_html=True)
+            _ov_pagination_controls(display_ledger, key="admin_ledger")
+
 
 # ---------------------------------------------------------------------------
 # Page: Admin
 # ---------------------------------------------------------------------------
 
 def page_admin():
-    st.subheader("⚙️ Admin")
-    st.caption("Dashboard/Kite settings, the deposit/withdrawal ledger used "
-              "for XIRR, and strategy configuration.")
+    st.markdown(
+        '<div class="ov-header"><div><span class="ov-h1">⚙️ Admin</span> '
+        '<span class="ov-sub">Kite settings and strategy configuration</span></div></div>',
+        unsafe_allow_html=True)
 
     if state_db.is_using_default_dashboard_password(config.DASHBOARD_USERNAME, config.DASHBOARD_PASSWORD):
-        st.warning(
-            "⚠️ Using the default Admin/Admin login — this app places real "
-            "orders and shows real fund balances. Change it in the "
-            "\"Change dashboard password\" section below before using this "
-            "beyond your own machine."
-        )
+        st.markdown(
+            '<div class="ov-alert">⚠️ Using the default Admin/Admin login — '
+            'this app places real orders. Change it in "Change dashboard '
+            'password" below.</div>', unsafe_allow_html=True)
 
-    st.subheader("💰 Deposits / withdrawals")
-    st.caption("Kite's API has no visibility into bank transfers, so each "
-              "deposit/withdrawal is logged here manually — this ledger is "
-              "what makes the Overview page's XIRR figures accurate once "
-              "you start adding money over time, instead of just a single "
-              "starting-capital snapshot.")
-    with st.form("cash_flow_form", clear_on_submit=True):
-        cf_date = st.date_input("Date", value=dt.date.today())
-        cf_amount = st.number_input(
-            "Amount (₹) — positive for a deposit, negative for a withdrawal",
-            step=1000.0, format="%.2f")
-        cf_note = st.text_input("Note (optional)")
-        cf_submitted = st.form_submit_button("Log cash flow")
-    if cf_submitted:
-        if cf_amount == 0:
-            st.error("Amount can't be zero.")
-        else:
-            state_db.record_cash_flow(cf_date.isoformat(), float(cf_amount), cf_note)
-            st.success("Logged.")
-            st.rerun()
-
-    ledger = state_db.get_cash_flows()
-    if ledger.empty:
-        st.caption("No cash flows logged yet.")
-    else:
-        st.caption("Edit a value directly, delete a row via its trash icon "
-                  "(hover the row, far left), or add one right in the table "
-                  "-- then click Update. Nothing changes until you do.")
-        display_ledger = ledger.sort_values("date", ascending=False).reset_index(drop=True)
-        display_ledger["date"] = pd.to_datetime(display_ledger["date"]).dt.date
-        edited_ledger = st.data_editor(
-            display_ledger, hide_index=True, width="stretch",
-            key="cash_flow_editor", num_rows="dynamic",
-            column_config={
-                "id": None,  # internal row key, hidden from display
-                "date": st.column_config.DateColumn("Date"),
-                "amount": st.column_config.NumberColumn(
-                    "Amount (₹) — +deposit / -withdrawal", format="%.2f"),
-                "note": st.column_config.TextColumn("Note"),
-            })
-        if st.button("Update ledger", type="primary", key="cash_flow_update_btn"):
-            original_by_id = ledger.set_index("id")
-            edited_ids = set(edited_ledger["id"].dropna().astype(int))
-            deleted_ids = set(original_by_id.index) - edited_ids
-            changed = 0
-            for did in deleted_ids:
-                state_db.delete_cash_flow(int(did))
-                changed += 1
-            for _, row in edited_ledger.iterrows():
-                if row["date"] is None or pd.isna(row["amount"]) or row["amount"] == 0:
-                    continue  # incomplete row (e.g. a blank row just added) -- skip
-                new_date = row["date"].isoformat() if hasattr(row["date"], "isoformat") \
-                    else str(row["date"])
-                new_note = row["note"] or ""
-                if pd.isna(row["id"]):
-                    # A brand-new row typed directly into the table.
-                    state_db.record_cash_flow(new_date, float(row["amount"]), new_note)
-                    changed += 1
-                    continue
-                rid = int(row["id"])
-                orig = original_by_id.loc[rid]
-                if (new_date != orig["date"] or float(row["amount"]) != float(orig["amount"])
-                        or new_note != (orig["note"] or "")):
-                    state_db.update_cash_flow(rid, new_date, float(row["amount"]), new_note)
-                    changed += 1
-            st.success(f"Updated {changed} entr{'y' if changed == 1 else 'ies'}." if changed
-                      else "No changes to apply.")
-            st.rerun()
-
-    st.divider()
-    st.subheader("🎯 Strategy configuration")
-    st.caption("Stored in state.db (`strategy_config` table) — takes effect "
-              "immediately for this dashboard process (no restart needed), "
-              "and for the next scheduled/manual rebalance scan. See the "
-              "README for the research behind each default.")
+    _strategy_tip = html_lib.escape(
+        "Stored in state.db (strategy_config table) — takes effect "
+        "immediately for this dashboard process (no restart needed), and "
+        "for the next scheduled/manual rebalance scan. See the README for "
+        "the research behind each default.")
+    st.markdown(
+        '<p class="ov-card-title" style="margin-top:14px;"><span class="ov-dot" '
+        'style="background:var(--ov-purple);"></span>🎯 Strategy configuration'
+        f'<span class="ov-info-icon" title="{_strategy_tip}">ℹ️</span>'
+        '<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+        'Takes effect immediately — no restart needed</span></p>',
+        unsafe_allow_html=True)
     cfg = config.STRATEGY
-    with st.form("strategy_config_form"):
-        st.markdown("**Portfolio & risk**")
-        c1, c2, c3 = st.columns(3)
-        max_positions = c1.number_input(
-            "Portfolio size (max open positions)", min_value=1, max_value=50,
-            value=int(cfg["max_positions"]), step=1)
-        risk_per_trade_pct = c2.number_input(
-            "Risk per trade (% of capital)", min_value=0.1, max_value=10.0,
-            value=float(cfg["risk_per_trade_pct"]), step=0.1)
-        atr_stop_multiple = c3.number_input(
-            "Initial stop (× ATR)", min_value=0.5, max_value=10.0,
-            value=float(cfg["atr_stop_multiple"]), step=0.1)
+    with st.container(border=True, key="ov-card-admin-strategy"):
+        with st.form("strategy_config_form"):
+            st.markdown('<p class="ov-muted">Portfolio &amp; risk</p>', unsafe_allow_html=True)
+            c1, c2, c3 = st.columns(3)
+            max_positions = c1.number_input(
+                "Portfolio size (max open positions)", min_value=1, max_value=50,
+                value=int(cfg["max_positions"]), step=1)
+            risk_per_trade_pct = c2.number_input(
+                "Risk per trade (% of capital)", min_value=0.1, max_value=10.0,
+                value=float(cfg["risk_per_trade_pct"]), step=0.1)
+            atr_stop_multiple = c3.number_input(
+                "Initial stop (× ATR)", min_value=0.5, max_value=10.0,
+                value=float(cfg["atr_stop_multiple"]), step=0.1)
 
-        st.markdown("**Trailing stop**")
-        c4, c5 = st.columns(2)
-        trailing_stop_enabled = c4.checkbox(
-            "Enabled", value=bool(cfg["trailing_stop_enabled"]))
-        trailing_atr_multiple = c5.number_input(
-            "Trailing stop (× ATR)", min_value=0.5, max_value=10.0,
-            value=float(cfg["trailing_atr_multiple"]), step=0.1)
+            st.markdown('<p class="ov-muted">Trailing stop</p>', unsafe_allow_html=True)
+            c4, c5 = st.columns(2)
+            trailing_stop_enabled = c4.checkbox(
+                "Enabled", value=bool(cfg["trailing_stop_enabled"]))
+            trailing_atr_multiple = c5.number_input(
+                "Trailing stop (× ATR)", min_value=0.5, max_value=10.0,
+                value=float(cfg["trailing_atr_multiple"]), step=0.1)
 
-        st.markdown("**Automation**")
-        c4b, c4c = st.columns(2)
-        auto_apply_stop_updates = c4b.checkbox(
-            "Auto-apply trailing-stop ratchets", value=bool(cfg["auto_apply_stop_updates"]),
-            help="Push a ratcheted stop straight to the real broker GTT as "
-                 "soon as it's computed, instead of waiting for a manual "
-                 "'Apply stop updates' click. Low-risk (only ever tightens "
-                 "an existing stop) -- on by default.")
-        auto_execute_trades = c4c.checkbox(
-            "Auto-execute sells/buys/top-ups", value=bool(cfg["auto_execute_trades"]),
-            help="Have the SCHEDULED daily rebalance job place proposed "
-                 "sells/buys/top-ups as real orders automatically, with no "
-                 "confirmation step (never affects the dashboard's manual "
-                 "'Run today's scan' button, which always stays "
-                 "review-first). Off by default -- this deploys new "
-                 "capital and exits real positions, so it's a deliberate "
-                 "opt-in once you trust the proposal quality.")
+            st.markdown('<p class="ov-muted">Automation</p>', unsafe_allow_html=True)
+            c4b, c4c = st.columns(2)
+            auto_apply_stop_updates = c4b.checkbox(
+                "Auto-apply trailing-stop ratchets", value=bool(cfg["auto_apply_stop_updates"]),
+                help="Push a ratcheted stop straight to the real broker GTT as "
+                     "soon as it's computed, instead of waiting for a manual "
+                     "'Apply stop updates' click. Low-risk (only ever tightens "
+                     "an existing stop) -- on by default.")
+            auto_execute_trades = c4c.checkbox(
+                "Auto-execute sells/buys/top-ups", value=bool(cfg["auto_execute_trades"]),
+                help="Have the SCHEDULED daily rebalance job place proposed "
+                     "sells/buys/top-ups as real orders automatically, with no "
+                     "confirmation step (never affects the dashboard's manual "
+                     "'Run today's scan' button, which always stays "
+                     "review-first). Off by default -- this deploys new "
+                     "capital and exits real positions, so it's a deliberate "
+                     "opt-in once you trust the proposal quality.")
 
-        st.markdown("**Momentum & trend**")
-        c6, c7, c8 = st.columns(3)
-        mom_lookback_days_short = c6.number_input(
-            "Momentum lookback — short (days)", min_value=5, max_value=252,
-            value=int(cfg["mom_lookback_days_short"]), step=1)
-        mom_lookback_days_long = c7.number_input(
-            "Momentum lookback — long (days)", min_value=5, max_value=504,
-            value=int(cfg["mom_lookback_days_long"]), step=1)
-        skip_recent_days = c8.number_input(
-            "Skip most recent (days)", min_value=0, max_value=30,
-            value=int(cfg["skip_recent_days"]), step=1)
-        c9, c10, c11 = st.columns(3)
-        near_high_threshold = c9.number_input(
-            "52-week-high proximity (%)", min_value=50.0, max_value=100.0,
-            value=float(cfg["near_high_threshold"]) * 100, step=1.0,
-            help="Price must be at least this % of its 52-week high to qualify.")
-        ema_fast = c10.number_input(
-            "EMA (fast)", min_value=5, max_value=100,
-            value=int(cfg["ema_fast"]), step=1)
-        ema_slow = c11.number_input(
-            "EMA (slow)", min_value=50, max_value=400,
-            value=int(cfg["ema_slow"]), step=1)
+            st.markdown('<p class="ov-muted">Momentum &amp; trend</p>', unsafe_allow_html=True)
+            c6, c7, c8 = st.columns(3)
+            mom_lookback_days_short = c6.number_input(
+                "Momentum lookback — short (days)", min_value=5, max_value=252,
+                value=int(cfg["mom_lookback_days_short"]), step=1)
+            mom_lookback_days_long = c7.number_input(
+                "Momentum lookback — long (days)", min_value=5, max_value=504,
+                value=int(cfg["mom_lookback_days_long"]), step=1)
+            skip_recent_days = c8.number_input(
+                "Skip most recent (days)", min_value=0, max_value=30,
+                value=int(cfg["skip_recent_days"]), step=1)
+            c9, c10, c11 = st.columns(3)
+            near_high_threshold = c9.number_input(
+                "52-week-high proximity (%)", min_value=50.0, max_value=100.0,
+                value=float(cfg["near_high_threshold"]) * 100, step=1.0,
+                help="Price must be at least this % of its 52-week high to qualify.")
+            ema_fast = c10.number_input(
+                "EMA (fast)", min_value=5, max_value=100,
+                value=int(cfg["ema_fast"]), step=1)
+            ema_slow = c11.number_input(
+                "EMA (slow)", min_value=50, max_value=400,
+                value=int(cfg["ema_slow"]), step=1)
 
-        st.markdown("**RSI & volume**")
-        c12, c13, c14 = st.columns(3)
-        rsi_min = c12.number_input(
-            "RSI min", min_value=0, max_value=100, value=int(cfg["rsi_min"]), step=1)
-        rsi_max = c13.number_input(
-            "RSI max", min_value=0, max_value=100, value=int(cfg["rsi_max"]), step=1)
-        volume_expansion_min = c14.number_input(
-            "Min volume expansion (20d/60d)", min_value=0.0, max_value=5.0,
-            value=float(cfg["volume_expansion_min"]), step=0.1)
+            st.markdown('<p class="ov-muted">RSI &amp; volume</p>', unsafe_allow_html=True)
+            c12, c13, c14 = st.columns(3)
+            rsi_min = c12.number_input(
+                "RSI min", min_value=0, max_value=100, value=int(cfg["rsi_min"]), step=1)
+            rsi_max = c13.number_input(
+                "RSI max", min_value=0, max_value=100, value=int(cfg["rsi_max"]), step=1)
+            volume_expansion_min = c14.number_input(
+                "Min volume expansion (20d/60d)", min_value=0.0, max_value=5.0,
+                value=float(cfg["volume_expansion_min"]), step=0.1)
 
-        st.markdown("**Fundamental gate & sector bonus (opt-in features)**")
-        fundamental_gate_enabled = st.checkbox(
-            "Filter candidates on fundamental score (Live Rebalance + Screener)",
-            value=bool(cfg["fundamental_gate_enabled"]),
-            help="On by default (5-year A/B, equal-weight sizing, "
-                 "max_positions=10): trades ~2pp CAGR for a real ~4pp max "
-                 "drawdown reduction (-28.65%->-24.47%) — see config.py's "
-                 "comment for the full year-by-year breakdown. The "
-                 "fundamental score still shows for every candidate "
-                 "wherever fundamentals data is fetched regardless of this "
-                 "toggle, for your own reference.")
-        c15, c16, c17, c18 = st.columns(4)
-        min_fundamental_score = c15.number_input(
-            "Min fundamental score (0-100)", min_value=0.0, max_value=100.0,
-            value=float(cfg["min_fundamental_score"]), step=1.0,
-            help="Only enforced when the checkbox above is on.")
-        fundamental_bonus_weight = c16.number_input(
-            "Fundamental score ranking tilt", min_value=0.0, max_value=2.0,
-            value=float(cfg["fundamental_bonus_weight"]), step=0.1,
-            help="0 = off (gate only, no ranking effect). 5-year A/B "
-                 "(equal-weight sizing, max_positions=10) found an "
-                 "inverted-U peaking near 0.5 -- CAGR 43.70%->43.03%, "
-                 "Sharpe 1.62->1.64, max drawdown -24.61%->-20.30%. "
-                 "Anything above 0.5 tested worse across the board.")
-        sector_bonus_weight = c17.number_input(
-            "Sector bonus weight", min_value=0.0, max_value=1.0,
-            value=float(cfg["sector_bonus_weight"]), step=0.05,
-            help="0 = off (recommended). Re-tested with the equal-weight "
-                 "allocator specifically (0.5/1.0/2.0): loses on CAGR and "
-                 "Sharpe at every weight, AND drawdown gets worse too "
-                 "(-19.58%->-22 to -27%), so there's no risk/reward "
-                 "trade-off to make here, unlike the fundamental gate. "
-                 "See README's Sector relative-strength section.")
-        history_days = c18.number_input(
-            "Candle history fetched (days)", min_value=300, max_value=3000,
-            value=int(cfg["history_days"]), step=100)
+            st.markdown('<p class="ov-muted">Fundamental gate &amp; sector bonus (opt-in features)</p>',
+                       unsafe_allow_html=True)
+            fundamental_gate_enabled = st.checkbox(
+                "Filter candidates on fundamental score (Live Rebalance + Screener)",
+                value=bool(cfg["fundamental_gate_enabled"]),
+                help="On by default (5-year A/B, equal-weight sizing, "
+                     "max_positions=10): trades ~2pp CAGR for a real ~4pp max "
+                     "drawdown reduction (-28.65%->-24.47%) — see config.py's "
+                     "comment for the full year-by-year breakdown. The "
+                     "fundamental score still shows for every candidate "
+                     "wherever fundamentals data is fetched regardless of this "
+                     "toggle, for your own reference.")
+            c15, c16, c17, c18 = st.columns(4)
+            min_fundamental_score = c15.number_input(
+                "Min fundamental score (0-100)", min_value=0.0, max_value=100.0,
+                value=float(cfg["min_fundamental_score"]), step=1.0,
+                help="Only enforced when the checkbox above is on.")
+            fundamental_bonus_weight = c16.number_input(
+                "Fundamental score ranking tilt", min_value=0.0, max_value=2.0,
+                value=float(cfg["fundamental_bonus_weight"]), step=0.1,
+                help="0 = off (gate only, no ranking effect). 5-year A/B "
+                     "(equal-weight sizing, max_positions=10) found an "
+                     "inverted-U peaking near 0.5 -- CAGR 43.70%->43.03%, "
+                     "Sharpe 1.62->1.64, max drawdown -24.61%->-20.30%. "
+                     "Anything above 0.5 tested worse across the board.")
+            sector_bonus_weight = c17.number_input(
+                "Sector bonus weight", min_value=0.0, max_value=1.0,
+                value=float(cfg["sector_bonus_weight"]), step=0.05,
+                help="0 = off (recommended). Re-tested with the equal-weight "
+                     "allocator specifically (0.5/1.0/2.0): loses on CAGR and "
+                     "Sharpe at every weight, AND drawdown gets worse too "
+                     "(-19.58%->-22 to -27%), so there's no risk/reward "
+                     "trade-off to make here, unlike the fundamental gate. "
+                     "See README's Sector relative-strength section.")
+            history_days = c18.number_input(
+                "Candle history fetched (days)", min_value=300, max_value=3000,
+                value=int(cfg["history_days"]), step=100)
 
-        strategy_submitted = st.form_submit_button("Save strategy settings", type="primary")
+            strategy_submitted = st.form_submit_button("Save strategy settings", type="primary")
 
-    if strategy_submitted:
-        updates = {
-            "max_positions": int(max_positions),
-            "risk_per_trade_pct": float(risk_per_trade_pct),
-            "atr_stop_multiple": float(atr_stop_multiple),
-            "trailing_stop_enabled": bool(trailing_stop_enabled),
-            "trailing_atr_multiple": float(trailing_atr_multiple),
-            "auto_apply_stop_updates": bool(auto_apply_stop_updates),
-            "auto_execute_trades": bool(auto_execute_trades),
-            "mom_lookback_days_short": int(mom_lookback_days_short),
-            "mom_lookback_days_long": int(mom_lookback_days_long),
-            "skip_recent_days": int(skip_recent_days),
-            "near_high_threshold": float(near_high_threshold) / 100,
-            "ema_fast": int(ema_fast),
-            "ema_slow": int(ema_slow),
-            "rsi_min": int(rsi_min),
-            "rsi_max": int(rsi_max),
-            "volume_expansion_min": float(volume_expansion_min),
-            "fundamental_gate_enabled": bool(fundamental_gate_enabled),
-            "min_fundamental_score": float(min_fundamental_score),
-            "fundamental_bonus_weight": float(fundamental_bonus_weight),
-            "sector_bonus_weight": float(sector_bonus_weight),
-            "history_days": int(history_days),
-        }
-        state_db.update_strategy_config(updates)
-        config.STRATEGY.update(updates)  # live for this process -- no restart needed
-        st.success("Strategy settings saved — in effect immediately.")
+        if strategy_submitted:
+            updates = {
+                "max_positions": int(max_positions),
+                "risk_per_trade_pct": float(risk_per_trade_pct),
+                "atr_stop_multiple": float(atr_stop_multiple),
+                "trailing_stop_enabled": bool(trailing_stop_enabled),
+                "trailing_atr_multiple": float(trailing_atr_multiple),
+                "auto_apply_stop_updates": bool(auto_apply_stop_updates),
+                "auto_execute_trades": bool(auto_execute_trades),
+                "mom_lookback_days_short": int(mom_lookback_days_short),
+                "mom_lookback_days_long": int(mom_lookback_days_long),
+                "skip_recent_days": int(skip_recent_days),
+                "near_high_threshold": float(near_high_threshold) / 100,
+                "ema_fast": int(ema_fast),
+                "ema_slow": int(ema_slow),
+                "rsi_min": int(rsi_min),
+                "rsi_max": int(rsi_max),
+                "volume_expansion_min": float(volume_expansion_min),
+                "fundamental_gate_enabled": bool(fundamental_gate_enabled),
+                "min_fundamental_score": float(min_fundamental_score),
+                "fundamental_bonus_weight": float(fundamental_bonus_weight),
+                "sector_bonus_weight": float(sector_bonus_weight),
+                "history_days": int(history_days),
+            }
+            state_db.update_strategy_config(updates)
+            config.STRATEGY.update(updates)  # live for this process -- no restart needed
+            st.success("Strategy settings saved — in effect immediately.")
 
-    st.divider()
-    st.subheader("🚫 Skip stocks from scanner")
-    st.caption("Manually excluded symbols are removed from `config.UNIVERSE` "
-              "— the shared candidate list the Screener, Live Rebalance, "
-              "and backtest.py all fetch candles for — so a skip here takes "
-              "effect everywhere at once. Tick/untick Skip, optionally edit "
-              "the reason, then click Update — nothing changes until you do.")
+    _skip_tip = html_lib.escape(
+        "Manually excluded symbols are removed from config.UNIVERSE — the "
+        "shared candidate list the Screener, Live Rebalance, and "
+        "backtest.py all fetch candles for. Tick/untick Skip, optionally "
+        "edit the reason, then click Update — nothing changes until you do.")
+    st.markdown(
+        '<p class="ov-card-title" style="margin-top:14px;"><span class="ov-dot" '
+        'style="background:var(--ov-coral);"></span>🚫 Skip stocks from scanner'
+        f'<span class="ov-info-icon" title="{_skip_tip}">ℹ️</span>'
+        '<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+        'Removed from the shared universe everywhere at once</span></p>',
+        unsafe_allow_html=True)
+    with st.container(border=True, key="ov-card-admin-skip"):
+        _skipped_df = state_db.get_skipped_symbols_df()
+        skipped_reasons = (_skipped_df.set_index("symbol")["reason"] if not _skipped_df.empty
+                          else pd.Series(dtype=str))
+        all_syms_for_skip = sorted(set(config.UNIVERSE_RAW) | set(skipped_reasons.index))
 
-    _skipped_df = state_db.get_skipped_symbols_df()
-    skipped_reasons = (_skipped_df.set_index("symbol")["reason"] if not _skipped_df.empty
-                      else pd.Series(dtype=str))
-    all_syms_for_skip = sorted(set(config.UNIVERSE_RAW) | set(skipped_reasons.index))
-    try:
-        skip_prices = kite_client.get_ltp(all_syms_for_skip)
-    except Exception as e:
-        st.warning(f"Couldn't fetch live prices: {e}")
-        skip_prices = {}
+        st.markdown('<p class="ov-muted">Skip / un-skip a symbol</p>', unsafe_allow_html=True)
+        skip_sym = st.selectbox("Symbol", all_syms_for_skip, key="admin_skip_sym_sel")
+        skip_checked = skip_sym in skipped_reasons.index
+        with st.form(f"admin_skip_form_{skip_sym}"):
+            skip_toggle = st.checkbox("Skip this symbol", value=skip_checked)
+            skip_reason = st.text_input(
+                "Reason (optional)", value=skipped_reasons.get(skip_sym, ""))
+            skip_save_clicked = st.form_submit_button("Save", type="primary")
+        if skip_save_clicked:
+            if skip_toggle:
+                state_db.add_skipped_symbol(skip_sym, skip_reason)
+            elif skip_checked:
+                state_db.remove_skipped_symbol(skip_sym)
+            config.refresh_universe()
+            st.success(f"{skip_sym} updated — in effect immediately.")
+            st.rerun()
 
-    skip_table = pd.DataFrame({
-        "symbol": all_syms_for_skip,
-        "price": [skip_prices.get(s) for s in all_syms_for_skip],
-        "skip": [s in skipped_reasons.index for s in all_syms_for_skip],
-        "reason": [skipped_reasons.get(s, "") for s in all_syms_for_skip],
-    })
-    edited_skip_table = st.data_editor(
-        skip_table, hide_index=True, width="stretch", key="skip_table_editor",
-        disabled=["symbol", "price"],
-        column_config={
-            "symbol": st.column_config.TextColumn("Symbol"),
-            "price": st.column_config.NumberColumn("LTP (₹)", format="₹%.2f"),
-            "skip": st.column_config.CheckboxColumn("Skip?"),
-            "reason": st.column_config.TextColumn("Reason (optional)"),
+        st.divider()
+        skip_filter = st.radio(
+            "Show", ["All", "Skipped only", "Not skipped"], horizontal=True,
+            key="admin_skip_filter", label_visibility="collapsed")
+
+        try:
+            skip_prices = kite_client.get_ltp(all_syms_for_skip)
+        except Exception as e:
+            st.warning(f"Couldn't fetch live prices: {e}")
+            skip_prices = {}
+
+        skip_table = pd.DataFrame({
+            "symbol": all_syms_for_skip,
+            "price": [skip_prices.get(s) for s in all_syms_for_skip],
+            "skip": ["✓" if s in skipped_reasons.index else "✗" for s in all_syms_for_skip],
+            "reason": [skipped_reasons.get(s, "") or "—" for s in all_syms_for_skip],
         })
-    if st.button("Update skip list", type="primary", key="skip_update_btn"):
-        changed = 0
-        for _, row in edited_skip_table.iterrows():
-            sym, reason = row["symbol"], row["reason"] or ""
-            currently_skipped = sym in skipped_reasons.index
-            if row["skip"]:
-                if not currently_skipped or skipped_reasons.get(sym, "") != reason:
-                    state_db.add_skipped_symbol(sym, reason)
-                    changed += 1
-            elif currently_skipped:
-                state_db.remove_skipped_symbol(sym)
-                changed += 1
-        config.refresh_universe()
-        st.success(f"Updated {changed} symbol(s) — in effect immediately." if changed
-                  else "No changes to apply.")
-        st.rerun()
+        if skip_filter == "Skipped only":
+            skip_table = skip_table[skip_table["skip"] == "✓"]
+        elif skip_filter == "Not skipped":
+            skip_table = skip_table[skip_table["skip"] == "✗"]
+        skip_page = _ov_page_slice(skip_table, key="admin_skip")
+        st.markdown(
+            _ov_table_html(
+                skip_page, columns=["symbol", "price", "skip", "reason"],
+                sym_cols=["symbol"], num_fmt={"price": "₹{:,.2f}"},
+                badges={"skip": {"✓": "ov-badge-red", "✗": "ov-badge-gray"}}),
+            unsafe_allow_html=True)
+        _ov_pagination_controls(skip_table, key="admin_skip")
 
-    st.divider()
-    with st.expander("🔑 Change dashboard password"):
+    col_pw, col_api = st.columns(2)
+    with col_pw:
+      with st.container(border=True, key="ov-card-admin-password"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-amber);"></span>🔑 Change dashboard password</p>',
+            unsafe_allow_html=True)
         st.caption("Stored as a salted hash in state.db — the password "
                   "itself is never saved anywhere, not even here.")
         with st.form("change_password_form", clear_on_submit=True):
             new_user = st.text_input("Username", value=config.DASHBOARD_USERNAME)
             new_pw = st.text_input("New password", type="password")
             confirm_pw = st.text_input("Confirm new password", type="password")
-            change_submitted = st.form_submit_button("Update credentials")
+            change_submitted = st.form_submit_button("Update credentials", type="primary")
         if change_submitted:
             if not new_user or not new_pw:
                 st.error("Username and password can't be empty.")
@@ -1012,20 +1967,28 @@ def page_admin():
                 st.success("Credentials updated — use the new username/password "
                           "next time you sign in.")
 
-    with st.expander("🔑 Kite API settings"):
-        st.caption("Stored in state.db, not .env — only needed if you "
-                  "regenerate keys in the Kite developer console. Unlike "
-                  "the dashboard password, these are kept plaintext (Kite's "
-                  "own login flow needs the real api_secret value back), "
-                  "so this is a convenience move, not a security upgrade.")
+    with col_api:
+      with st.container(border=True, key="ov-card-admin-kite"):
+        _kite_tip = html_lib.escape(
+            "Stored in state.db, not .env — only needed if you regenerate "
+            "keys in the Kite developer console. Unlike the dashboard "
+            "password, these are kept plaintext (Kite's own login flow "
+            "needs the real api_secret value back), so this is a "
+            "convenience move, not a security upgrade.")
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-blue);"></span>🔑 Kite API settings'
+            f'<span class="ov-info-icon" title="{_kite_tip}">ℹ️</span></p>',
+            unsafe_allow_html=True)
         masked_key = (config.KITE_API_KEY[:4] + "…" + config.KITE_API_KEY[-4:]
                      if len(config.KITE_API_KEY) > 8 else "(not set)")
-        st.caption(f"Current API key: `{masked_key}`")
+        st.caption(f"Current API key: `{masked_key}` · stored in state.db, "
+                  "only needed after regenerating keys.")
         with st.form("kite_api_settings_form", clear_on_submit=True):
-            new_api_key = st.text_input("New API key (leave blank to keep current)")
-            new_api_secret = st.text_input("New API secret (leave blank to keep current)",
+            new_api_key = st.text_input("New API key (blank = keep current)")
+            new_api_secret = st.text_input("New API secret (blank = keep current)",
                                            type="password")
-            api_submitted = st.form_submit_button("Update Kite API credentials")
+            api_submitted = st.form_submit_button("Update Kite API credentials", type="primary")
         if api_submitted:
             if not new_api_key and not new_api_secret:
                 st.error("Enter at least one value to update.")
@@ -1042,14 +2005,20 @@ def page_admin():
 # ---------------------------------------------------------------------------
 
 def page_screener():
-    st.subheader("🔍 Screener — full ranked universe")
-    st.caption(
+    _screener_tip = html_lib.escape(
         "Every F&O stock passing the technical gates (trend structure, "
         "52-week-high proximity, RSI regime) and the fundamental quality "
         "gate, ranked by momentum score. This is the broader browse/chart "
         "view; Live Rebalance shows only what actually fits your open "
-        "position slots."
-    )
+        "position slots.")
+    hdr_l, hdr_r = st.columns([2, 2])
+    with hdr_l:
+        st.markdown(
+            '<div class="ov-header" style="margin-bottom:0;">'
+            '<div><span class="ov-h1">🔍 Screener</span> '
+            '<span class="ov-sub">· full ranked universe</span>'
+            f'<span class="ov-info-icon" title="{_screener_tip}">ℹ️</span></div></div>',
+            unsafe_allow_html=True)
 
     if "screen" not in st.session_state and os.path.exists(SCREEN_CACHE):
         st.session_state["screen"] = pd.read_pickle(SCREEN_CACHE)
@@ -1067,24 +2036,24 @@ def page_screener():
     screen_job = get_background_job("screen_run")
     screen_running = screen_job is not None and not screen_job["done"]
 
-    colA, colB = st.columns([1, 3])
-    with colA:
-        with_fund = st.checkbox(
-            "Fetch fundamental score", value=True,
-            help="Shows each candidate's fundamental score/sector rubric for "
-                 "reference (uses the Fundamentals page's primary-XBRL score, "
-                 "reusing the on-disk cache if present rather than re-scanning "
-                 "NSE). Whether it also FILTERS candidates is a separate "
-                 "toggle — see Admin → Strategy configuration → 'Filter "
-                 "candidates on fundamental score' (off by default).")
-        if screen_running:
-            st.info(f"⏳ Scan running since {screen_job['started_at']:%H:%M:%S} — safe to switch tabs.")
-        if st.button("Run screen", type="primary", disabled=screen_running):
-            start_background_job(
-                "screen_run", _run_and_cache_screen, with_fund,
-                st.session_state.get("value_scores"), job_type="screen_run",
-                summarize_fn=lambda r: f"{len(r)} candidates")
-            st.rerun()
+    with hdr_r:
+        with st.container(key="screen_run_row"):
+            with_fund = st.checkbox(
+                "Fetch fundamental score", value=True,
+                help="Shows each candidate's fundamental score/sector rubric for "
+                     "reference (uses the Fundamentals page's primary-XBRL score, "
+                     "reusing the on-disk cache if present rather than re-scanning "
+                     "NSE). Whether it also FILTERS candidates is a separate "
+                     "toggle — see Admin → Strategy configuration → 'Filter "
+                     "candidates on fundamental score' (off by default).")
+            if st.button("Run screen", type="primary", disabled=screen_running):
+                start_background_job(
+                    "screen_run", _run_and_cache_screen, with_fund,
+                    st.session_state.get("value_scores"), job_type="screen_run",
+                    summarize_fn=lambda r: f"{len(r)} candidates")
+                st.rerun()
+    if screen_running:
+        st.info(f"⏳ Scan running since {screen_job['started_at']:%H:%M:%S} — safe to switch tabs.")
 
     @st.fragment(run_every="1s" if screen_running else None)
     def _screen_job_status():
@@ -1137,42 +2106,76 @@ def page_screener():
     num_fmt = {c: "{:.2f}" for c in show_cols if c not in ("fundamental_rubric", "rank")}
 
     keep_zone_size = config.STRATEGY["max_positions"] * 2
-    st.subheader(f"✅ Candidates passing all gates ({len(candidates)})")
-    st.caption(f"Sorted by score, highest first — Live Rebalance keeps a held "
-              f"position only while it's ranked in the top {keep_zone_size} "
-              f"here (max_positions × 2); dropping below that rank is what "
-              f"triggers a proposed sell.")
-    st.dataframe(
-        pnl_style(candidates[show_cols].rename_axis("Symbol"), fmt=num_fmt),
-        width="stretch")
+    _candidates_tip = html_lib.escape(
+        f"Sorted by score, highest first — Live Rebalance keeps a held "
+        f"position only while it's ranked in the top {keep_zone_size} "
+        f"here (max_positions × 2); dropping below that rank is what "
+        f"triggers a proposed sell.")
+    with st.container(border=True, key="ov-card-screen-candidates"):
+        st.markdown(
+            '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+            '<span class="ov-dot" style="background:var(--ov-green);">'
+            f'</span>Candidates passing all gates <span class="ov-badge ov-badge-green">'
+            f'{len(candidates)}</span>'
+            f'<span class="ov-info-icon" title="{_candidates_tip}">ℹ️</span></p>',
+            unsafe_allow_html=True)
+        cand_display = candidates[show_cols].copy()
+        cand_display.insert(0, "symbol", cand_display.index)
+        cand_display["rank"] = cand_display["rank"].astype(int)
+        cand_page = _ov_page_slice(cand_display, key="screen_candidates")
+        st.markdown(
+            _ov_table_html(
+                cand_page, columns=["rank", "symbol"] + [c for c in show_cols if c != "rank"],
+                sym_cols=["symbol"], num_fmt={**num_fmt, "rank": "{:.0f}"},
+                badges={"rank": lambda v: ("ov-badge-green" if v <= keep_zone_size else "ov-badge-red")}),
+            unsafe_allow_html=True)
+        _ov_pagination_controls(cand_display, key="screen_candidates")
 
     with st.expander("Full universe (including gate failures)"):
-        all_cols = show_cols + ["trend_ok", "near_high_ok", "rsi_ok",
-                                "quality_ok", "quality_fails"]
-        all_cols = [c for c in all_cols if c in t.columns]
-        st.dataframe(readable_df(t[all_cols].rename_axis("Symbol")), width="stretch")
+        gate_cols = ["trend_ok", "near_high_ok", "rsi_ok", "quality_ok", "quality_fails"]
+        all_cols = gate_cols + show_cols
+        all_cols = [c for c in all_cols if c in t.columns and c != "rank"]
+        full_display = t[all_cols].copy()
+        full_display.insert(0, "symbol", full_display.index)
+        # ✓/✗ pill badges instead of literal "True"/"False" text, matching
+        # the mockup.
+        for c in ("trend_ok", "near_high_ok", "rsi_ok", "quality_ok"):
+            if c in full_display.columns:
+                full_display[c] = full_display[c].map({True: "✓", False: "✗"})
+        _bool_badges = {c: {"✓": "ov-badge-green", "✗": "ov-badge-red"}
+                       for c in ("trend_ok", "near_high_ok", "rsi_ok", "quality_ok")
+                       if c in all_cols}
+        full_page = _ov_page_slice(full_display, key="screen_full_universe")
+        st.markdown(
+            _ov_table_html(full_page, sym_cols=["symbol"], num_fmt=num_fmt,
+                          badges=_bool_badges),
+            unsafe_allow_html=True)
+        _ov_pagination_controls(full_display, key="screen_full_universe")
 
-    st.divider()
-    sym = st.selectbox("Chart a symbol", list(t.index))
-    if sym:
-        df = kite_client.fetch_daily_candles(sym, days=config.STRATEGY["history_days"])
-        if not df.empty:
-            cfg = config.STRATEGY
-            fig = go.Figure()
-            fig.add_trace(go.Candlestick(
-                x=df.index, open=df["open"], high=df["high"],
-                low=df["low"], close=df["close"], name=sym))
-            fig.add_trace(go.Scatter(
-                x=df.index, y=indicators.ema(df["close"], cfg["ema_fast"]),
-                name="EMA50", line=dict(width=1)))
-            fig.add_trace(go.Scatter(
-                x=df.index, y=indicators.ema(df["close"], cfg["ema_slow"]),
-                name="EMA200", line=dict(width=1)))
-            fig.update_layout(height=500, xaxis_rangeslider_visible=False,
-                              margin=dict(l=10, r=10, t=30, b=10))
-            st.plotly_chart(fig, width="stretch")
+    with st.container(border=True, key="ov-card-screen-chart"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-purple);"></span>Chart a symbol</p>',
+            unsafe_allow_html=True)
+        sym = st.selectbox("Chart a symbol", list(t.index), label_visibility="collapsed")
+        if sym:
+            df = kite_client.fetch_daily_candles(sym, days=config.STRATEGY["history_days"])
+            if not df.empty:
+                cfg = config.STRATEGY
+                fig = go.Figure()
+                fig.add_trace(go.Candlestick(
+                    x=df.index, open=df["open"], high=df["high"],
+                    low=df["low"], close=df["close"], name=sym))
+                fig.add_trace(go.Scatter(
+                    x=df.index, y=indicators.ema(df["close"], cfg["ema_fast"]),
+                    name="EMA50", line=dict(width=1)))
+                fig.add_trace(go.Scatter(
+                    x=df.index, y=indicators.ema(df["close"], cfg["ema_slow"]),
+                    name="EMA200", line=dict(width=1)))
+                fig.update_layout(height=500, xaxis_rangeslider_visible=False,
+                                  margin=dict(l=10, r=10, t=30, b=10))
+                st.plotly_chart(fig, width="stretch")
 
-    st.divider()
     with st.expander("🏭 Current sector rankings"):
         st.caption(
             "Today's relative strength (vs NIFTY 50, same lookback as the "
@@ -1195,10 +2198,20 @@ def page_screener():
         if "sector_rank" in st.session_state:
             rt = st.session_state["sector_rank_time"]
             st.caption(f"Last fetched: {rt:%d %b %Y %H:%M}")
-            st.dataframe(
-                st.session_state["sector_rank"].rename("Relative strength (pct pts)")
-                  .to_frame().style.format("{:.2f}"),
-                width="stretch")
+            _rank_series = st.session_state["sector_rank"].sort_values(ascending=False)
+            _max_abs = float(_rank_series.abs().max()) or 1.0
+            _sector_rows = []
+            for _sector, _val in _rank_series.items():
+                _pct_width = min(100.0, abs(_val) / _max_abs * 100)
+                _color = "#1d9e75" if _val >= 0 else "#e24b4a"
+                _cls = "ov-pos" if _val >= 0 else "ov-neg"
+                _sector_rows.append(
+                    f'<div class="ov-sector-row"><div class="ov-sector-head">'
+                    f'<span>{html_lib.escape(str(_sector))}</span>'
+                    f'<span class="ov-sym {_cls}">{_val:+.1f}</span></div>'
+                    f'<div class="ov-sector-bar"><div class="ov-sector-fill" '
+                    f'style="width:{_pct_width:.1f}%;background:{_color};"></div></div></div>')
+            st.markdown("".join(_sector_rows), unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1207,15 +2220,42 @@ def page_screener():
 
 def page_live_rebalance():
     auto_exec = bool(config.STRATEGY.get("auto_execute_trades", False))
-    st.subheader(
-        "📡 Live Rebalance — review, then execute" if not auto_exec
-        else "📡 Live Rebalance — auto-executing",
-        help="Runs the exact same screener pipeline as Screener/Backtest, "
-             "diffs it against your actual Kite holdings, and proposes "
-             "sells (closed below 200 EMA, or dropped out of the "
-             "top-ranked zone), buys (open slots, sized off your real "
-             "available cash), and trailing-stop updates. Can also be "
-             "scheduled externally via `python live_rebalance.py`.")
+    rebalance_job = get_background_job("rebalance_run")
+    rebalance_running = rebalance_job is not None and not rebalance_job["done"]
+
+    def _run_scan_now():
+        fundamentals = st.session_state.get("value_scores")
+        start_background_job(
+            "rebalance_run", lr.propose_rebalance, available_cash,
+            fundamentals=fundamentals, job_type="rebalance_scan",
+            summarize_fn=lambda r: (f"{len(r['buys'])} buys, {len(r['sells'])} sells, "
+                                    f"{len(r['stop_updates'])} stop updates"))
+        st.rerun()
+
+    # Auto-execute mode still shows its status chip in the header (the
+    # scan button stays further down as the manual-override path). Manual
+    # mode drops the "Manual mode — review-first" label entirely and puts
+    # the actual "Run today's scan" button in the header instead, since
+    # that's the one thing this page's whole title bar exists to trigger.
+    if auto_exec:
+        st.markdown(
+            '<div class="ov-header"><div><span class="ov-h1">📡 Live Rebalance</span> '
+            '<span class="ov-sub">· review, then execute</span></div>'
+            '<div class="ov-chips"><span class="ov-chip ov-chip-amber">'
+            '⚠ Auto-execute ON</span></div></div>', unsafe_allow_html=True)
+    else:
+        _hdr_l, _hdr_r = st.columns([5, 2])
+        with _hdr_l:
+            st.markdown(
+                '<div class="ov-header" style="margin-bottom:0;">'
+                '<div><span class="ov-h1">📡 Live Rebalance</span> '
+                '<span class="ov-sub">· review, then execute</span></div>'
+                '</div>', unsafe_allow_html=True)
+        with _hdr_r:
+            if st.button("Run today's scan", type="primary",
+                        disabled=rebalance_running, key="lr_run_scan_hdr"):
+                _run_scan_now()
+
     if auto_exec:
         st.warning(
             "**auto_execute_trades is ON** — the scheduled daily scan places "
@@ -1224,13 +2264,6 @@ def page_live_rebalance():
             "override for whatever's left (e.g. a manual 'Run today's scan'). "
             "Turn this off in Admin → Strategy configuration to go back to "
             "manual-only.")
-    else:
-        st.info(
-            "Manual mode — running the scan never places an order by "
-            "itself. Execution below requires an explicit confirmation "
-            "checkbox per batch. Enable **auto_execute_trades** in "
-            "Admin → Strategy configuration to have the scheduled daily "
-            "scan place these automatically instead.")
 
     if "rebalance_proposal" not in st.session_state:
         last_run = state_db.get_last_rebalance_run()
@@ -1242,19 +2275,11 @@ def page_live_rebalance():
                 columns={"tradingsymbol": "symbol"})
             st.session_state["rebalance_proposal"] = last_run
 
-    rebalance_job = get_background_job("rebalance_run")
-    rebalance_running = rebalance_job is not None and not rebalance_job["done"]
-
     if rebalance_running:
         st.info(f"⏳ Scan running since {rebalance_job['started_at']:%H:%M:%S} — safe to switch tabs.")
-    if st.button("Run today's scan", type="primary", disabled=rebalance_running):
-        fundamentals = st.session_state.get("value_scores")
-        start_background_job(
-            "rebalance_run", lr.propose_rebalance, available_cash,
-            fundamentals=fundamentals, job_type="rebalance_scan",
-            summarize_fn=lambda r: (f"{len(r['buys'])} buys, {len(r['sells'])} sells, "
-                                    f"{len(r['stop_updates'])} stop updates"))
-        st.rerun()
+    if auto_exec:
+        if st.button("Run today's scan", type="primary", disabled=rebalance_running):
+            _run_scan_now()
 
     @st.fragment(run_every="1s" if rebalance_running else None)
     def _rebalance_job_status():
@@ -1280,16 +2305,28 @@ def page_live_rebalance():
         return
 
     result = st.session_state["rebalance_proposal"]
-    st.caption(f"Last run: {result['run_time']:%d %b %Y %H:%M}")
     if rebalance_running:
         st.warning("⏳ A new scan is running — actions below are locked until "
                   "it finishes, so you can't execute against this now-stale "
                   "proposal while a fresh one is being computed.")
 
-    rc1, rc2, rc3 = st.columns(3)
-    rc1.metric("Current holdings", len(result["holdings"]))
-    rc2.metric("Proposed sells", len(result["sells"]))
-    rc3.metric("Open slots after sells", result["open_slots"])
+    _real_max_positions = config.STRATEGY["max_positions"]
+    _real_target = result.get("target_per_slot") or 0
+    _cash_pool = result.get("cash_pool") or 0
+    st.markdown(
+        '<div class="ov-grid-metrics">'
+        + _ov_metric_html("Current holdings", str(len(result["holdings"])), "CNC positions", "", "blue")
+        + _ov_metric_html("Proposed sells", str(len(result["sells"])),
+                         (result["sells"].iloc[0]["symbol"] if not result["sells"].empty else None),
+                         "", "red")
+        + _ov_metric_html("Proposed buys", str(len(result["buys"])),
+                         (result["buys"].iloc[0]["symbol"] if not result["buys"].empty else None),
+                         "", "green")
+        + _ov_metric_html("Open slots after sells", str(result["open_slots"]),
+                         f"of {_real_max_positions} max", "", "purple")
+        + _ov_metric_html("Target / slot", f"₹{_real_target:,.0f}", "Equal weight", "", "teal")
+        + _ov_metric_html("Cash pool", f"₹{_cash_pool:,.0f}", "incl. sell proceeds", "", "amber")
+        + '</div>', unsafe_allow_html=True)
 
     # cash_shortfall/target_per_slot/cash_pool are snapshotted once at
     # proposal time and never recomputed -- once every buy/top-up from
@@ -1305,188 +2342,283 @@ def page_live_rebalance():
         pool = result.get("cash_pool") or 0
         shortfall = result.get("cash_shortfall") or 0
         if shortfall > 0:
-            st.warning(
-                f"💰 **₹{shortfall:,.0f} more needed** to fully equal-weight every "
-                f"open slot and under-target holding (target ₹{target:,.0f}/slot, "
-                f"₹{pool:,.0f} available including proposed sell proceeds) — "
-                "buys below may be partial or fewer than ideal until more cash "
-                "is added.")
+            st.markdown(
+                f'<div class="ov-alert">💰 <b>₹{shortfall:,.0f} more needed</b> to '
+                f"fully equal-weight every open slot and under-target holding "
+                f"(target ₹{target:,.0f}/slot, ₹{pool:,.0f} available including "
+                "proposed sell proceeds) — buys below may be partial or fewer "
+                "than ideal until more cash is added.</div>", unsafe_allow_html=True)
         else:
-            st.success(
-                f"✅ Enough cash (₹{pool:,.0f} available including proposed sell "
-                f"proceeds) to fully equal-weight every open slot and "
-                f"under-target holding at ₹{target:,.0f}/slot.")
+            st.markdown(
+                '<div class="ov-alert ov-alert-success">✅ Enough cash '
+                f"(₹{pool:,.0f} available including proposed sell proceeds) to "
+                f"fully equal-weight every open slot and under-target holding at "
+                f"₹{target:,.0f}/slot.</div>", unsafe_allow_html=True)
         unsettled = result.get("unsettled_proceeds") or 0
         if unsettled:
-            st.caption(
-                f"ℹ️ ₹{unsettled:,.0f} of today's sell proceeds is from a "
-                "same-day position or T1 (BTST) holding — already excluded "
-                "from the available figure above, since Zerodha won't treat "
-                "it as usable cash until that settlement cycle completes "
-                "(next trading day for T1, the day after for a same-day sale).")
+            st.markdown(
+                f'<div class="ov-alert ov-alert-info">ℹ️ ₹{unsettled:,.0f} of '
+                "today's sell proceeds is from a same-day position or T1 (BTST) "
+                "holding — already excluded from the available figure above, "
+                "since Zerodha won't treat it as usable cash until that "
+                "settlement cycle completes (next trading day for T1, the day "
+                "after for a same-day sale).</div>", unsafe_allow_html=True)
 
-    st.subheader(f"🔴 Proposed sells ({len(result['sells'])})")
-    if st.session_state.get("sell_exec_log"):
-        st.success("Sell(s) executed and removed from the list below.")
-        for line in st.session_state["sell_exec_log"]:
-            st.write(line)
-        del st.session_state["sell_exec_log"]
-    if not result["sells"].empty:
-        st.dataframe(pnl_style(result["sells"], fmt={"avg_price": "{:.2f}"}),
-                    width="stretch", hide_index=True)
-        confirm_sell = st.checkbox(
-            "I confirm I want to execute ALL proposed sells at market",
-            key="confirm_sell_all")
-        if st.button("Execute all sells", disabled=not confirm_sell or rebalance_running):
-            log, succeeded, failed = lr.execute_sells(result["sells"])
-            st.session_state["sell_exec_log"] = log
-            resolved = succeeded + list(failed)
-            if resolved:
-                result["sells"] = result["sells"][
-                    ~result["sells"]["symbol"].isin(resolved)].reset_index(drop=True)
-                result["open_slots"] = result.get("open_slots", 0) + len(succeeded)
-                st.session_state["rebalance_proposal"] = result
-                state_db.mark_rebalance_sells_executed(result.get("run_id"), succeeded)
-                state_db.mark_rebalance_sells_failed(result.get("run_id"), failed)
-                state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
-            st.rerun()
-    else:
-        st.caption("No current holdings fail the rebalance rule today.")
+    with st.container(border=True, key="ov-card-lr-sells"):
+        _keep_zone_size = (config.STRATEGY.get("max_positions") or 0) * 2
+        st.markdown(
+            '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+            '<span class="ov-dot" style="background:var(--ov-red);">'
+            f'</span>Proposed sells <span class="ov-badge ov-badge-red">{len(result["sells"])}</span>'
+            f'<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+            f'Dropped out of the top-{_keep_zone_size} keep zone</span></p>',
+            unsafe_allow_html=True)
+        if st.session_state.get("sell_exec_log"):
+            st.success("Sell(s) executed and removed from the list below.")
+            for line in st.session_state["sell_exec_log"]:
+                st.write(line)
+            del st.session_state["sell_exec_log"]
+        if not result["sells"].empty:
+            _sells_display = result["sells"].copy()
+            try:
+                _ltp_map = kite_client.get_ltp(list(_sells_display["symbol"]))
+                _sells_display["ltp"] = _sells_display["symbol"].map(_ltp_map)
+            except Exception:
+                _sells_display["ltp"] = pd.NA
+            _sells_display["pnl"] = (
+                (_sells_display["ltp"] - _sells_display["avg_price"]) * _sells_display["qty"])
+            st.markdown(
+                _ov_table_html(
+                    _sells_display,
+                    columns=["symbol", "qty", "avg_price", "ltp", "pnl", "reason"],
+                    sym_cols=["symbol"], pnl_cols=["pnl"],
+                    num_fmt={"qty": "{:.0f}", "avg_price": "₹{:.2f}", "ltp": "₹{:.2f}",
+                             "pnl": "₹{:+,.0f}"}),
+                unsafe_allow_html=True)
+            confirm_sell = st.checkbox(
+                "I confirm I want to execute ALL proposed sells at market",
+                key="confirm_sell_all")
+            if st.button("Execute all sells", disabled=not confirm_sell or rebalance_running,
+                        use_container_width=True, key="lr_execute_sells"):
+                log, succeeded, failed = lr.execute_sells(result["sells"])
+                st.session_state["sell_exec_log"] = log
+                resolved = succeeded + list(failed)
+                if resolved:
+                    result["sells"] = result["sells"][
+                        ~result["sells"]["symbol"].isin(resolved)].reset_index(drop=True)
+                    result["open_slots"] = result.get("open_slots", 0) + len(succeeded)
+                    st.session_state["rebalance_proposal"] = result
+                    state_db.mark_rebalance_sells_executed(result.get("run_id"), succeeded)
+                    state_db.mark_rebalance_sells_failed(result.get("run_id"), failed)
+                    state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
+                st.rerun()
+        else:
+            st.caption("No current holdings fail the rebalance rule today.")
 
-    st.subheader(f"🟢 Proposed buys ({len(result['buys'])})")
-    if st.session_state.get("buy_exec_log"):
-        st.success("Buy(s) executed and removed from the list below.")
-        for line in st.session_state["buy_exec_log"]:
-            st.write(line)
-        del st.session_state["buy_exec_log"]
-    if not result["buys"].empty:
-        st.caption("Fundamental score/sector rubric are shown for your own "
-                  "reference, not as a filter — the candidate list above is "
-                  "technicals-only unless you've turned on 'Filter candidates "
-                  "on fundamental score' in Admin → Strategy configuration.")
-        st.dataframe(
-            pnl_style(result["buys"], fmt={
-                "price": "{:.2f}", "stop": "{:.2f}", "score": "{:.2f}",
-                "fundamental_score": "{:.1f}"}),
-            width="stretch", hide_index=True)
-        place_gtt = st.checkbox("Also place a GTT stop-loss for each buy",
-                                value=True, key="rebal_gtt")
-        confirm_buy = st.checkbox(
-            "I confirm I want to execute ALL proposed buys at market",
-            key="confirm_buy_all")
-        if st.button("Execute all buys", disabled=not confirm_buy or rebalance_running):
-            log, succeeded, failed = lr.execute_buys(result["buys"], place_gtt=place_gtt)
-            st.session_state["buy_exec_log"] = log
-            resolved = succeeded + list(failed)
-            if resolved:
-                result["buys"] = result["buys"][
-                    ~result["buys"]["symbol"].isin(resolved)].reset_index(drop=True)
-                result["open_slots"] = max(result.get("open_slots", 0) - len(succeeded), 0)
-                st.session_state["rebalance_proposal"] = result
-                state_db.mark_rebalance_buys_executed(result.get("run_id"), succeeded)
-                state_db.mark_rebalance_buys_failed(result.get("run_id"), failed)
-                state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
-            st.rerun()
-    else:
-        st.caption("No open slots, or no candidates today.")
+    with st.container(border=True, key="ov-card-lr-buys"):
+        st.markdown(
+            '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+            '<span class="ov-dot" style="background:var(--ov-green);">'
+            f'</span>Proposed buys <span class="ov-badge ov-badge-green">{len(result["buys"])}</span>'
+            '<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+            'Sized off real available cash</span></p>',
+            unsafe_allow_html=True)
+        if st.session_state.get("buy_exec_log"):
+            st.success("Buy(s) executed and removed from the list below.")
+            for line in st.session_state["buy_exec_log"]:
+                st.write(line)
+            del st.session_state["buy_exec_log"]
+        if not result["buys"].empty:
+            # "rank" was added to the buys dict alongside this restyle -- a
+            # proposal already sitting in session state (or loaded from a
+            # run stored before this change) won't have it, so build the
+            # column list from what's actually present rather than assume.
+            _buys_cols = [c for c in
+                         ["symbol", "rank", "score", "price", "qty", "stop",
+                          "fundamental_score"] if c in result["buys"].columns]
+            st.markdown(
+                _ov_table_html(
+                    result["buys"], columns=_buys_cols, sym_cols=["symbol"],
+                    num_fmt={"rank": "{:.0f}", "qty": "{:.0f}", "price": "₹{:.2f}",
+                             "stop": "₹{:.2f}", "score": "{:.2f}",
+                             "fundamental_score": "{:.1f}"}),
+                unsafe_allow_html=True)
+            place_gtt = st.checkbox("Also place a GTT stop-loss for each buy",
+                                    value=True, key="rebal_gtt")
+            confirm_buy = st.checkbox(
+                "I confirm I want to execute ALL proposed buys at market",
+                key="confirm_buy_all")
+            if st.button("Execute all buys", disabled=not confirm_buy or rebalance_running,
+                        use_container_width=True, key="lr_execute_buys"):
+                log, succeeded, failed = lr.execute_buys(result["buys"], place_gtt=place_gtt)
+                st.session_state["buy_exec_log"] = log
+                resolved = succeeded + list(failed)
+                if resolved:
+                    result["buys"] = result["buys"][
+                        ~result["buys"]["symbol"].isin(resolved)].reset_index(drop=True)
+                    result["open_slots"] = max(result.get("open_slots", 0) - len(succeeded), 0)
+                    st.session_state["rebalance_proposal"] = result
+                    state_db.mark_rebalance_buys_executed(result.get("run_id"), succeeded)
+                    state_db.mark_rebalance_buys_failed(result.get("run_id"), failed)
+                    state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
+                st.rerun()
+        else:
+            st.caption("No open slots, or no candidates today.")
 
     top_ups = result.get("top_ups", pd.DataFrame())
-    st.subheader(f"⬆️ Proposed top-ups ({len(top_ups)})")
-    if st.session_state.get("topup_exec_log"):
-        st.success("Top-up(s) executed and removed from the list below.")
-        for line in st.session_state["topup_exec_log"]:
-            st.write(line)
-        del st.session_state["topup_exec_log"]
-    if not top_ups.empty:
-        st.caption(
-            "Additional shares for positions you already hold that are below "
-            "their equal-weight target, funded by cash left over after the "
-            "buys above — the position's existing stop-loss carries over "
-            "unchanged, only its GTT quantity gets updated to cover the new "
-            "total.")
-        st.dataframe(
-            pnl_style(top_ups, fmt={"price": "{:.2f}"}),
-            width="stretch", hide_index=True)
-        confirm_topup = st.checkbox(
-            "I confirm I want to execute ALL proposed top-ups at market",
-            key="confirm_topup_all")
-        if st.button("Execute all top-ups", disabled=not confirm_topup or rebalance_running):
-            log, succeeded, failed = lr.execute_top_ups(top_ups)
-            st.session_state["topup_exec_log"] = log
-            resolved = succeeded + list(failed)
-            if resolved:
-                result["top_ups"] = top_ups[
-                    ~top_ups["symbol"].isin(resolved)].reset_index(drop=True)
-                st.session_state["rebalance_proposal"] = result
-                state_db.mark_rebalance_top_ups_executed(result.get("run_id"), succeeded)
-                state_db.mark_rebalance_top_ups_failed(result.get("run_id"), failed)
-            st.rerun()
-    else:
-        st.caption("No under-target holdings, or no cash left over to top up with.")
-
     stop_updates = result.get("stop_updates", pd.DataFrame())
-    st.subheader(f"🔼 Stop updates needing attention ({len(stop_updates)})")
-    if st.session_state.get("stopupdate_exec_log"):
-        st.success("Stop update(s) applied and removed from the list below.")
-        for line in st.session_state["stopupdate_exec_log"]:
-            st.write(line)
-        del st.session_state["stopupdate_exec_log"]
-    if not stop_updates.empty:
-        st.caption("The trailing stop ratchets up automatically as soon as it's "
-                  "computed (same as the gap-down safety check) — the rows "
-                  "below are ones that **couldn't** auto-apply (no active GTT, "
-                  "or the update to Kite failed) and need your attention.")
-        st.dataframe(
-            pnl_style(stop_updates, fmt={"current_stop": "{:.2f}", "recommended_stop": "{:.2f}"}),
-            width="stretch", hide_index=True)
-        confirm_stops = st.checkbox(
-            "I confirm I want to raise ALL these GTT stop-losses",
-            key="confirm_stop_updates")
-        if st.button("Apply stop updates", disabled=not confirm_stops or rebalance_running):
-            log = []
-            succeeded = []
-            failed = {}
-            for _, r in stop_updates.iterrows():
-                if pd.isna(r["gtt_trigger_id"]):
-                    log.append(f"⚠️ {r['symbol']}: no active GTT to update — "
-                              "place one manually first (Trade tab).")
-                    failed[r["symbol"]] = "No active GTT to update"
-                    continue
-                try:
-                    ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
-                    kite_client.modify_gtt_trigger(
-                        int(r["gtt_trigger_id"]), r["symbol"], int(r["qty"]),
-                        r["recommended_stop"], ltp)
-                    # Only now does the recommended stop become the applied
-                    # (real, broker-side) stop -- see apply_stop_update()'s
-                    # docstring for why this must never happen earlier.
-                    state_db.apply_stop_update(r["symbol"])
-                    log.append(f"✅ {r['symbol']}: stop raised to "
-                              f"₹{r['recommended_stop']:.2f}")
-                    succeeded.append(r["symbol"])
-                except Exception as e:
-                    log.append(f"❌ {r['symbol']}: FAILED — {e}")
-                    failed[r["symbol"]] = str(e)
-            st.session_state["stopupdate_exec_log"] = log
-            resolved = succeeded + list(failed)
-            if resolved:
-                result["stop_updates"] = stop_updates[
-                    ~stop_updates["symbol"].isin(resolved)].reset_index(drop=True)
-                st.session_state["rebalance_proposal"] = result
-                state_db.mark_rebalance_stop_updates_executed(result.get("run_id"), succeeded)
-                state_db.mark_rebalance_stop_updates_failed(result.get("run_id"), failed)
-            st.rerun()
-    else:
-        st.caption("No trailing-stop increases needed attention today — "
-                  "either nothing ratcheted, or it all auto-applied cleanly.")
+    col_topups, col_stops = st.columns(2)
+    with col_topups:
+        with st.container(border=True, key="ov-card-lr-topups"):
+            st.markdown(
+                '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+                '<span class="ov-dot" style="background:var(--ov-blue);">'
+                f'</span>Proposed top-ups <span class="ov-badge ov-badge-gray">{len(top_ups)}</span></p>',
+                unsafe_allow_html=True)
+            if st.session_state.get("topup_exec_log"):
+                st.success("Top-up(s) executed and removed from the list below.")
+                for line in st.session_state["topup_exec_log"]:
+                    st.write(line)
+                del st.session_state["topup_exec_log"]
+            if not top_ups.empty:
+                st.caption(
+                    "Additional shares for positions you already hold that are below "
+                    "their equal-weight target, funded by cash left over after the "
+                    "buys above — the position's existing stop-loss carries over "
+                    "unchanged, only its GTT quantity gets updated to cover the new "
+                    "total.")
+                st.markdown(
+                    _ov_table_html(top_ups, sym_cols=["symbol"],
+                                  num_fmt={"extra_qty": "{:.0f}", "price": "₹{:.2f}"}),
+                    unsafe_allow_html=True)
+                confirm_topup = st.checkbox(
+                    "I confirm I want to execute ALL proposed top-ups at market",
+                    key="confirm_topup_all")
+                if st.button("Execute all top-ups", disabled=not confirm_topup or rebalance_running,
+                            use_container_width=True, key="lr_execute_topups"):
+                    log, succeeded, failed = lr.execute_top_ups(top_ups)
+                    st.session_state["topup_exec_log"] = log
+                    resolved = succeeded + list(failed)
+                    if resolved:
+                        result["top_ups"] = top_ups[
+                            ~top_ups["symbol"].isin(resolved)].reset_index(drop=True)
+                        st.session_state["rebalance_proposal"] = result
+                        state_db.mark_rebalance_top_ups_executed(result.get("run_id"), succeeded)
+                        state_db.mark_rebalance_top_ups_failed(result.get("run_id"), failed)
+                    st.rerun()
+            else:
+                st.caption("No under-target holdings, or no cash left over to top up with.")
 
-    st.caption("For GTT coverage/details and a full trade history, see:")
-    lc1, lc2 = st.columns(2)
-    with lc1:
-        st.page_link(page_positions_trade_p,
-                    label="GTT / Stop-Loss Management →", icon="🛑")
-    with lc2:
-        st.page_link(page_tradebook_p, label="Tradebook →", icon="📒")
+    with col_stops:
+        with st.container(border=True, key="ov-card-lr-stops"):
+            st.markdown(
+                '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+                '<span class="ov-dot" style="background:var(--ov-amber);">'
+                f'</span>Stop updates needing attention '
+                f'<span class="ov-badge ov-badge-gray">{len(stop_updates)}</span></p>',
+                unsafe_allow_html=True)
+            if st.session_state.get("stopupdate_exec_log"):
+                st.success("Stop update(s) applied and removed from the list below.")
+                for line in st.session_state["stopupdate_exec_log"]:
+                    st.write(line)
+                del st.session_state["stopupdate_exec_log"]
+            if not stop_updates.empty:
+                st.caption("Ratchets auto-apply; only ones that couldn't (no active "
+                          "GTT / Kite error) land here.")
+                _stops_display = stop_updates.copy()
+                _stops_display["gtt_status"] = _stops_display["gtt_trigger_id"].apply(
+                    lambda v: "none active" if pd.isna(v) else "active")
+                st.markdown(
+                    _ov_table_html(
+                        _stops_display,
+                        columns=["symbol", "current_stop", "recommended_stop", "gtt_status"],
+                        sym_cols=["symbol"],
+                        num_fmt={"current_stop": "₹{:.2f}", "recommended_stop": "₹{:.2f}"},
+                        badges={"gtt_status": {"active": "ov-badge-green",
+                                               "none active": "ov-badge-red"}}),
+                    unsafe_allow_html=True)
+                confirm_stops = st.checkbox(
+                    "I confirm I want to raise ALL these GTT stop-losses",
+                    key="confirm_stop_updates")
+                if st.button("Apply stop updates", disabled=not confirm_stops or rebalance_running,
+                            use_container_width=True, key="lr_apply_stops"):
+                    log = []
+                    succeeded = []
+                    failed = {}
+                    for _, r in stop_updates.iterrows():
+                        if pd.isna(r["gtt_trigger_id"]):
+                            log.append(f"⚠️ {r['symbol']}: no active GTT to update — "
+                                      "place one manually first (Trade tab).")
+                            failed[r["symbol"]] = "No active GTT to update"
+                            continue
+                        try:
+                            ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
+                            kite_client.modify_gtt_trigger(
+                                int(r["gtt_trigger_id"]), r["symbol"], int(r["qty"]),
+                                r["recommended_stop"], ltp)
+                            # Only now does the recommended stop become the applied
+                            # (real, broker-side) stop -- see apply_stop_update()'s
+                            # docstring for why this must never happen earlier.
+                            state_db.apply_stop_update(r["symbol"])
+                            log.append(f"✅ {r['symbol']}: stop raised to "
+                                      f"₹{r['recommended_stop']:.2f}")
+                            succeeded.append(r["symbol"])
+                        except Exception as e:
+                            log.append(f"❌ {r['symbol']}: FAILED — {e}")
+                            failed[r["symbol"]] = str(e)
+                    st.session_state["stopupdate_exec_log"] = log
+                    resolved = succeeded + list(failed)
+                    if resolved:
+                        result["stop_updates"] = stop_updates[
+                            ~stop_updates["symbol"].isin(resolved)].reset_index(drop=True)
+                        st.session_state["rebalance_proposal"] = result
+                        state_db.mark_rebalance_stop_updates_executed(result.get("run_id"), succeeded)
+                        state_db.mark_rebalance_stop_updates_failed(result.get("run_id"), failed)
+                    st.rerun()
+            else:
+                st.caption("No trailing-stop increases needed attention today — "
+                          "either nothing ratcheted, or it all auto-applied cleanly.")
+
+    with st.expander("🔮 What-if: preview equal-weight sizing"):
+        st.caption("Instant preview using the SAME sizing formula as the "
+                  "real proposal below (target/slot = total equity ÷ max "
+                  "positions, shortfall = slots needed × target − cash "
+                  "pool) — just with hypothetical inputs instead of the "
+                  "live config/balance. Doesn't re-run the screener, so it "
+                  "can't tell you which symbols would actually be picked "
+                  "at a different slot count, only how much cash each slot "
+                  "would need.")
+        _total_equity = _real_target * _real_max_positions
+        _held_value = _total_equity - available_cash
+        _still_held_count = len(result["holdings"]) - len(result["sells"])
+
+        wc1, wc2 = st.columns(2)
+        with wc1:
+            what_if_slots = st.slider("Max positions", min_value=1, max_value=25,
+                                      value=_real_max_positions, key="whatif_slots")
+        with wc2:
+            what_if_cash = st.number_input(
+                "Available cash (₹)", min_value=0.0, value=float(available_cash),
+                step=1000.0, key="whatif_cash")
+
+        what_if_total_equity = what_if_cash + _held_value
+        what_if_target = what_if_total_equity / what_if_slots if what_if_slots else 0.0
+        what_if_open_slots = max(what_if_slots - _still_held_count, 0)
+        what_if_cash_needed = what_if_open_slots * what_if_target
+        what_if_shortfall = max(0.0, what_if_cash_needed - what_if_cash)
+
+        st.markdown(
+            '<div class="ov-grid-metrics">'
+            + _ov_metric_html(
+                "Target per slot", f"₹{what_if_target:,.0f}",
+                (f"{what_if_target - _real_target:+,.0f} vs current" if _real_target else None),
+                "ov-pos" if what_if_target >= _real_target else "ov-neg", "teal")
+            + _ov_metric_html("Open slots", str(what_if_open_slots), "after sells", "", "purple")
+            + _ov_metric_html(
+                "Cash shortfall",
+                f"₹{what_if_shortfall:,.0f}" if what_if_shortfall else "₹0",
+                "fully funded" if not what_if_shortfall else None, "", "green")
+            + '</div>', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1494,76 +2626,132 @@ def page_live_rebalance():
 # ---------------------------------------------------------------------------
 
 def page_positions_trade():
-    st.subheader("💼 Positions, Holdings & Trade")
     cfg = config.STRATEGY
 
-    refresh_choice = st.selectbox(
-        "Auto-refresh positions/holdings from Kite", ["Off", "10s", "30s", "1m", "5m"],
-        index=2, key="pt_refresh_interval",
-        help="Only the positions/holdings tables below refresh on this timer -- "
-             "the rest of this page (square-off, orders, trade forms) isn't "
-             "affected, so nothing you're typing gets reset by it.")
+    hdr_l, hdr_r = st.columns([2, 3])
+    with hdr_l:
+        st.markdown(
+            '<div class="ov-header" style="margin-bottom:0;">'
+            '<div><span class="ov-h1">💼 Positions, Holdings &amp; Trade</span></div></div>',
+            unsafe_allow_html=True)
+    with hdr_r:
+        with st.container(key="pt_refresh_row"):
+            # A separate "Auto-refresh" label div next to the control kept
+            # landing in the wrong visual position however the flex CSS
+            # was tuned -- the widget's OWN native label (rendered above
+            # it) is unambiguous and needs no CSS guesswork to place
+            # correctly, at the cost of sitting above instead of beside.
+            refresh_choice = st.segmented_control(
+                "Auto-refresh", ["Off", "10s", "30s", "1m", "5m"],
+                default="30s", key="pt_refresh_interval", required=True,
+                help="Only the positions/holdings tables below refresh on this timer -- "
+                     "the rest of this page (square-off, orders, trade forms) isn't "
+                     "affected, so nothing you're typing gets reset by it.")
     run_every = None if refresh_choice == "Off" else refresh_choice
 
+    # Own small fragment (not the big orders/holdings one below) so this
+    # timestamp still ticks with the same run_every, but can render
+    # directly under the segmented control in the header instead of at
+    # the bottom of the orders/holdings cards.
     @st.fragment(run_every=run_every)
-    def _live_positions_holdings():
-        st.markdown("**Today's orders & positions**")
-        st.caption("Every order placed today, enriched with the resulting "
-                  "position's live LTP/P&L where it's still open -- open "
-                  "positions and today's orders showed almost entirely "
-                  "overlapping symbols/qty as separate tables, so this is "
-                  "one combined view instead of two near-duplicates.")
-        orders = kite_client.get_orders()
-        live_pos = kite_client.get_positions()
-        if orders.empty:
-            st.caption("No orders today.")
-        else:
-            pos_by_symbol = {}
-            if not live_pos.empty:
-                for _, r in live_pos[live_pos["quantity"] != 0].iterrows():
-                    pos_by_symbol[r["tradingsymbol"]] = {
-                        "current_qty": r["quantity"], "ltp": r["last_price"],
-                        "pnl": r["pnl"], "product": r["product"]}
-            display = orders[["order_timestamp", "tradingsymbol", "transaction_type",
-                             "quantity", "average_price", "status"]].copy()
-            display["current_qty"] = display["tradingsymbol"].map(
-                lambda s: pos_by_symbol.get(s, {}).get("current_qty"))
-            display["ltp"] = display["tradingsymbol"].map(
-                lambda s: pos_by_symbol.get(s, {}).get("ltp"))
-            display["pnl"] = display["tradingsymbol"].map(
-                lambda s: pos_by_symbol.get(s, {}).get("pnl"))
-            display["product"] = display["tradingsymbol"].map(
-                lambda s: pos_by_symbol.get(s, {}).get("product"))
-            st.dataframe(
-                pnl_style(display, ["pnl"],
-                         {"average_price": "{:.2f}", "ltp": "{:.2f}", "pnl": "{:,.0f}"},
-                         na_rep="—"),
-                width="stretch", hide_index=True)
-            total_pnl = live_pos[live_pos["quantity"] != 0]["pnl"].sum() \
-                if not live_pos.empty else 0.0
-            st.metric("Total position P&L", f"₹{total_pnl:,.0f}")
+    def _refresh_status():
+        st.markdown(
+            '<p class="ov-card-meta" style="text-align:right;margin:2px 0 14px;font-size:10px;">'
+            f'Last refreshed {dt.datetime.now():%H:%M:%S}'
+            + (f" · auto-refreshing every {refresh_choice}" if run_every else "")
+            + '</p>', unsafe_allow_html=True)
 
-        st.markdown("**Holdings (CNC)**")
-        live_hold = kite_client.get_holdings()
-        if live_hold.empty:
-            st.caption("No holdings.")
-        else:
-            live_hold = live_hold.copy()
-            live_hold["pnl_pct"] = ((live_hold["last_price"] / live_hold["average_price"]) - 1) * 100
-            st.dataframe(
-                pnl_style(
-                    live_hold[["tradingsymbol", "quantity", "average_price",
-                              "last_price", "pnl", "pnl_pct"]],
-                    ["pnl", "pnl_pct"],
-                    {"average_price": "{:.2f}", "last_price": "{:.2f}",
-                     "pnl": "{:,.0f}", "pnl_pct": "{:.2f}"}),
-                width="stretch", hide_index=True)
-            st.metric("Total holdings P&L", f"₹{live_hold['pnl'].sum():,.0f}")
+    with hdr_r:
+        _refresh_status()
 
-        st.caption(f"Last refreshed {dt.datetime.now():%H:%M:%S}"
-                  + (f" · auto-refreshing every {refresh_choice}" if run_every else ""))
+    @st.fragment(run_every=run_every)
+    def _live_holdings():
+        with st.container(border=True, key="ov-card-pt-holdings"):
+            st.markdown(
+                '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+                '<span class="ov-dot" '
+                'style="background:var(--ov-purple);"></span>Holdings (CNC)</p>',
+                unsafe_allow_html=True)
+            live_hold = kite_client.get_holdings()
+            if live_hold.empty:
+                st.caption("No holdings.")
+            else:
+                live_hold = live_hold.copy()
+                live_hold["pnl_pct"] = ((live_hold["last_price"] / live_hold["average_price"]) - 1) * 100
+                live_hold["invested_capital"] = live_hold["quantity"] * live_hold["average_price"]
+                live_hold["current_capital"] = live_hold["quantity"] * live_hold["last_price"]
+                st.markdown(
+                    _ov_table_html(
+                        live_hold[["tradingsymbol", "quantity", "average_price",
+                                  "last_price", "invested_capital", "current_capital",
+                                  "pnl", "pnl_pct"]],
+                        sym_cols=["tradingsymbol"], pnl_cols=["pnl", "pnl_pct"],
+                        num_fmt={"quantity": "{:.0f}", "average_price": "₹{:.2f}",
+                                "last_price": "₹{:.2f}", "invested_capital": "₹{:,.0f}",
+                                "current_capital": "₹{:,.0f}", "pnl": "{:+,.0f}",
+                                "pnl_pct": "{:+.2f}%"}),
+                    unsafe_allow_html=True)
+                _hold_pnl = float(live_hold["pnl"].sum())
+                _hold_pnl_cls = "ov-pos" if _hold_pnl >= 0 else "ov-neg"
+                st.markdown(
+                    f'<div class="ov-row"><span class="ov-card-meta">Total holdings P&amp;L</span>'
+                    f'<span class="ov-sym {_hold_pnl_cls}">₹{_hold_pnl:+,.0f}</span></div>',
+                    unsafe_allow_html=True)
 
-    _live_positions_holdings()
+    @st.fragment(run_every=run_every)
+    def _live_orders():
+        with st.container(border=True, key="ov-card-pt-orders"):
+            _orders_tip = html_lib.escape(
+                "Every order placed today, enriched with the resulting "
+                "position's live LTP/P&L where it's still open -- open "
+                "positions and today's orders showed almost entirely "
+                "overlapping symbols/qty as separate tables, so this is "
+                "one combined view instead of two near-duplicates.")
+            st.markdown(
+                '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+                '<span class="ov-dot" style="background:var(--ov-blue);">'
+                '</span>Today\'s orders &amp; positions'
+                f'<span class="ov-info-icon" title="{_orders_tip}">ℹ️</span></p>',
+                unsafe_allow_html=True)
+            orders = kite_client.get_orders()
+            live_pos = kite_client.get_positions()
+            if orders.empty:
+                st.caption("No orders today.")
+            else:
+                pos_by_symbol = {}
+                if not live_pos.empty:
+                    for _, r in live_pos[live_pos["quantity"] != 0].iterrows():
+                        pos_by_symbol[r["tradingsymbol"]] = {
+                            "current_qty": r["quantity"], "ltp": r["last_price"],
+                            "pnl": r["pnl"], "product": r["product"]}
+                display = orders[["order_timestamp", "tradingsymbol", "transaction_type",
+                                 "quantity", "average_price", "status"]].copy()
+                display["current_qty"] = display["tradingsymbol"].map(
+                    lambda s: pos_by_symbol.get(s, {}).get("current_qty"))
+                display["ltp"] = display["tradingsymbol"].map(
+                    lambda s: pos_by_symbol.get(s, {}).get("ltp"))
+                display["pnl"] = display["tradingsymbol"].map(
+                    lambda s: pos_by_symbol.get(s, {}).get("pnl"))
+                display["product"] = display["tradingsymbol"].map(
+                    lambda s: pos_by_symbol.get(s, {}).get("product"))
+                st.markdown(
+                    _ov_table_html(
+                        display, sym_cols=["tradingsymbol"], pnl_cols=["pnl"],
+                        num_fmt={"quantity": "{:.0f}", "average_price": "₹{:.2f}",
+                                "current_qty": "{:.0f}", "ltp": "₹{:.2f}"},
+                        badges={
+                            "transaction_type": lambda v: "ov-badge-green" if v == "BUY" else "ov-badge-red",
+                            "status": _ov_order_status_cls}),
+                    unsafe_allow_html=True)
+                total_pnl = live_pos[live_pos["quantity"] != 0]["pnl"].sum() \
+                    if not live_pos.empty else 0.0
+                _pnl_cls = "ov-pos" if total_pnl >= 0 else "ov-neg"
+                st.markdown(
+                    f'<div class="ov-row"><span class="ov-card-meta">Total position P&amp;L</span>'
+                    f'<span class="ov-sym {_pnl_cls}">₹{total_pnl:+,.0f}</span></div>',
+                    unsafe_allow_html=True)
+
+    _live_holdings()
 
     # Separate fetch for the sections below (square-off, stop-loss, orders) --
     # these don't live inside the auto-refreshing fragment above, since their
@@ -1579,230 +2767,278 @@ def page_positions_trade():
         all_syms += list(hold[hold["quantity"] > 0]["tradingsymbol"])
     all_syms = sorted(set(all_syms))
 
-    st.divider()
-    st.subheader(
-        "🛑 GTT / Stop-Loss Management",
-        help="The one place for GTT visibility and actions: every current "
-             "position/holding, its live GTT status straight from Kite "
-             "(the source of truth, not just this app's own tracking), "
-             "and -- for anything unprotected -- the action to place one. "
-             "Computes the same ATR-based stop this app always uses for a "
-             "position bought outside its own buy flow (e.g. placed "
-             "directly on Kite), and backfills this app's own bookkeeping "
-             "so future trailing-stop updates pick it up too.")
+    col_orders, col_gtt = st.columns(2)
+    with col_orders:
+        _live_orders()
 
-    try:
-        active_gtts = kite_client.get_active_gtts()
-        gtt_by_symbol = {}
-        if not active_gtts.empty and "condition" in active_gtts.columns:
-            for _, g in active_gtts.iterrows():
-                cond = g.get("condition") or {}
-                gsym = cond.get("tradingsymbol") if isinstance(cond, dict) else None
-                if not gsym:
-                    continue
-                trigger_vals = cond.get("trigger_values") if isinstance(cond, dict) else None
-                gtt_by_symbol[gsym] = {
-                    "trigger_price": trigger_vals[0] if trigger_vals else None,
-                    "updated_at": g.get("updated_at"),
-                }
-    except Exception as e:
-        st.warning(f"Could not fetch GTTs from Kite: {e}")
-        gtt_by_symbol = {}
+    with col_gtt:
+        with st.container(border=True, key="ov-card-pt-gtt"):
+            st.markdown(
+                '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+                '<span class="ov-dot" '
+                'style="background:var(--ov-red);"></span> GTT / Stop-Loss Management'
+                '<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+                'Straight from Kite — the source of truth</span></p>',
+                unsafe_allow_html=True,
+                help="The one place for GTT visibility and actions: every current "
+                     "position/holding, its live GTT status straight from Kite "
+                     "(the source of truth, not just this app's own tracking), "
+                     "and -- for anything unprotected -- the action to place one. "
+                     "Computes the same ATR-based stop this app always uses for a "
+                     "position bought outside its own buy flow (e.g. placed "
+                     "directly on Kite), and backfills this app's own bookkeeping "
+                     "so future trailing-stop updates pick it up too.")
 
-    gtt_symbols = set(gtt_by_symbol)
-    gtt_rows = []
-    for sym in all_syms:
-        g = gtt_by_symbol.get(sym)
-        gtt_rows.append({
-            "symbol": sym, "gtt_active": "✅" if g else "❌",
-            "trigger_price": g["trigger_price"] if g else None,
-            "updated_at": g["updated_at"] if g else None,
-        })
-    gtt_table = pd.DataFrame(gtt_rows)
-    if not gtt_table.empty:
-        st.dataframe(
-            pnl_style(gtt_table.sort_values("symbol"), fmt={"trigger_price": "{:.2f}"},
-                     na_rep="—"),
-            width="stretch", hide_index=True)
+            try:
+                active_gtts = kite_client.get_active_gtts()
+                gtt_by_symbol = {}
+                if not active_gtts.empty and "condition" in active_gtts.columns:
+                    for _, g in active_gtts.iterrows():
+                        cond = g.get("condition") or {}
+                        gsym = cond.get("tradingsymbol") if isinstance(cond, dict) else None
+                        if not gsym:
+                            continue
+                        trigger_vals = cond.get("trigger_values") if isinstance(cond, dict) else None
+                        gtt_by_symbol[gsym] = {
+                            "trigger_price": trigger_vals[0] if trigger_vals else None,
+                            "updated_at": g.get("updated_at"),
+                        }
+            except Exception as e:
+                st.warning(f"Could not fetch GTTs from Kite: {e}")
+                gtt_by_symbol = {}
 
-    unprotected_syms = [s for s in all_syms if s not in gtt_symbols]
+            gtt_symbols = set(gtt_by_symbol)
+            gtt_rows = []
+            for sym in all_syms:
+                g = gtt_by_symbol.get(sym)
+                _updated_raw = g["updated_at"] if g else None
+                _updated_fmt = None
+                if _updated_raw:
+                    try:
+                        _updated_fmt = pd.to_datetime(_updated_raw).strftime("%d %b")
+                    except Exception:
+                        _updated_fmt = str(_updated_raw)
+                gtt_rows.append({
+                    "symbol": sym, "gtt_active": "active" if g else "none",
+                    "trigger_price": g["trigger_price"] if g else None,
+                    "updated_at": _updated_fmt,
+                })
+            gtt_table = pd.DataFrame(gtt_rows)
+            if not gtt_table.empty:
+                st.markdown(
+                    _ov_table_html(
+                        gtt_table.sort_values("symbol"), sym_cols=["symbol"],
+                        num_fmt={"trigger_price": "₹{:.2f}"},
+                        badges={"gtt_active": {"active": "ov-badge-green", "none": "ov-badge-red"}}),
+                    unsafe_allow_html=True)
 
-    if not unprotected_syms:
-        st.success("Every current position/holding has an active GTT.")
-    else:
-        st.warning(f"{len(unprotected_syms)} unprotected: "
-                  f"{', '.join(unprotected_syms)} — place a stop-loss below.")
-        sl_symbol = st.selectbox("Symbol", unprotected_syms, key="manual_sl_symbol")
+            unprotected_syms = [s for s in all_syms if s not in gtt_symbols]
 
-        sl_qty, sl_avg_price = 0, 0.0
-        if not pos.empty and sl_symbol in pos["tradingsymbol"].values:
-            r = pos[pos["tradingsymbol"] == sl_symbol].iloc[0]
-            sl_qty, sl_avg_price = int(r["quantity"]), float(r["average_price"])
-        elif not hold.empty and sl_symbol in hold["tradingsymbol"].values:
-            r = hold[hold["tradingsymbol"] == sl_symbol].iloc[0]
-            sl_qty, sl_avg_price = int(r["quantity"]), float(r["average_price"])
+            if not unprotected_syms:
+                st.markdown(
+                    '<div class="ov-alert ov-alert-success">✓ Every current '
+                    'position/holding has an active GTT.</div>', unsafe_allow_html=True)
+            else:
+                st.warning(f"{len(unprotected_syms)} unprotected: "
+                          f"{', '.join(unprotected_syms)} — place a stop-loss below.")
+                sl_symbol = st.selectbox("Symbol", unprotected_syms, key="manual_sl_symbol")
+
+                sl_qty, sl_avg_price = 0, 0.0
+                if not pos.empty and sl_symbol in pos["tradingsymbol"].values:
+                    r = pos[pos["tradingsymbol"] == sl_symbol].iloc[0]
+                    sl_qty, sl_avg_price = int(r["quantity"]), float(r["average_price"])
+                elif not hold.empty and sl_symbol in hold["tradingsymbol"].values:
+                    r = hold[hold["tradingsymbol"] == sl_symbol].iloc[0]
+                    sl_qty, sl_avg_price = int(r["quantity"]), float(r["average_price"])
+
+                try:
+                    sl_ltp = kite_client.get_ltp([sl_symbol])[sl_symbol]
+                    sl_df = kite_client.fetch_daily_candles(sl_symbol, days=120)
+                    sl_atr = float(indicators.atr(sl_df, cfg["atr_period"]).iloc[-1])
+                    sl_stop = sl_ltp - cfg["atr_stop_multiple"] * sl_atr
+                except Exception as e:
+                    st.warning(f"Couldn't fetch live data: {e}")
+                    sl_ltp, sl_stop = 0.0, 0.0
+
+                st.markdown(
+                    '<div class="ov-grid-metrics">'
+                    + _ov_metric_html("Quantity", str(sl_qty), None, "", "blue")
+                    + _ov_metric_html("LTP", f"₹{sl_ltp:,.2f}", None, "", "red")
+                    + _ov_metric_html("ATR stop", f"₹{sl_stop:,.2f}",
+                                     f"{cfg['atr_stop_multiple']}× ATR({cfg['atr_period']})",
+                                     "", "purple")
+                    + '</div>', unsafe_allow_html=True)
+
+                sl_confirm = st.checkbox("I confirm this GTT stop-loss", key="manual_sl_confirm")
+                if st.button("Place stop-loss", type="primary",
+                            disabled=not sl_confirm or sl_qty == 0 or sl_stop <= 0,
+                            key="manual_sl_place", use_container_width=True):
+                    try:
+                        gtt_id = kite_client.place_gtt_stoploss(sl_symbol, sl_qty, sl_stop, sl_ltp)
+                    except Exception as e:
+                        st.error(f"GTT placement failed: {e}")
+                    else:
+                        state_db.upsert_manual_position(sl_symbol, sl_avg_price, sl_qty,
+                                                        sl_stop, gtt_id)
+                        st.success(f"GTT stop-loss placed: trigger {gtt_id} at ₹{sl_stop:,.1f}")
+                        st.rerun()
+
+    with st.container(border=True, key="ov-card-pt-order"):
+        # The right-hand subtitle needs qty/ltp/side, which aren't known
+        # until after the form widgets below run -- render into this
+        # placeholder later instead of a static line up front.
+        _order_title_ph = st.empty()
+        _order_tip = html_lib.escape(
+            "Sizing uses your ATR stop so every BUY risks the same % of "
+            "capital. Pick SELL on something you currently hold to square "
+            "off the whole position at market in one click.")
+
+        symbol_choices = sorted(set(all_syms) | set(config.UNIVERSE))
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            symbol = st.selectbox("Symbol", symbol_choices, key="trade_symbol")
+            side = st.segmented_control("Side", ["BUY", "SELL"], default="BUY",
+                                        key="trade_side", required=True)
+
+        held_qty, held_avg_price = 0, 0.0
+        if not pos.empty and symbol in pos["tradingsymbol"].values:
+            r = pos[pos["tradingsymbol"] == symbol].iloc[0]
+            held_qty, held_avg_price = int(r["quantity"]), float(r["average_price"])
+        elif not hold.empty and symbol in hold["tradingsymbol"].values:
+            r = hold[hold["tradingsymbol"] == symbol].iloc[0]
+            held_qty, held_avg_price = int(r["quantity"]), float(r["average_price"])
+
+        square_off_mode = False
+        if side == "SELL" and held_qty > 0:
+            square_off_mode = st.checkbox(
+                f"Square off entire position ({held_qty} shares at market)",
+                value=True, key="trade_square_off")
+
+        with col2:
+            capital = st.number_input("Capital for sizing (₹)",
+                                      value=float(available_cash), step=10000.0,
+                                      key="trade_capital", disabled=square_off_mode)
+            order_type = st.segmented_control(
+                "Order type", ["MARKET", "LIMIT"], default="MARKET",
+                key="trade_order_type", disabled=square_off_mode, required=True)
+            limit_price = st.number_input("Limit price", value=0.0, step=0.05,
+                                          key="trade_limit") \
+                if (order_type == "LIMIT" and not square_off_mode) else None
 
         try:
-            sl_ltp = kite_client.get_ltp([sl_symbol])[sl_symbol]
-            sl_df = kite_client.fetch_daily_candles(sl_symbol, days=120)
-            sl_atr = float(indicators.atr(sl_df, cfg["atr_period"]).iloc[-1])
-            sl_stop = sl_ltp - cfg["atr_stop_multiple"] * sl_atr
+            ltp = kite_client.get_ltp([symbol])[symbol]
+            df = kite_client.fetch_daily_candles(symbol, days=120)
+            atr_now = float(indicators.atr(df, cfg["atr_period"]).iloc[-1])
+            stop = ltp - cfg["atr_stop_multiple"] * atr_now
+            suggested_qty = screener.position_size(capital, ltp, stop)
         except Exception as e:
             st.warning(f"Couldn't fetch live data: {e}")
-            sl_ltp, sl_stop = 0.0, 0.0
+            ltp, stop, suggested_qty = 0.0, 0.0, 0
 
-        slc1, slc2, slc3 = st.columns(3)
-        slc1.metric("Quantity", sl_qty)
-        slc2.metric("LTP", f"₹{sl_ltp:,.2f}")
-        slc3.metric("ATR stop", f"₹{sl_stop:,.2f}",
-                   help=f"{cfg['atr_stop_multiple']}× ATR({cfg['atr_period']}) below LTP")
-
-        sl_confirm = st.checkbox("I confirm this GTT stop-loss", key="manual_sl_confirm")
-        if st.button("Place stop-loss", type="primary",
-                    disabled=not sl_confirm or sl_qty == 0 or sl_stop <= 0,
-                    key="manual_sl_place"):
-            try:
-                gtt_id = kite_client.place_gtt_stoploss(sl_symbol, sl_qty, sl_stop, sl_ltp)
-            except Exception as e:
-                st.error(f"GTT placement failed: {e}")
+        with col3:
+            st.markdown(
+                '<div class="ov-grid-metrics">'
+                + _ov_metric_html("LTP", f"₹{ltp:,.2f}", None, "", "blue")
+                + _ov_metric_html("ATR stop", f"₹{stop:,.2f}", None, "", "red")
+                + '</div>', unsafe_allow_html=True)
+            if square_off_mode:
+                qty = held_qty
+                st.markdown(
+                    '<div class="ov-grid-metrics">'
+                    + _ov_metric_html("Quantity", str(qty), None, "", "purple")
+                    + '</div>', unsafe_allow_html=True)
             else:
-                state_db.upsert_manual_position(sl_symbol, sl_avg_price, sl_qty,
-                                                sl_stop, gtt_id)
-                st.success(f"GTT stop-loss placed: trigger {gtt_id} at ₹{sl_stop:,.1f}")
-                st.rerun()
+                default_qty = held_qty if (side == "SELL" and held_qty > 0) else int(suggested_qty)
+                qty = st.number_input("Quantity", value=default_qty, min_value=0,
+                                      help=f"Suggested for {cfg['risk_per_trade_pct']}% risk"
+                                           if side == "BUY" else "Currently held quantity",
+                                      key="trade_qty")
 
-    st.divider()
-    st.subheader("Place an order")
-    st.caption("Sizing uses your ATR stop so every BUY risks the same % of capital. "
-               "Pick SELL on something you currently hold to square off the whole "
-               "position at market in one click.")
+        place_gtt = False
+        if side == "BUY" and not square_off_mode:
+            place_gtt = st.checkbox("Also place GTT stop-loss at the ATR stop", value=True,
+                                    key="trade_place_gtt")
 
-    symbol_choices = sorted(set(all_syms) | set(config.UNIVERSE))
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        symbol = st.selectbox("Symbol", symbol_choices, key="trade_symbol")
-        side = st.radio("Side", ["BUY", "SELL"], horizontal=True, key="trade_side")
+        confirm = st.checkbox(
+            f"I confirm I want to close my entire {symbol} position at market"
+            if square_off_mode else "I confirm this order",
+            key="trade_confirm")
 
-    held_qty, held_avg_price = 0, 0.0
-    if not pos.empty and symbol in pos["tradingsymbol"].values:
-        r = pos[pos["tradingsymbol"] == symbol].iloc[0]
-        held_qty, held_avg_price = int(r["quantity"]), float(r["average_price"])
-    elif not hold.empty and symbol in hold["tradingsymbol"].values:
-        r = hold[hold["tradingsymbol"] == symbol].iloc[0]
-        held_qty, held_avg_price = int(r["quantity"]), float(r["average_price"])
-
-    square_off_mode = False
-    if side == "SELL" and held_qty > 0:
-        square_off_mode = st.checkbox(
-            f"Square off entire position ({held_qty} shares at market)",
-            value=True, key="trade_square_off")
-
-    with col2:
-        capital = st.number_input("Capital for sizing (₹)",
-                                  value=float(available_cash), step=10000.0,
-                                  key="trade_capital", disabled=square_off_mode)
-        order_type = st.radio("Order type", ["MARKET", "LIMIT"], horizontal=True,
-                              key="trade_order_type", disabled=square_off_mode)
-        limit_price = st.number_input("Limit price", value=0.0, step=0.05,
-                                      key="trade_limit") \
-            if (order_type == "LIMIT" and not square_off_mode) else None
-
-    try:
-        ltp = kite_client.get_ltp([symbol])[symbol]
-        df = kite_client.fetch_daily_candles(symbol, days=120)
-        atr_now = float(indicators.atr(df, cfg["atr_period"]).iloc[-1])
-        stop = ltp - cfg["atr_stop_multiple"] * atr_now
-        suggested_qty = screener.position_size(capital, ltp, stop)
-    except Exception as e:
-        st.warning(f"Couldn't fetch live data: {e}")
-        ltp, stop, suggested_qty = 0.0, 0.0, 0
-
-    with col3:
-        st.metric("LTP", f"₹{ltp:,.2f}")
-        st.metric("ATR stop", f"₹{stop:,.2f}")
         if square_off_mode:
-            qty = held_qty
-            st.metric("Quantity", qty)
+            _preview_bold = f"SELL {qty} × {symbol} at market (square-off)"
+            _preview_rest = f" ≈ ₹{qty * ltp:,.0f}"
         else:
-            default_qty = held_qty if (side == "SELL" and held_qty > 0) else int(suggested_qty)
-            qty = st.number_input("Quantity", value=default_qty, min_value=0,
-                                  help=f"Suggested for {cfg['risk_per_trade_pct']}% risk"
-                                       if side == "BUY" else "Currently held quantity",
-                                  key="trade_qty")
+            est_value = qty * ltp
+            _preview_bold = f"{side} {qty} × {symbol}"
+            _preview_rest = (f" ≈ ₹{est_value:,.0f} "
+                            f"({order_type}{f' @ ₹{limit_price}' if limit_price else ''})"
+                            + (f" + GTT SL at ₹{stop:,.1f}" if place_gtt else ""))
+        _order_title_ph.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-green);"></span>Place an order'
+            f'<span class="ov-info-icon" title="{_order_tip}">ℹ️</span></p>',
+            unsafe_allow_html=True)
 
-    place_gtt = False
-    if side == "BUY" and not square_off_mode:
-        place_gtt = st.checkbox("Also place GTT stop-loss at the ATR stop", value=True,
-                                key="trade_place_gtt")
-
-    if square_off_mode:
-        st.info(f"Order preview: **SELL {qty} × {symbol}** at market "
-                f"(square-off) ≈ ₹{qty * ltp:,.0f}")
-    else:
-        est_value = qty * ltp
-        st.info(f"Order preview: **{side} {qty} × {symbol}** ≈ ₹{est_value:,.0f} "
-                f"({order_type}{f' @ ₹{limit_price}' if limit_price else ''})"
-                + (f" + GTT SL at ₹{stop:,.1f}" if place_gtt else ""))
-
-    confirm = st.checkbox(
-        f"I confirm I want to close my entire {symbol} position at market"
-        if square_off_mode else "I confirm this order",
-        key="trade_confirm")
-    if st.button("Square off" if square_off_mode else "Execute order", type="primary",
-                disabled=not confirm or qty == 0, key="trade_execute"):
-        if square_off_mode:
-            try:
-                order_id = kite_client.square_off_position(symbol)
-                st.success(f"Square-off order placed: {order_id}")
+        if st.button("Square off" if square_off_mode else "Execute order", type="primary",
+                    disabled=not confirm or qty == 0, key="trade_execute",
+                    use_container_width=True):
+            if square_off_mode:
                 try:
-                    exit_ltp = kite_client.get_ltp([symbol])[symbol]
-                except Exception:
-                    exit_ltp = None
-                state_db.close_trade(symbol, exit_ltp, "manual_square_off")
-                # A stale GTT left pointing at a position you no longer
-                # hold can trigger and attempt to sell shares that aren't
-                # there, or just confusingly linger in the Kite GTT list.
-                tracked_pos = state_db.get_open_positions().get(symbol)
-                gtt_id = tracked_pos.get("gtt_trigger_id") if tracked_pos else None
-                if gtt_id:
+                    order_id = kite_client.square_off_position(symbol)
+                    st.success(f"Square-off order placed: {order_id}")
                     try:
-                        kite_client.delete_gtt(int(gtt_id))
-                        st.success(f"GTT {gtt_id} deleted")
-                    except Exception as e:
-                        st.warning(f"⚠️ GTT delete failed: {e} — remove it "
-                                  "manually in Kite or re-check here.")
-            except Exception as e:
-                st.error(f"Order failed: {e}")
-        else:
-            try:
-                oid = kite_client.place_order(symbol, qty, side,
-                                              order_type=order_type, price=limit_price)
-            except Exception as e:
-                st.error(f"Order failed: {e}")
-            else:
-                st.success(f"Order placed: {oid}")
-                if side == "BUY":
-                    gtt_id = None
-                    if place_gtt:
+                        exit_ltp = kite_client.get_ltp([symbol])[symbol]
+                    except Exception:
+                        exit_ltp = None
+                    state_db.close_trade(symbol, exit_ltp, "manual_square_off")
+                    # A stale GTT left pointing at a position you no longer
+                    # hold can trigger and attempt to sell shares that aren't
+                    # there, or just confusingly linger in the Kite GTT list.
+                    tracked_pos = state_db.get_open_positions().get(symbol)
+                    gtt_id = tracked_pos.get("gtt_trigger_id") if tracked_pos else None
+                    if gtt_id:
                         try:
-                            gtt_id = kite_client.place_gtt_stoploss(symbol, qty, stop, ltp)
-                            st.success(f"GTT stop-loss placed: trigger {gtt_id} at ₹{stop:,.1f}")
+                            kite_client.delete_gtt(int(gtt_id))
+                            st.success(f"GTT {gtt_id} deleted")
                         except Exception as e:
-                            st.warning(f"⚠️ Buy succeeded but GTT stop-loss FAILED: {e} "
-                                      "(no stop-loss in place — check the GTT / "
-                                      "Stop-Loss Management section below)")
-                    # Recorded even when the GTT failed (gtt_id=None), same
-                    # reasoning as the Live Rebalance buy flow.
-                    position_id = state_db.record_new_position(
-                        symbol, float(ltp), int(qty), float(stop), gtt_id)
-                    # No screener row here (this is a manually-picked symbol, not
-                    # a candidate from the scan) -- entry snapshot is just
-                    # price/qty/stop, same as record_new_position itself gets.
-                    state_db.record_trade_entry(
-                        symbol, float(ltp), int(qty), float(stop),
-                        snapshot={"entry_reason": "Manually placed order (Trade tab), "
-                                 "not from the automated scan"},
-                        position_id=position_id)
+                            st.warning(f"⚠️ GTT delete failed: {e} — remove it "
+                                      "manually in Kite or re-check here.")
+                except Exception as e:
+                    st.error(f"Order failed: {e}")
+            else:
+                try:
+                    oid = kite_client.place_order(symbol, qty, side,
+                                                  order_type=order_type, price=limit_price)
+                except Exception as e:
+                    st.error(f"Order failed: {e}")
+                else:
+                    st.success(f"Order placed: {oid}")
+                    if side == "BUY":
+                        gtt_id = None
+                        if place_gtt:
+                            try:
+                                gtt_id = kite_client.place_gtt_stoploss(symbol, qty, stop, ltp)
+                                st.success(f"GTT stop-loss placed: trigger {gtt_id} at ₹{stop:,.1f}")
+                            except Exception as e:
+                                st.warning(f"⚠️ Buy succeeded but GTT stop-loss FAILED: {e} "
+                                          "(no stop-loss in place — check the GTT / "
+                                          "Stop-Loss Management section below)")
+                        # Recorded even when the GTT failed (gtt_id=None), same
+                        # reasoning as the Live Rebalance buy flow.
+                        position_id = state_db.record_new_position(
+                            symbol, float(ltp), int(qty), float(stop), gtt_id)
+                        # No screener row here (this is a manually-picked symbol, not
+                        # a candidate from the scan) -- entry snapshot is just
+                        # price/qty/stop, same as record_new_position itself gets.
+                        state_db.record_trade_entry(
+                            symbol, float(ltp), int(qty), float(stop),
+                            snapshot={"entry_reason": "Manually placed order (Trade tab), "
+                                     "not from the automated scan"},
+                            position_id=position_id)
+
+        st.markdown(
+            '<div class="ov-alert ov-alert-info">ℹ️ Order preview: '
+            f'<b>{_preview_bold}</b>{_preview_rest}</div>', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1810,8 +3046,7 @@ def page_positions_trade():
 # ---------------------------------------------------------------------------
 
 def page_backtest():
-    st.subheader("🧪 Backtest — calendar-entry momentum system")
-    st.caption(
+    _backtest_tip = html_lib.escape(
         "Replays the exact screener logic point-in-time with monthly "
         "rebalancing (any slot freed by a stop gets redeployed immediately, "
         "not just at the next rebalance), daily ATR-stop checks, and "
@@ -1820,156 +3055,248 @@ def page_backtest():
         "stop on, the equal-weight allocator with cross-slot borrowing. "
         "(The sector relative-strength bonus was tested here too -- "
         "including together with the equal-weight allocator -- and "
-        "removed: it lost on CAGR/Sharpe at every weight tried, with "
-        "*worse* drawdown too, so there's no free lunch even in trade for "
-        "safety.) Today's universe implies some survivorship bias "
-        "regardless — treat "
-        "parameter-sensitivity comparisons as more reliable than absolute "
-        "returns."
-    )
+        "removed: it lost on CAGR/Sharpe at every weight tried, with worse "
+        "drawdown too, so there's no free lunch even in trade for safety.) "
+        "Today's universe implies some survivorship bias regardless -- "
+        "treat parameter-sensitivity comparisons as more reliable than "
+        "absolute returns.")
+    _bt_hdr_l, _bt_hdr_r = st.columns([4, 3])
+    with _bt_hdr_l:
+        st.markdown(
+            '<div class="ov-header" style="margin-bottom:0;">'
+            '<div><span class="ov-h1">🧪 Backtest</span> '
+            '<span class="ov-sub">· calendar-entry momentum system</span>'
+            f'<span class="ov-info-icon" title="{_backtest_tip}">ℹ️</span></div></div>',
+            unsafe_allow_html=True)
+    with _bt_hdr_r:
+        _bt_hdr_r1, _bt_hdr_r2 = st.columns(2)
+        _build_fh_clicked = _bt_hdr_r1.button(
+            "Build/Refresh fundamentals history", key="bt_build_fh_hdr")
+        _run_backtest_clicked = _bt_hdr_r2.button(
+            "Run backtest", type="primary", key="bt_run_hdr")
 
-    range_mode = st.radio("Date range", ["Trailing years", "Custom dates"],
-                          horizontal=True)
-    b1, b2 = st.columns(2)
-    if range_mode == "Trailing years":
-        years = b1.slider("Years of history", 1.0, 5.0, 3.0, 0.5,
-                          help="Up to 5 years supported via chunked Kite "
-                               "fetches (Kite's historical API caps a single "
-                               "request at ~2000 days).")
-        start_date, end_date = None, None
-    else:
-        default_start = dt.date.today() - dt.timedelta(days=3 * 365)
-        start_date = b1.date_input("Start date", value=default_start,
-                                   max_value=dt.date.today())
-        end_date = b2.date_input("End date", value=dt.date.today(),
-                                 max_value=dt.date.today())
-        years = None
-    bc1, bc2 = st.columns(2)
-    with bc1:
-        bt_capital = bc1.number_input("Starting capital (₹)", value=1_000_000.0,
-                                      step=100000.0)
-    with bc2:
-        bt_max_positions = bc2.number_input(
-            "Max open positions", min_value=1, max_value=30,
-            value=int(config.STRATEGY["max_positions"]), step=1,
-            help="Backtest-only override (config.STRATEGY['max_positions'] "
-                 "is 10 live) -- more slots means more diversification but "
-                 "smaller equal-weight targets per slot; fewer slots "
-                 "concentrates capital in higher-conviction picks. Not "
-                 "itself an A/B-tuned edge parameter the way the ones below "
-                 "are, just a portfolio-construction choice to experiment "
-                 "with.")
-    st.caption("No per-trade cost is modeled — Zerodha charges no brokerage "
-              "on equity delivery (CNC). Statutory costs (STT, stamp duty, "
-              "exchange/SEBI charges) still apply in reality (~5-7 bps round "
-              "trip) but aren't broker-specific; use `--cost-bps` on the CLI "
-              "if you want a more conservative run that includes them.")
+    with st.container(border=True, key="ov-card-bt-config"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-blue);"></span>Run configuration'
+            '<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+            'Defaults mirror the LIVE strategy exactly</span></p>',
+            unsafe_allow_html=True)
 
-    st.divider()
-    st.subheader("🎯 Strategy parameters — tested & approved")
-    st.caption("Every value below defaults to the current LIVE config.STRATEGY "
-              "-- adjust and click Run backtest to test a variation, the same "
-              "way each of these earned its spot as the default in the first "
-              "place.")
-
-    p1, p2 = st.columns(2)
-    with p1:
-        rsi_min_v = st.number_input(
-            "RSI min", min_value=0.0, max_value=100.0,
-            value=float(config.STRATEGY["rsi_min"]), step=0.01, format="%.2f",
-            help="Momentum names trade 45-80 in this system's regime; below "
-                 "this is not yet in an uptrend.")
-    with p2:
-        rsi_max_v = st.number_input(
-            "RSI max", min_value=0.0, max_value=100.0,
-            value=float(config.STRATEGY["rsi_max"]), step=0.01, format="%.2f",
-            help="A 5-year A/B (max_positions=4) found raising this 78->80 "
-                 "improved CAGR 7.36->8.15%, Sharpe 1.14->1.25 -- re-verify "
-                 "any further move against that same baseline, not just "
-                 "eyeballing one run.")
-
-    p3, p4 = st.columns(2)
-    with p3:
-        use_trailing = st.checkbox(
-            "Trailing stop (chandelier-style)",
-            value=bool(config.STRATEGY["trailing_stop_enabled"]),
-            help="LIVE default is ON. Ratchets each position's stop up to "
-                 "highest_close_since_entry - multiple*ATR as it gains, "
-                 "never back down.")
-    with p4:
-        trailing_mult_v = st.number_input(
-            "Trailing ATR multiple", min_value=0.5, max_value=10.0,
-            value=float(config.STRATEGY["trailing_atr_multiple"]), step=0.25,
-            disabled=not use_trailing,
-            help="A 5-year sweep found an inverted-U peaking at 4.0x (the "
-                 "live default): CAGR 24.30% vs baseline 22.51%, Sharpe 1.73 "
-                 "vs 1.50, max drawdown -14.37% vs -18.06%.")
-
-    p5, p6 = st.columns(2)
-    with p5:
-        use_equal_weight = st.checkbox(
-            "Equal-weight allocator (cross-slot borrowing)",
-            value=bool(config.STRATEGY["advanced_equal_weight_sizing"]),
-            help="LIVE default is ON. Sizes the whole day's buys in one "
-                 "pass -- cross-slot borrowing within tolerance, partial "
-                 "fill on shortfall, hard-stop-not-substitute, top-up of "
-                 "under-target holdings -- instead of one-symbol-at-a-time "
-                 "greedy sizing.")
-    with p6:
-        equal_weight_tolerance_v = st.number_input(
-            "Equal-weight tolerance (fraction)", min_value=0.0, max_value=1.0,
-            value=float(config.STRATEGY["equal_weight_tolerance_pct"]), step=0.01,
-            format="%.2f", disabled=not use_equal_weight,
-            help="A 5-year A/B found 0.20 (the live default) beats the "
-                 "original one-at-a-time fill on every metric at once: CAGR "
-                 "43.06->44.39%, Sharpe 1.64->1.67, max drawdown "
-                 "-20.30->-19.58%, profit factor 2.10->2.12.")
-
-    use_fundamentals = st.checkbox(
-        "Include fundamental quality gate (point-in-time)", value=True,
-        help="This is the LIVE default (config.STRATEGY['fundamental_gate_"
-             "enabled']=True) -- uncheck only to see the pure-technical "
-             "baseline it was A/B'd against. Uses each filing's real "
-             "broadcast timestamp to only count what was actually public "
-             "knowledge as of each rebalance date -- not today's "
-             "fundamentals applied retroactively. Needs a fundamentals "
-             "history built below first (a one-time or periodic scan "
-             "across the universe, same cost as the Fundamentals page's "
-             "scan) -- without one, this checkbox has no effect regardless "
-             "of its state.")
-    p7, p8 = st.columns(2)
-    with p7:
-        fundamental_bonus_weight_v = st.number_input(
-            "Fundamental bonus weight", min_value=0.0, max_value=3.0,
-            value=float(config.STRATEGY["fundamental_bonus_weight"]), step=0.1,
-            disabled=not use_fundamentals,
-            help="Tilts ranking toward higher-quality gate-passers (on top "
-                 "of the gate itself, which only excludes/includes). A "
-                 "5-year sweep found an inverted-U peaking at 0.5 (the live "
-                 "default): CAGR 43.70->43.03% at 0.5, Sharpe 1.62->1.64, "
-                 "max drawdown improves -24.61->-20.30% -- anything above "
-                 "0.5 is a clear net negative.")
-    with p8:
-        min_fundamental_score_v = st.number_input(
-            "Min fundamental score (gate threshold)", min_value=0.0, max_value=100.0,
-            value=float(config.STRATEGY["min_fundamental_score"]), step=1.0,
-            disabled=not use_fundamentals,
-            help="NOT independently A/B-tuned -- config.py calls 50 (the "
-                 "live default) 'a rough average-or-better bar, tune to "
-                 "taste.' Only the gate's on/off status and the bonus "
-                 "weight above have documented A/B history; this threshold "
-                 "itself has never been swept, so treat any result here as "
-                 "a first look, not a verified finding.")
-    if use_fundamentals:
-        if os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
-            hist_cached = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)
-            age_hr = (dt.datetime.now() - hist_cached["run_time"]).total_seconds() / 3600
-            st.caption(f"📁 Fundamentals history built {age_hr:.1f}h ago "
-                      f"({len(hist_cached['history'])} symbols).")
+        rc1, rc2, rc3, rc4 = st.columns([1.3, 1.6, 1.1, 1.1])
+        with rc1:
+            range_mode = st.segmented_control(
+                "Date range", ["Trailing years", "Custom dates"],
+                default="Trailing years", key="bt_range_mode", required=True)
+        if range_mode == "Trailing years":
+            with rc2:
+                years = st.slider("Years of history", 1.0, 5.0, 3.0, 0.5,
+                                  help="Up to 5 years supported via chunked Kite "
+                                       "fetches (Kite's historical API caps a single "
+                                       "request at ~2000 days).")
+            start_date, end_date = None, None
         else:
-            st.warning("No fundamentals history built yet — the gate will "
-                      "have no effect until you build one.")
-        if st.button("Build/Refresh fundamentals history"):
+            with rc2:
+                rc2a, rc2b = st.columns(2)
+                default_start = dt.date.today() - dt.timedelta(days=3 * 365)
+                start_date = rc2a.date_input("Start date", value=default_start,
+                                             max_value=dt.date.today())
+                end_date = rc2b.date_input("End date", value=dt.date.today(),
+                                           max_value=dt.date.today())
+            years = None
+        with rc3:
+            bt_capital = st.number_input("Starting capital (₹)", value=1_000_000.0,
+                                        step=100000.0)
+        with rc4:
+            bt_max_positions = st.number_input(
+                "Max open positions", min_value=1, max_value=30,
+                value=int(config.STRATEGY["max_positions"]), step=1,
+                help="Backtest-only override (config.STRATEGY['max_positions'] "
+                     "is 10 live) -- more slots means more diversification but "
+                     "smaller equal-weight targets per slot; fewer slots "
+                     "concentrates capital in higher-conviction picks. Not "
+                     "itself an A/B-tuned edge parameter the way the ones below "
+                     "are, just a portfolio-construction choice to experiment "
+                     "with.")
+
+        st.divider()
+        if os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
+            _hist_cached_hdr = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)
+            _hist_age_hr = (dt.datetime.now() - _hist_cached_hdr["run_time"]).total_seconds() / 3600
+            _hist_meta = (f'📁 Fundamentals history built {_hist_age_hr:.1f}h ago '
+                         f'({len(_hist_cached_hdr["history"])} symbols)')
+        else:
+            _hist_meta = "⚠ Fundamentals history not built yet"
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-purple);"></span>🎯 Strategy parameters — '
+            'tested &amp; approved'
+            f'<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+            f'{_hist_meta}</span></p>', unsafe_allow_html=True)
+
+        sp1, sp2, sp3, sp4, sp5 = st.columns(5)
+        with sp1:
+            rsi_min_v = st.number_input(
+                "RSI min", min_value=0.0, max_value=100.0,
+                value=float(config.STRATEGY["rsi_min"]), step=0.01, format="%.2f",
+                help="Momentum names trade 45-80 in this system's regime; below "
+                     "this is not yet in an uptrend.")
+        with sp2:
+            rsi_max_v = st.number_input(
+                "RSI max", min_value=0.0, max_value=100.0,
+                value=float(config.STRATEGY["rsi_max"]), step=0.01, format="%.2f",
+                help="A 5-year A/B (max_positions=4) found raising this 78->80 "
+                     "improved CAGR 7.36->8.15%, Sharpe 1.14->1.25 -- re-verify "
+                     "any further move against that same baseline, not just "
+                     "eyeballing one run.")
+        with sp3:
+            st.markdown('<p class="ov-muted" style="margin-bottom:2px;">Trailing stop</p>',
+                       unsafe_allow_html=True)
+            ts1, ts2 = st.columns([1, 1])
+            with ts1:
+                use_trailing = st.checkbox(
+                    "Enabled", value=bool(config.STRATEGY["trailing_stop_enabled"]),
+                    key="bt_use_trailing",
+                    help="LIVE default is ON. Ratchets each position's stop up to "
+                         "highest_close_since_entry - multiple*ATR as it gains, "
+                         "never back down.")
+            with ts2:
+                trailing_mult_v = st.number_input(
+                    "ATR multiple", min_value=0.5, max_value=10.0,
+                    value=float(config.STRATEGY["trailing_atr_multiple"]), step=0.25,
+                    disabled=not use_trailing,
+                    help="A 5-year sweep found an inverted-U peaking at 4.0x (the "
+                         "live default): CAGR 24.30% vs baseline 22.51%, Sharpe 1.73 "
+                         "vs 1.50, max drawdown -14.37% vs -18.06%.")
+        with sp4:
+            st.markdown('<p class="ov-muted" style="margin-bottom:2px;">Equal-weight allocator</p>',
+                       unsafe_allow_html=True)
+            ew1, ew2 = st.columns([1, 1])
+            with ew1:
+                use_equal_weight = st.checkbox(
+                    "Enabled", value=bool(config.STRATEGY["advanced_equal_weight_sizing"]),
+                    key="bt_use_equal_weight",
+                    help="LIVE default is ON. Sizes the whole day's buys in one "
+                         "pass -- cross-slot borrowing within tolerance, partial "
+                         "fill on shortfall, hard-stop-not-substitute, top-up of "
+                         "under-target holdings -- instead of one-symbol-at-a-time "
+                         "greedy sizing.")
+            with ew2:
+                equal_weight_tolerance_v = st.number_input(
+                    "Tolerance", min_value=0.0, max_value=1.0,
+                    value=float(config.STRATEGY["equal_weight_tolerance_pct"]), step=0.01,
+                    format="%.2f", disabled=not use_equal_weight,
+                    help="A 5-year A/B found 0.20 (the live default) beats the "
+                         "original one-at-a-time fill on every metric at once: CAGR "
+                         "43.06->44.39%, Sharpe 1.64->1.67, max drawdown "
+                         "-20.30->-19.58%, profit factor 2.10->2.12.")
+        with sp5:
+            st.markdown('<p class="ov-muted" style="margin-bottom:2px;">Fundamental gate</p>',
+                       unsafe_allow_html=True)
+            use_fundamentals = st.checkbox(
+                "Point-in-time", value=True, key="bt_use_fundamentals",
+                help="This is the LIVE default (config.STRATEGY['fundamental_gate_"
+                     "enabled']=True) -- uncheck only to see the pure-technical "
+                     "baseline it was A/B'd against. Uses each filing's real "
+                     "broadcast timestamp to only count what was actually public "
+                     "knowledge as of each rebalance date -- not today's "
+                     "fundamentals applied retroactively. Needs a fundamentals "
+                     "history built first (top-right button) -- without one, "
+                     "this checkbox has no effect regardless of its state.")
+
+        sp6, sp7 = st.columns(2)
+        with sp6:
+            fundamental_bonus_weight_v = st.number_input(
+                "Fundamental bonus weight", min_value=0.0, max_value=3.0,
+                value=float(config.STRATEGY["fundamental_bonus_weight"]), step=0.1,
+                disabled=not use_fundamentals,
+                help="Tilts ranking toward higher-quality gate-passers (on top "
+                     "of the gate itself, which only excludes/includes). A "
+                     "5-year sweep found an inverted-U peaking at 0.5 (the live "
+                     "default): CAGR 43.70->43.03% at 0.5, Sharpe 1.62->1.64, "
+                     "max drawdown improves -24.61->-20.30% -- anything above "
+                     "0.5 is a clear net negative.")
+        with sp7:
+            min_fundamental_score_v = st.number_input(
+                "Min fundamental score", min_value=0.0, max_value=100.0,
+                value=float(config.STRATEGY["min_fundamental_score"]), step=1.0,
+                disabled=not use_fundamentals,
+                help="NOT independently A/B-tuned -- config.py calls 50 (the "
+                     "live default) 'a rough average-or-better bar, tune to "
+                     "taste.' Only the gate's on/off status and the bonus "
+                     "weight above have documented A/B history; this threshold "
+                     "itself has never been swept, so treat any result here as "
+                     "a first look, not a verified finding.")
+        if use_fundamentals and not os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
+            st.warning("Fundamentals history not built yet — the gate will "
+                      "have no effect until you build one (top-right button).")
+
+        st.markdown(
+            '<p class="ov-muted" style="margin-top:8px;">Momentum, trend &amp; '
+            'risk — full parity with Admin → Strategy configuration, not '
+            'independently A/B-tuned here</p>', unsafe_allow_html=True)
+        sp9, sp10, sp11, sp12 = st.columns(4)
+        with sp9:
+            mom_lookback_short_v = st.number_input(
+                "Momentum lookback — short (days)", min_value=5, max_value=252,
+                value=int(config.STRATEGY["mom_lookback_days_short"]), step=1)
+        with sp10:
+            mom_lookback_long_v = st.number_input(
+                "Momentum lookback — long (days)", min_value=5, max_value=504,
+                value=int(config.STRATEGY["mom_lookback_days_long"]), step=1)
+        with sp11:
+            skip_recent_days_v = st.number_input(
+                "Skip most recent (days)", min_value=0, max_value=30,
+                value=int(config.STRATEGY["skip_recent_days"]), step=1)
+        with sp12:
+            near_high_threshold_v = st.number_input(
+                "52-week-high proximity (%)", min_value=50.0, max_value=100.0,
+                value=float(config.STRATEGY["near_high_threshold"]) * 100, step=1.0,
+                help="Price must be at least this % of its 52-week high to qualify.")
+
+        sp13, sp14, sp15, sp16 = st.columns(4)
+        with sp13:
+            ema_fast_v = st.number_input(
+                "EMA (fast)", min_value=5, max_value=100,
+                value=int(config.STRATEGY["ema_fast"]), step=1)
+        with sp14:
+            ema_slow_v = st.number_input(
+                "EMA (slow)", min_value=50, max_value=400,
+                value=int(config.STRATEGY["ema_slow"]), step=1)
+        with sp15:
+            volume_expansion_min_v = st.number_input(
+                "Min volume expansion (20d/60d)", min_value=0.0, max_value=5.0,
+                value=float(config.STRATEGY["volume_expansion_min"]), step=0.1)
+        with sp16:
+            atr_stop_multiple_v = st.number_input(
+                "Initial stop (× ATR)", min_value=0.5, max_value=10.0,
+                value=float(config.STRATEGY["atr_stop_multiple"]), step=0.1)
+
+        sp17, sp18, sp19 = st.columns(3)
+        with sp17:
+            risk_per_trade_pct_v = st.number_input(
+                "Risk per trade (% of capital)", min_value=0.1, max_value=10.0,
+                value=float(config.STRATEGY["risk_per_trade_pct"]), step=0.1)
+        with sp18:
+            sector_bonus_weight_v = st.number_input(
+                "Sector bonus weight", min_value=0.0, max_value=1.0,
+                value=float(config.STRATEGY["sector_bonus_weight"]), step=0.05,
+                help="0 = off (recommended) -- re-tested with the equal-weight "
+                     "allocator specifically: loses on CAGR and Sharpe at every "
+                     "weight, and drawdown gets worse too, so there's no "
+                     "risk/reward trade-off to make here.")
+        with sp19:
+            history_days_v = st.number_input(
+                "Candle history fetched (days)", min_value=300, max_value=3000,
+                value=int(config.STRATEGY["history_days"]), step=100)
+
+        st.caption("No per-trade cost is modeled — Zerodha charges no brokerage "
+                  "on equity delivery (CNC). Statutory costs (STT, stamp duty, "
+                  "exchange/SEBI charges) still apply in reality (~5-7 bps round "
+                  "trip) but aren't broker-specific; use `--cost-bps` on the CLI "
+                  "if you want a more conservative run that includes them.")
+
+        if _build_fh_clicked:
             bar = st.progress(0.0, text="Starting...")
             history = fa.build_fundamentals_history(
                 config.UNIVERSE, n_years=5,
@@ -1992,7 +3319,7 @@ def page_backtest():
     if run_disabled:
         st.error("Start date must be before end date.")
 
-    if st.button("Run backtest", type="primary", disabled=run_disabled):
+    if _run_backtest_clicked and not run_disabled:
         with st.spinner("Loading candles (cached daily, first run is slow)..."):
             if range_mode == "Custom dates":
                 days = (dt.date.today() - start_date).days + 400
@@ -2023,6 +3350,17 @@ def page_backtest():
         run_cfg["fundamental_gate_enabled"] = use_fundamentals
         run_cfg["fundamental_bonus_weight"] = fundamental_bonus_weight_v
         run_cfg["min_fundamental_score"] = min_fundamental_score_v
+        run_cfg["mom_lookback_days_short"] = int(mom_lookback_short_v)
+        run_cfg["mom_lookback_days_long"] = int(mom_lookback_long_v)
+        run_cfg["skip_recent_days"] = int(skip_recent_days_v)
+        run_cfg["near_high_threshold"] = float(near_high_threshold_v) / 100
+        run_cfg["ema_fast"] = int(ema_fast_v)
+        run_cfg["ema_slow"] = int(ema_slow_v)
+        run_cfg["volume_expansion_min"] = float(volume_expansion_min_v)
+        run_cfg["atr_stop_multiple"] = float(atr_stop_multiple_v)
+        run_cfg["risk_per_trade_pct"] = float(risk_per_trade_pct_v)
+        run_cfg["sector_bonus_weight"] = float(sector_bonus_weight_v)
+        run_cfg["history_days"] = int(history_days_v)
         with st.spinner("Simulating..."):
             res = bt.run_backtest(candles_bt, bench_bt, run_cfg,
                                   initial_capital=bt_capital,
@@ -2052,54 +3390,81 @@ def page_backtest():
 
     nifty = bench_bt["close"].reindex(eq.index).ffill()
 
-    eq_fig = go.Figure()
-    eq_fig.add_trace(go.Scatter(
-        x=eq.index, y=eq / eq.iloc[0] * 100, name="Strategy", mode="lines",
-        line=dict(color="#16a34a", width=2),
-        hovertemplate="%{y:.1f}<extra>Strategy</extra>"))
-    eq_fig.add_trace(go.Scatter(
-        x=nifty.index, y=nifty / nifty.iloc[0] * 100, name="NIFTY 50", mode="lines",
-        line=dict(color="#6b7280", width=1.5, dash="dot"),
-        hovertemplate="%{y:.1f}<extra>NIFTY 50</extra>"))
-    eq_fig.update_layout(
-        title=dict(text="Backtest equity curve — growth of ₹100", x=0, xanchor="left"),
-        height=420, margin=dict(l=10, r=10, t=60, b=10), hovermode="x unified",
-        yaxis=dict(title="Growth of 100"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0))
-    st.plotly_chart(eq_fig, width="stretch")
+    with st.container(border=True, key="ov-card-bt-equity"):
+        eq_fig = go.Figure()
+        eq_fig.add_trace(go.Scatter(
+            x=eq.index, y=eq / eq.iloc[0] * 100, name="Strategy", mode="lines",
+            line=dict(color="#16a34a", width=2),
+            hovertemplate="%{y:.1f}<extra>Strategy</extra>"))
+        eq_fig.add_trace(go.Scatter(
+            x=nifty.index, y=nifty / nifty.iloc[0] * 100, name="NIFTY 50", mode="lines",
+            line=dict(color="#6b7280", width=1.5, dash="dot"),
+            hovertemplate="%{y:.1f}<extra>NIFTY 50</extra>"))
+        eq_fig.update_layout(
+            title=dict(text="Backtest equity curve — growth of ₹100", x=0, xanchor="left"),
+            height=420, margin=dict(l=10, r=10, t=60, b=10), hovermode="x unified",
+            yaxis=dict(title="Growth of 100"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0))
+        st.plotly_chart(eq_fig, width="stretch")
 
-    bc1, bc2, bc3, bc4 = st.columns(4)
-    bc1.metric("Final capital", f"₹{res['final_capital']:,.0f}",
-              f"{(res['final_capital'] / eq.iloc[0] - 1) * 100:+.1f}%")
-    bc2.metric("CAGR", f"{res['metrics']['CAGR %']}%")
-    bc3.metric("Sharpe", res["metrics"]["Sharpe"])
-    bc4.metric("Open positions", len(res["open_positions"]))
+    _m = res["metrics"]
+    _total_ret = (res["final_capital"] / eq.iloc[0] - 1) * 100
+    _cagr = _m.get("CAGR %")
+    _maxdd = _m.get("Max drawdown %")
+    st.markdown(
+        '<div class="ov-grid-metrics">'
+        + _ov_metric_html("Final capital", f"₹{res['final_capital']:,.0f}",
+                         f"{_total_ret:+.1f}% total", "ov-pos" if _total_ret >= 0 else "ov-neg", "green")
+        + _ov_metric_html("CAGR", f"{_cagr:.1f}%" if _cagr is not None else "—",
+                         None, "ov-pos" if (_cagr or 0) >= 0 else "ov-neg", "green",
+                         "ov-pos" if (_cagr or 0) >= 0 else "ov-neg")
+        + _ov_metric_html("Sharpe", f"{_m.get('Sharpe', '—')}", "daily, annualized", "", "blue")
+        + _ov_metric_html("Max drawdown", f"{_maxdd:.1f}%" if _maxdd is not None else "—",
+                         f"NIFTY {_m.get('NIFTY CAGR %', '—')}% CAGR", "", "coral")
+        + _ov_metric_html("Win rate", f"{_m.get('Win rate %', '—')}%",
+                         f"{_m.get('Trades', '—')} trades", "", "purple")
+        + _ov_metric_html("Profit factor", f"{_m.get('Profit factor', '—')}",
+                         "gross win/loss", "", "teal")
+        + _ov_metric_html("Open at end", str(len(res["open_positions"])),
+                         "not force-sold", "", "amber")
+        + '</div>', unsafe_allow_html=True)
 
-    st.dataframe(pd.DataFrame({"Value": res["metrics"]}), width="stretch")
+    with st.expander("Full metrics table"):
+        _metrics_df = pd.DataFrame({"Value": res["metrics"]})
+        _metrics_df.insert(0, "Metric", _metrics_df.index)
+        st.markdown(_ov_table_html(_metrics_df), unsafe_allow_html=True)
 
     dd = (eq / eq.cummax() - 1) * 100
-    dd_fig = go.Figure()
-    dd_fig.add_trace(go.Scatter(
-        x=dd.index, y=dd, name="Drawdown %", mode="lines",
-        line=dict(color="#dc2626", width=1.5), fill="tozeroy",
-        fillcolor="rgba(220,38,38,0.15)",
-        hovertemplate="%{y:.1f}%<extra>Drawdown</extra>"))
-    dd_fig.update_layout(
-        title=dict(text="Drawdown from peak", x=0, xanchor="left"),
-        height=260, margin=dict(l=10, r=10, t=50, b=10),
-        yaxis=dict(title="Drawdown %"), showlegend=False)
-    st.plotly_chart(dd_fig, width="stretch")
+    with st.container(border=True, key="ov-card-bt-drawdown"):
+        dd_fig = go.Figure()
+        dd_fig.add_trace(go.Scatter(
+            x=dd.index, y=dd, name="Drawdown %", mode="lines",
+            line=dict(color="#dc2626", width=1.5), fill="tozeroy",
+            fillcolor="rgba(220,38,38,0.15)",
+            hovertemplate="%{y:.1f}%<extra>Drawdown</extra>"))
+        dd_fig.update_layout(
+            title=dict(text="Drawdown from peak", x=0, xanchor="left"),
+            height=260, margin=dict(l=10, r=10, t=50, b=10),
+            yaxis=dict(title="Drawdown %"), showlegend=False)
+        st.plotly_chart(dd_fig, width="stretch")
 
-    st.subheader("Year-by-year performance")
     yp = bt.yearly_performance(eq, bench_bt, res["trades"])
     yc1, yc2 = st.columns([2, 3])
     with yc1:
-        st.dataframe(
-            pnl_style(yp, ["Strategy %", "Alpha %"],
-                     {"Strategy %": "{:.2f}", "NIFTY %": "{:.2f}",
-                      "Alpha %": "{:.2f}", "Win rate %": "{:.1f}"}),
-            width="stretch")
+      with st.container(border=True, key="ov-card-bt-yearly"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-teal);"></span>Year-by-year performance</p>',
+            unsafe_allow_html=True)
+        yp_display = yp.copy()
+        yp_display.insert(0, "Year", yp_display.index.astype(str))
+        st.markdown(
+            _ov_table_html(
+                yp_display, sym_cols=["Year"], pnl_cols=["Strategy %", "Alpha %"],
+                num_fmt={"NIFTY %": "{:+.2f}", "Win rate %": "{:.1f}"}),
+            unsafe_allow_html=True)
     with yc2:
+      with st.container(border=True, key="ov-card-bt-yearly-bar"):
         bar_fig = go.Figure()
         bar_colors = ["#16a34a" if v >= 0 else "#dc2626" for v in yp["Strategy %"]]
         bar_fig.add_trace(go.Bar(
@@ -2121,19 +3486,22 @@ def page_backtest():
                       "not force-sold. Unrealized P&L is marked to the last "
                       "available close, not an actual exit.")
             op = res["open_positions"].copy()
-            op["entry_date"] = pd.to_datetime(op["entry_date"]).dt.date
-            st.dataframe(
-                pnl_style(
+            op["entry_date"] = pd.to_datetime(op["entry_date"]).dt.date.astype(str)
+            st.markdown(
+                _ov_table_html(
                     op.sort_values("unrealized_pnl", ascending=False),
-                    ["unrealized_pnl", "unrealized_ret_pct"],
-                    {"entry_price": "{:.2f}", "current_price": "{:.2f}",
-                     "stop": "{:.2f}", "unrealized_pnl": "{:,.0f}",
-                     "unrealized_ret_pct": "{:.2f}"}),
-                width="stretch", hide_index=True)
+                    sym_cols=["symbol"], pnl_cols=["unrealized_pnl", "unrealized_ret_pct"],
+                    num_fmt={"entry_price": "₹{:.2f}", "current_price": "₹{:.2f}",
+                            "stop": "₹{:.2f}", "qty": "{:.0f}"}),
+                unsafe_allow_html=True)
 
-    with st.expander("All closed trades", expanded=True):
-        tr = res["trades"].copy()
-        if not tr.empty:
+    tr = res["trades"].copy()
+    if not tr.empty:
+        with st.container(border=True, key="ov-card-bt-closed"):
+            st.markdown(
+                '<p class="ov-card-title"><span class="ov-dot" '
+                'style="background:var(--ov-coral);"></span>All closed trades</p>',
+                unsafe_allow_html=True)
             tr["entry_date"] = pd.to_datetime(tr["entry_date"]).dt.date
             tr["exit_date"] = pd.to_datetime(tr["exit_date"]).dt.date
 
@@ -2159,12 +3527,17 @@ def page_backtest():
                 filtered = filtered[filtered["pnl"] <= 0]
 
             st.caption(f"Showing {len(filtered)} of {len(tr)} trades")
-            st.dataframe(
-                pnl_style(filtered.sort_values("entry_date", ascending=False),
-                         ["pnl", "ret_pct"],
-                         {"entry_price": "{:.2f}", "exit_price": "{:.2f}",
-                          "pnl": "{:,.0f}", "ret_pct": "{:.2f}"}),
-                width="stretch", hide_index=True)
+            filtered_sorted = filtered.sort_values("entry_date", ascending=False)
+            filtered_page = _ov_page_slice(filtered_sorted, key="bt_closed", page_size=20)
+            st.markdown(
+                _ov_table_html(
+                    filtered_page,
+                    sym_cols=["symbol"], pnl_cols=["pnl", "ret_pct"],
+                    num_fmt={"entry_price": "₹{:.2f}", "exit_price": "₹{:.2f}"},
+                    badges={"reason": lambda v: ("ov-badge-red" if v == "stop_hit"
+                                                 else "ov-badge-gray")}),
+                unsafe_allow_html=True)
+            _ov_pagination_controls(filtered_sorted, key="bt_closed", page_size=20)
             st.download_button("Download trades CSV (filtered view)",
                               filtered.to_csv(index=False),
                               "backtest_trades.csv")
@@ -2175,64 +3548,93 @@ def page_backtest():
 # ---------------------------------------------------------------------------
 
 def page_fundamentals():
-    st.subheader("📊 Fundamentals — primary-source value score")
-    st.caption(
-        "0-100 score from three pillars, computed entirely in Python from "
-        "the company's own audited XBRL filings — no scraping, no LLM. "
-        "Deterministic and free, so it runs across the full F&O universe."
-    )
-    st.info(
-        "**Sector-aware scoring.** Banks and NBFCs file under structurally "
-        "different XBRL taxonomies — banks don't tag Revenue/Equity/Current "
-        "Assets at all, and general-company thresholds would flag every "
-        "healthy NBFC as over-levered (NBFCs run 3-6x leverage by design). "
-        "Each symbol is routed to the rubric matching what its filings "
-        "actually contain: **general** (ROE, D/E, Current Ratio, FCF, "
-        "Revenue CAGR, PEG), **banking** (ROE, ROA, NIM proxy, Gross/Net "
-        "NPA, Advances growth), or **nbfc** (ROE, ROA, D/E, Loan growth — "
-        "also covers AMCs per NSE's own filing classification). Insurers "
-        "aren't covered yet — their key metrics (persistency, embedded "
-        "value, solvency ratio) aren't reliably XBRL-tagged. Balance-sheet "
-        "ratios only refresh once a year (audited annual filing). Missing "
-        "sub-metrics are dropped, not faked — check a row's missing "
-        "pillars before trusting a high total score."
-    )
-
     if "value_scores" not in st.session_state and os.path.exists(VALUE_SCORE_CACHE):
         st.session_state["value_scores"] = pd.read_pickle(VALUE_SCORE_CACHE)
         st.session_state["value_scores_is_cached"] = True
 
+    _last_scan_bit = ""
     if st.session_state.get("value_scores_is_cached"):
         age = dt.datetime.now() - dt.datetime.fromtimestamp(
             os.path.getmtime(VALUE_SCORE_CACHE))
-        st.caption(f"📁 Showing results from the last scan "
-                  f"({age.total_seconds() / 3600:.1f}h ago). Click below to "
-                  f"re-run against live NSE data.")
+        _last_scan_bit = f" · last scan {age.total_seconds() / 3600:.1f}h ago"
 
-    v1, v2, v3 = st.columns(3)
-    with v1:
-        max_syms_v = st.slider("Symbols to scan", 10, len(config.UNIVERSE),
-                               len(config.UNIVERSE), step=10,
-                               key="value_scan_n",
-                               help="~0.3s/symbol + XBRL download time")
-    with v2:
-        use_price = st.checkbox("Use live price (for PEG)", value=True,
-                                key="value_scan_price")
-    with v3:
-        n_years_v = st.slider("Years of annual history", 2, 5, 3,
-                              key="value_scan_years")
+    hdr_l, hdr_r = st.columns([3, 2])
+    with hdr_l:
+        st.markdown(
+            '<div class="ov-header" style="margin-bottom:0;">'
+            '<div><span class="ov-h1">📊 Fundamentals</span> '
+            '<span class="ov-sub">· primary-source value score</span></div></div>',
+            unsafe_allow_html=True)
+        st.caption(
+            "0-100 from audited XBRL filings — no scraping, no LLM"
+            + _last_scan_bit)
+    with hdr_r:
+        with st.container(key="fund_scan_row"):
+            with st.popover("ℹ️"):
+                st.markdown(
+                    "**Sector-aware scoring.** Banks and NBFCs file under "
+                    "structurally different XBRL taxonomies — banks don't tag "
+                    "Revenue/Equity/Current Assets at all, and general-company "
+                    "thresholds would flag every healthy NBFC as over-levered "
+                    "(NBFCs run 3-6x leverage by design). Each symbol is routed "
+                    "to the rubric matching what its filings actually contain: "
+                    "**general** (ROE, D/E, Current Ratio, FCF, Revenue CAGR, "
+                    "PEG), **banking** (ROE, ROA, NIM proxy, Gross/Net NPA, "
+                    "Advances growth), or **nbfc** (ROE, ROA, D/E, Loan growth "
+                    "— also covers AMCs per NSE's own filing classification). "
+                    "Insurers aren't covered yet — their key metrics "
+                    "(persistency, embedded value, solvency ratio) aren't "
+                    "reliably XBRL-tagged. Balance-sheet ratios only refresh "
+                    "once a year (audited annual filing). Missing sub-metrics "
+                    "are dropped, not faked — check a row's missing pillars "
+                    "before trusting a high total score.")
+            _run_value_scan_clicked = st.button("Run value score scan", type="primary")
 
-    if st.button("Run value score scan", type="primary"):
-        bar = st.progress(0.0, text="Starting...")
-        result = fa.fno_value_scan(
-            config.UNIVERSE[:max_syms_v], n_years=n_years_v,
-            use_live_price=use_price,
-            progress_cb=lambda s, f: bar.progress(f, text=s))
-        bar.empty()
-        st.session_state["value_scores"] = result
-        st.session_state["value_scores_is_cached"] = False
-        os.makedirs("cache", exist_ok=True)
-        result.to_pickle(VALUE_SCORE_CACHE)
+    _existing_scores = st.session_state.get("value_scores")
+    _rubrics_present = (sorted(_existing_scores["rubric"].dropna().unique())
+                       if _existing_scores is not None else [])
+
+    with st.container(border=True, key="ov-card-fund-filters"):
+        v1, v2, v3, v4 = st.columns(4)
+        with v1:
+            max_syms_v = st.slider("Symbols to scan", 10, len(config.UNIVERSE),
+                                   len(config.UNIVERSE), step=1,
+                                   key="value_scan_n",
+                                   help="~0.3s/symbol + XBRL download time")
+        with v2:
+            n_years_v = st.slider("Years of annual history", 2, 5, 3,
+                                  key="value_scan_years")
+        with v3:
+            st.markdown(
+                '<p style="font-size:11px;font-weight:500;color:var(--ov-text-muted);'
+                'margin:0 0 4px;">PEG input</p>',
+                unsafe_allow_html=True)
+            use_price = st.checkbox("Use live price", value=True,
+                                    key="value_scan_price",
+                                    help="Uses today's live price for PEG instead of "
+                                         "the price as of the filing date.")
+        with v4:
+            sector = st.selectbox(
+                "Filter by sector", ["All"] + _rubrics_present,
+                key="fund_sector_filter",
+                help="Each sector uses a different rubric with different metrics — "
+                     "filtering keeps the table to the columns that actually apply.")
+
+        if _run_value_scan_clicked:
+            bar = st.progress(0.0, text="Starting...")
+            result = fa.fno_value_scan(
+                config.UNIVERSE[:max_syms_v], n_years=n_years_v,
+                use_live_price=use_price,
+                progress_cb=lambda s, f: bar.progress(f, text=s))
+            bar.empty()
+            st.session_state["value_scores"] = result
+            st.session_state["value_scores_is_cached"] = False
+            os.makedirs("cache", exist_ok=True)
+            result.to_pickle(VALUE_SCORE_CACHE)
+            st.markdown(
+                '<div class="ov-alert ov-alert-success">✓ Scan complete — '
+                f'{int(result["total_score"].notna().sum())}/{len(result)} scored.'
+                '</div>', unsafe_allow_html=True)
 
     # Column labels for this page's tables live in the module-level
     # COLUMN_LABELS dict (near pnl_style/readable_df) alongside every other
@@ -2257,12 +3659,6 @@ def page_fundamentals():
         return
     vdf = st.session_state["value_scores"].copy()
 
-    rubrics_present = sorted(vdf["rubric"].dropna().unique())
-    sector = st.selectbox(
-        "Filter by sector", ["All"] + rubrics_present,
-        help="Each sector uses a different rubric with different metrics — "
-             "filtering keeps the table to the columns that actually apply.")
-
     if sector == "All":
         shown = vdf
         seen_cols, numeric_cols = set(), []
@@ -2278,50 +3674,115 @@ def page_fundamentals():
     show_cols = ["total_score", "rubric"] + numeric_cols + ["fiscal_year_end"]
     show_cols = [c for c in show_cols if c in shown.columns]
 
-    st.subheader(f"Ranked ({shown['total_score'].notna().sum()}/{len(shown)} scored"
-                f"{'' if sector == 'All' else f', {sector}'})")
-    fmt = {c: "{:.2f}" for c in ["total_score"] + numeric_cols}
-    st.dataframe(pnl_style(shown[show_cols], fmt=fmt), width="stretch")
+    with st.container(border=True, key="ov-card-fund-ranked"):
+        st.markdown(
+            '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+            '<span class="ov-dot" style="background:var(--ov-teal);">'
+            f'</span>Ranked <span class="ov-badge ov-badge-gray">'
+            f'{shown["total_score"].notna().sum()} / {len(shown)} scored</span>'
+            f'{f" · {sector}" if sector != "All" else ""}</p>', unsafe_allow_html=True)
+        fmt = {c: "{:.2f}" for c in numeric_cols}
+        rubric_badge = {"general": "ov-badge-purple", "banking": "ov-badge-blue",
+                        "nbfc": "ov-badge-pink", "general_insurance": "ov-badge-gray",
+                        "life_insurance": "ov-badge-gray"}
 
-    with st.expander("🔍 Score breakdown for one symbol"):
-        st.caption("The 0-5 pillar scores and individual sub-metric buckets "
-                  "behind the headline total.")
-        sym_choice = st.selectbox("Symbol", list(shown.index),
-                                  key="value_score_detail_sym")
-        if sym_choice:
-            row = shown.loc[sym_choice]
-            st.write(f"**{sym_choice}** — {row.get('rubric')} rubric, "
-                    f"score {row.get('total_score')}, "
-                    f"as of {row.get('fiscal_year_end', '—')}")
-            pillar_scores = row.get("pillar_scores") or {}
-            sub_scores = row.get("sub_scores") or {}
-            pc1, pc2 = st.columns(2)
-            with pc1:
-                st.markdown("**Pillar scores (0-5)**")
-                st.dataframe(pd.DataFrame(
-                    [{"Pillar": k.replace("_", " ").title(), "Score": round(v, 2)}
-                     for k, v in pillar_scores.items()]),
-                    hide_index=True, width="stretch")
-            with pc2:
-                st.markdown("**Sub-metric buckets (0-5)**")
-                st.dataframe(pd.DataFrame(
+        def _score_badge_cls(v):
+            return "ov-badge-green" if v >= 60 else "ov-badge-amber" if v >= 40 else "ov-badge-red"
+
+        shown_display = shown[show_cols].copy()
+        shown_display.insert(0, "symbol", shown_display.index)
+        if "total_score" in shown_display.columns:
+            shown_display["total_score"] = shown_display["total_score"].apply(
+                lambda v: round(v, 1) if pd.notna(v) else v)
+        shown_page = _ov_page_slice(shown_display, key="fund_ranked")
+        st.markdown(
+            _ov_table_html(
+                shown_page, sym_cols=["symbol"], num_fmt=fmt,
+                badges={"rubric": rubric_badge, "total_score": _score_badge_cls}),
+            unsafe_allow_html=True)
+        _ov_pagination_controls(shown_display, key="fund_ranked")
+
+    def _bucket_badge(v):
+        try:
+            n = float(v)
+        except (TypeError, ValueError):
+            return "ov-badge-gray"
+        return "ov-badge-green" if n >= 4 else "ov-badge-amber" if n >= 2 else "ov-badge-red"
+
+    col_score, col_buckets = st.columns(2)
+    with col_score:
+        with st.container(border=True, key="ov-card-fund-breakdown"):
+            bd1, bd2, bd3 = st.columns([1.9, 1.6, 2.5])
+            with bd1:
+                st.markdown(
+                    '<p class="ov-card-title" style="margin-bottom:0;border-bottom:0px solid var(--ov-border);">'
+                    '<span class="ov-dot" style="background:var(--ov-purple);"></span>'
+                    'Score breakdown</p>', unsafe_allow_html=True)
+            with bd2:
+                sym_choice = st.selectbox(
+                    "Symbol", list(shown.index), key="value_score_detail_sym",
+                    label_visibility="collapsed")
+            if sym_choice:
+                row = shown.loc[sym_choice]
+                with bd3:
+                    st.markdown(
+                        f'<p class="ov-card-meta" style="text-align:right;margin:6px 0 0;'
+                        f'font-size:10px;font-weight:700;color:var(--ov-purple-d);">'
+                        f'{row.get("rubric")} rubric · score {row.get("total_score")} · '
+                        f'FY {row.get("fiscal_year_end", "—")}</p>', unsafe_allow_html=True)
+                st.markdown(
+                    '<p class="ov-muted" style="margin-top:10px;font-size:10px;">Pillar scores (0-5)</p>',
+                    unsafe_allow_html=True)
+                pillar_scores = row.get("pillar_scores") or {}
+                _pillar_rows = []
+                for k, v in pillar_scores.items():
+                    _pct = min(100.0, max(0.0, float(v) / 5 * 100))
+                    _color = ("#1d9e75" if v >= 4 else "#ef9f27" if v >= 2 else "#e24b4a")
+                    _pillar_rows.append(
+                        '<div class="ov-sector-row"><div class="ov-sector-head">'
+                        f'<span>{html_lib.escape(k.replace("_", " ").title())}</span>'
+                        f'<span class="ov-sym">{v:.1f}</span></div>'
+                        f'<div class="ov-sector-bar"><div class="ov-sector-fill" '
+                        f'style="width:{_pct:.1f}%;background:{_color};"></div></div></div>')
+                st.markdown("".join(_pillar_rows), unsafe_allow_html=True)
+                if row.get("missing_pillars"):
+                    st.markdown(
+                        '<div class="ov-alert">Excluded from total (no data): '
+                        f'{", ".join(row["missing_pillars"])}</div>', unsafe_allow_html=True)
+
+    with col_buckets:
+        with st.container(border=True, key="ov-card-fund-buckets"):
+            st.markdown(
+                '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+                '<span class="ov-dot" '
+                'style="background:var(--ov-teal);"></span>Sub-metric buckets (0-5)</p>',
+                unsafe_allow_html=True)
+            if sym_choice:
+                sub_scores = row.get("sub_scores") or {}
+                sub_df = pd.DataFrame(
                     [{"Metric": k.replace("_", " ").title(), "Bucket": v}
-                     for k, v in sub_scores.items()]),
-                    hide_index=True, width="stretch")
-            if row.get("missing_pillars"):
-                st.warning(f"Excluded from total (no data): "
-                          f"{', '.join(row['missing_pillars'])}")
+                     for k, v in sub_scores.items()])
+                st.markdown(_ov_table_html(sub_df, badges={"Bucket": _bucket_badge}),
+                           unsafe_allow_html=True)
 
     incomplete = shown[shown["missing_pillars"].apply(bool)]
     with st.expander(f"Rows with incomplete data ({len(incomplete)})"):
-        st.caption("A pillar is excluded from the total (not defaulted) when "
-                  "none of its sub-metrics are available — usually means "
-                  "fewer than 2 years of annual filings are retrievable via "
-                  "NSE's endpoint for this name, or (for "
-                  "'unsupported_taxonomy') the sector isn't covered by any "
-                  "rubric yet.")
+        _incomplete_tip = html_lib.escape(
+            "A pillar is excluded from the total (not defaulted) when "
+            "none of its sub-metrics are available — usually means "
+            "fewer than 2 years of annual filings are retrievable via "
+            "NSE's endpoint for this name, or (for "
+            "'unsupported_taxonomy') the sector isn't covered by any "
+            "rubric yet.")
+        st.markdown(
+            f'<span class="ov-info-icon" title="{_incomplete_tip}">'
+            'ℹ️ Why rows land here</span>', unsafe_allow_html=True)
         inc_cols = show_cols + ["missing_pillars"]
-        st.dataframe(readable_df(incomplete[inc_cols]), width="stretch")
+        inc_display = incomplete[inc_cols].copy()
+        inc_display.insert(0, "symbol", inc_display.index)
+        inc_display["missing_pillars"] = inc_display["missing_pillars"].apply(
+            lambda ps: ", ".join(ps) if isinstance(ps, (list, tuple)) else ps)
+        st.markdown(_ov_table_html(inc_display, sym_cols=["symbol"]), unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2332,53 +3793,66 @@ JOB_TYPES = ["rebalance_scan", "gap_check", "fundamentals_refresh", "screen_run"
 
 
 def page_job_log():
-    st.subheader("🗂️ Job Log")
-    st.caption("Every scheduled job (systemd timers on the VPS) and manual "
-              "background-job button writes a row here -- answers \"did "
-              "today's jobs actually run\" without SSH-ing in to read raw "
-              "logs.")
+    _joblog_tip = html_lib.escape(
+        "Every scheduled job (systemd timers on the VPS) and manual "
+        "background-job button writes a row here -- answers \"did today's "
+        "jobs actually run\" without SSH-ing in to read raw logs.")
+    st.markdown(
+        '<div class="ov-header"><div><span class="ov-h1">🗂️ Job Log</span>'
+        f'<span class="ov-info-icon" title="{_joblog_tip}">ℹ️</span></div></div>',
+        unsafe_allow_html=True)
 
-    st.markdown("**Last run of each job**")
-    cols = st.columns(len(JOB_TYPES))
-    for col, jt in zip(cols, JOB_TYPES):
+    _job_tones = {"success": "green", "failed": "red", "running": "amber"}
+    _job_cards = []
+    for jt in JOB_TYPES:
         last = state_db.get_last_job_run(jt)
-        with col:
-            if last is None:
-                st.metric(COLUMN_LABELS.get(jt, jt), "never run")
-                continue
-            started = dt.datetime.fromisoformat(last["started_at"])
-            age_hr = (dt.datetime.now() - started).total_seconds() / 3600
-            badge = {"success": "✅", "failed": "❌", "running": "⏳"}.get(last["status"], "❓")
-            st.metric(jt, f"{badge} {age_hr:.1f}h ago",
-                     help=last.get("summary") or last.get("error_message") or "")
+        label = COLUMN_LABELS.get(jt, jt)
+        if last is None:
+            _job_cards.append(_ov_metric_html(label, "never run", None, "", "coral"))
+            continue
+        started = dt.datetime.fromisoformat(last["started_at"])
+        age_hr = (dt.datetime.now() - started).total_seconds() / 3600
+        badge = {"success": "✅", "failed": "❌", "running": "⏳"}.get(last["status"], "❓")
+        note = last.get("summary") or last.get("error_message") or ""
+        _job_cards.append(_ov_metric_html(
+            label, f"{badge} {age_hr:.1f}h ago", note,
+            "ov-neg" if last["status"] == "failed" else "", _job_tones.get(last["status"], "coral")))
+    st.markdown(f'<div class="ov-grid-metrics">{"".join(_job_cards)}</div>', unsafe_allow_html=True)
 
     st.divider()
-    st.markdown("**History**")
-    f1, f2, f3 = st.columns(3)
-    with f1:
-        type_filter = st.multiselect("Job type", JOB_TYPES, key="jl_type_filter")
-    with f2:
-        status_filter = st.multiselect("Status", ["success", "failed", "running"],
-                                       key="jl_status_filter")
-    with f3:
-        since_date = st.date_input("Since", value=dt.date.today() - dt.timedelta(days=30),
-                                   key="jl_since")
+    with st.container(border=True, key="ov-card-joblog-history"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-blue);">'
+            '</span>History</p>', unsafe_allow_html=True)
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            type_filter = st.multiselect("Job type", JOB_TYPES, key="jl_type_filter")
+        with f2:
+            status_filter = st.multiselect("Status", ["success", "failed", "running"],
+                                           key="jl_status_filter")
+        with f3:
+            since_date = st.date_input("Since", value=dt.date.today() - dt.timedelta(days=30),
+                                       key="jl_since")
 
-    runs = state_db.get_job_runs(since=since_date.isoformat(), limit=1000)
-    if type_filter:
-        runs = runs[runs["job_type"].isin(type_filter)]
-    if status_filter:
-        runs = runs[runs["status"].isin(status_filter)]
+        runs = state_db.get_job_runs(since=since_date.isoformat(), limit=1000)
+        if type_filter:
+            runs = runs[runs["job_type"].isin(type_filter)]
+        if status_filter:
+            runs = runs[runs["status"].isin(status_filter)]
 
-    st.caption(f"Showing {len(runs)} run(s)")
-    if runs.empty:
-        st.info("No job runs match these filters.")
-        return
+        st.caption(f"Showing {len(runs)} run(s)")
+        if runs.empty:
+            st.info("No job runs match these filters.")
+            return
 
-    st.dataframe(
-        pnl_style(runs.drop(columns=["id"]),
-                 fmt={"duration_sec": "{:.1f}"}),
-        width="stretch", hide_index=True)
+        st.markdown(
+            _ov_table_html(
+                runs.drop(columns=["id"]), num_fmt={"duration_sec": "{:.1f}s"},
+                badges={
+                    "status": {"success": "ov-badge-green", "failed": "ov-badge-red",
+                              "running": "ov-badge-amber"},
+                    "trigger_type": {"scheduled": "ov-badge-blue", "manual": "ov-badge-purple"}}),
+            unsafe_allow_html=True)
 
     failed = runs[runs["status"] == "failed"]
     if not failed.empty:
@@ -2393,42 +3867,52 @@ def page_job_log():
 # ---------------------------------------------------------------------------
 
 def page_rebalance_history():
-    st.subheader("📜 Rebalance History")
-    st.caption(
+    _rh_tip = html_lib.escape(
         "Every sell/buy/top-up/stop-update ever proposed, across every "
-        "rebalance run. Lifecycle: **proposed** -> **executed** | **error** "
-        "(attempted, failed -- reason recorded) | **expired** (superseded by "
-        "a newer scan before ever being acted on). Nothing here is ever "
-        "deleted -- this is the full audit trail, not just what's currently "
-        "pending (see Live Rebalance for that)."
-    )
+        "rebalance run. Lifecycle: proposed -> executed | error (attempted, "
+        "failed -- reason recorded) | expired (superseded by a newer scan "
+        "before ever being acted on). Nothing here is ever deleted -- this "
+        "is the full audit trail, not just what's currently pending (see "
+        "Live Rebalance for that).")
+    st.markdown(
+        '<div class="ov-header"><div><span class="ov-h1">📜 Rebalance History</span>'
+        f'<span class="ov-info-icon" title="{_rh_tip}">ℹ️</span></div>'
+        '<div class="ov-chips"><span class="ov-chip ov-chip-muted">proposed → '
+        'executed | error | expired</span></div></div>', unsafe_allow_html=True)
 
-    f1, f2, f3, f4 = st.columns(4)
-    with f1:
-        action_filter = st.multiselect(
-            "Action", ["sell", "buy", "top_up", "stop_update"], key="rh_action_filter")
-    with f2:
-        status_filter = st.multiselect(
-            "Status", ["proposed", "executed", "error", "expired"], key="rh_status_filter")
-    with f3:
-        symbol_filter = st.text_input("Symbol (exact)", key="rh_symbol_filter")
-    with f4:
-        since_date = st.date_input(
-            "Since", value=dt.date.today() - dt.timedelta(days=30), key="rh_since")
+    with st.container(border=True, key="ov-card-rh-history"):
+        f1, f2, f3, f4 = st.columns(4)
+        with f1:
+            action_filter = st.multiselect(
+                "Action", ["sell", "buy", "top_up", "stop_update"], key="rh_action_filter")
+        with f2:
+            status_filter = st.multiselect(
+                "Status", ["proposed", "executed", "error", "expired"], key="rh_status_filter")
+        with f3:
+            symbol_filter = st.text_input("Symbol (exact)", key="rh_symbol_filter")
+        with f4:
+            since_date = st.date_input(
+                "Since", value=dt.date.today() - dt.timedelta(days=30), key="rh_since")
 
-    hist = state_db.get_rebalance_history(
-        status=status_filter or None, action_type=action_filter or None,
-        symbol=symbol_filter.strip() or None, since=since_date.isoformat(), limit=1000)
+        hist = state_db.get_rebalance_history(
+            status=status_filter or None, action_type=action_filter or None,
+            symbol=symbol_filter.strip() or None, since=since_date.isoformat(), limit=1000)
 
-    st.caption(f"Showing {len(hist)} item(s)")
-    if hist.empty:
-        st.info("No rebalance items match these filters.")
-        return
+        st.caption(f"Showing {len(hist)} item(s)")
+        if hist.empty:
+            st.info("No rebalance items match these filters.")
+            return
 
-    styled = pnl_style(hist.drop(columns=["error_message"]),
-                      fmt={"price": "{:.2f}"}, na_rep="—")
-    styled = styled.map(_rebalance_status_color, subset=["Status"])
-    st.dataframe(styled, width="stretch", hide_index=True)
+        st.markdown(
+            _ov_table_html(
+                hist.drop(columns=["error_message"]), sym_cols=["symbol"],
+                num_fmt={"qty": "{:.0f}", "price": "₹{:.2f}"},
+                badges={
+                    "action_type": {"sell": "ov-badge-red", "buy": "ov-badge-green",
+                                    "top_up": "ov-badge-blue", "stop_update": "ov-badge-purple"},
+                    "status": {"proposed": "ov-badge-amber", "executed": "ov-badge-green",
+                              "error": "ov-badge-red", "expired": "ov-badge-gray"}}),
+            unsafe_allow_html=True)
 
     errors = hist[hist["status"] == "error"]
     if not errors.empty:
@@ -2443,11 +3927,15 @@ def page_rebalance_history():
 # ---------------------------------------------------------------------------
 
 def page_tradebook():
-    st.subheader("📒 Tradebook")
-    st.caption("Every trade this app has opened, with its entry-time "
-              "technical/fundamental snapshot and a real exit reason -- "
-              "separate from the Positions & Trade page's live view, meant "
-              "for historical/analytics use.")
+    _tb_tip = html_lib.escape(
+        "Every trade this app has opened, with its entry-time "
+        "technical/fundamental snapshot and a real exit reason -- separate "
+        "from the Positions & Trade page's live view, meant for "
+        "historical/analytics use.")
+    st.markdown(
+        '<div class="ov-header"><div><span class="ov-h1">📒 Tradebook</span>'
+        f'<span class="ov-info-icon" title="{_tb_tip}">ℹ️</span></div></div>',
+        unsafe_allow_html=True)
 
     trades = state_db.get_trades()
     if trades.empty:
@@ -2456,61 +3944,74 @@ def page_tradebook():
 
     closed = trades[trades["status"] == "closed"]
     if not closed.empty:
-        s1, s2, s3, s4 = st.columns(4)
         wins = closed[closed["realized_pnl"] > 0]
         win_rate = 100 * len(wins) / len(closed[closed["realized_pnl"].notna()]) \
             if closed["realized_pnl"].notna().any() else float("nan")
-        s1.metric("Win rate", f"{win_rate:.1f}%" if win_rate == win_rate else "—")
-        s2.metric("Avg holding days", f"{closed['holding_days'].mean():.0f}"
-                 if closed["holding_days"].notna().any() else "—")
-        s3.metric("Total realized P&L", f"₹{closed['realized_pnl'].sum():,.0f}")
+        total_realized = float(closed["realized_pnl"].sum())
         best = closed["realized_ret_pct"].max()
         worst = closed["realized_ret_pct"].min()
-        s4.metric("Best / worst trade",
-                 f"{best:+.1f}% / {worst:+.1f}%" if pd.notna(best) else "—")
+        open_count = len(trades[trades["status"] == "open"])
+        st.markdown(
+            '<div class="ov-grid-metrics">'
+            + _ov_metric_html("Win rate", f"{win_rate:.1f}%" if win_rate == win_rate else "—",
+                             f"of {closed['realized_pnl'].notna().sum()} closed", "", "green")
+            + _ov_metric_html(
+                "Avg holding days",
+                f"{closed['holding_days'].mean():.0f}" if closed["holding_days"].notna().any() else "—",
+                "closed trades", "", "blue")
+            + _ov_metric_html("Total realized P&L", f"₹{total_realized:+,.0f}", "since inception",
+                             "ov-pos" if total_realized >= 0 else "ov-neg", "green",
+                             "ov-pos" if total_realized >= 0 else "ov-neg")
+            + _ov_metric_html(
+                "Best / worst", f"{best:+.1f}% / {worst:+.1f}%" if pd.notna(best) else "—",
+                "per trade return", "", "purple")
+            + _ov_metric_html("Open trades", str(open_count), "live now", "", "teal")
+            + '</div>', unsafe_allow_html=True)
 
     st.divider()
-    f1, f2, f3, f4 = st.columns(4)
-    with f1:
-        sym_filter = st.multiselect("Symbol", sorted(trades["symbol"].unique()),
-                                    key="tb_sym_filter")
-    with f2:
-        status_filter = st.multiselect("Status", ["open", "closed"],
-                                       key="tb_status_filter")
-    with f3:
-        reasons = sorted(trades["exit_reason"].dropna().unique())
-        reason_filter = st.multiselect("Exit reason", reasons, key="tb_reason_filter")
-    with f4:
-        since_date = st.date_input("Entered since",
-                                   value=dt.date.today() - dt.timedelta(days=365),
-                                   key="tb_since")
+    with st.container(border=True, key="ov-card-tb-history"):
+        f1, f2, f3, f4 = st.columns(4)
+        with f1:
+            sym_filter = st.multiselect("Symbol", sorted(trades["symbol"].unique()),
+                                        key="tb_sym_filter")
+        with f2:
+            status_filter = st.multiselect("Status", ["open", "closed"],
+                                           key="tb_status_filter")
+        with f3:
+            reasons = sorted(trades["exit_reason"].dropna().unique())
+            reason_filter = st.multiselect("Exit reason", reasons, key="tb_reason_filter")
+        with f4:
+            since_date = st.date_input("Entered since",
+                                       value=dt.date.today() - dt.timedelta(days=365),
+                                       key="tb_since")
 
-    filtered = trades[trades["entry_date"] >= since_date.isoformat()]
-    if sym_filter:
-        filtered = filtered[filtered["symbol"].isin(sym_filter)]
-    if status_filter:
-        filtered = filtered[filtered["status"].isin(status_filter)]
-    if reason_filter:
-        filtered = filtered[filtered["exit_reason"].isin(reason_filter)]
+        filtered = trades[trades["entry_date"] >= since_date.isoformat()]
+        if sym_filter:
+            filtered = filtered[filtered["symbol"].isin(sym_filter)]
+        if status_filter:
+            filtered = filtered[filtered["status"].isin(status_filter)]
+        if reason_filter:
+            filtered = filtered[filtered["exit_reason"].isin(reason_filter)]
 
-    st.caption(f"Showing {len(filtered)} of {len(trades)} trades")
-    rest_cols = [c for c in filtered.columns
-                if c not in ("id", "position_id", "status", "latest_recommended_stop")]
-    stop_idx = rest_cols.index("initial_stop") + 1
-    display_cols = (["status"] + rest_cols[:stop_idx] + ["latest_recommended_stop"]
-                   + rest_cols[stop_idx:])
-    styled = pnl_style(
-        filtered[display_cols], ["realized_pnl", "realized_ret_pct"],
-        {"entry_price": "{:.2f}", "exit_price": "{:.2f}",
-         "initial_stop": "{:.2f}", "latest_recommended_stop": "{:.2f}",
-         "entry_score": "{:.2f}", "entry_rsi": "{:.1f}",
-         "entry_pct_52w_high": "{:.2f}", "entry_vol_expansion": "{:.2f}",
-         "entry_fundamental_score": "{:.1f}", "realized_pnl": "{:,.0f}",
-         "realized_ret_pct": "{:.2f}"})
-    styled = styled.map(_status_color, subset=["Status"])
-    st.dataframe(styled, width="stretch", hide_index=True)
-    st.download_button("Download tradebook CSV (filtered view)",
-                       filtered.to_csv(index=False), "tradebook.csv")
+        st.caption(f"Showing {len(filtered)} of {len(trades)} trades")
+        rest_cols = [c for c in filtered.columns
+                    if c not in ("id", "position_id", "status", "latest_recommended_stop")]
+        stop_idx = rest_cols.index("initial_stop") + 1
+        display_cols = (["status"] + rest_cols[:stop_idx] + ["latest_recommended_stop"]
+                       + rest_cols[stop_idx:])
+        st.markdown(
+            _ov_table_html(
+                filtered[display_cols], sym_cols=["symbol"],
+                pnl_cols=["realized_pnl", "realized_ret_pct"],
+                num_fmt={"entry_price": "₹{:.2f}", "exit_price": "₹{:.2f}",
+                        "initial_stop": "₹{:.2f}", "latest_recommended_stop": "₹{:.2f}",
+                        "entry_score": "{:.2f}", "entry_rsi": "{:.1f}",
+                        "entry_pct_52w_high": "{:.2f}", "entry_vol_expansion": "{:.2f}",
+                        "entry_fundamental_score": "{:.1f}"},
+                badges={"status": {"open": "ov-badge-green", "closed": "ov-badge-gray"}}),
+            unsafe_allow_html=True)
+        st.download_button("Download tradebook CSV (filtered view)",
+                           filtered.to_csv(index=False), "tradebook.csv")
 
 
 # ---------------------------------------------------------------------------
@@ -2526,59 +4027,86 @@ page_fundamentals_p = st.Page(page_fundamentals, title="Fundamentals", icon="�
 page_tradebook_p = st.Page(page_tradebook, title="Tradebook", icon="📒")
 page_job_log_p = st.Page(page_job_log, title="Job Log", icon="🗂️")
 page_rebalance_history_p = st.Page(page_rebalance_history, title="Rebalance History", icon="📜")
+page_ledger_p = st.Page(page_ledger, title="Ledger", icon="💰")
 page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
 
+# Injected before the sidebar (not per-page) so every page -- not just
+# Overview, where this design system started -- gets the same compact
+# card/badge/table look, and so the sidebar CSS below applies immediately.
+st.markdown(_OVERVIEW_CSS, unsafe_allow_html=True)
+
 with st.sidebar:
-    # Grouped sidebar nav, built by hand rather than passing a
-    # {section: [pages]} dict straight to st.navigation -- that dict form
-    # only makes a section individually collapsible when position="top";
-    # in the sidebar (which this app uses) it just renders a static label,
-    # with no way to control each section's collapsed/expanded state.
-    # Wrapping each section in a real st.expander gets that control back;
-    # st.navigation itself is still called below with position="hidden" so
-    # routing/query-params/current-page tracking keep working exactly as
-    # before, just with no visible built-in widget.
-    with st.expander("📈 Trading", expanded=True):
-        st.page_link(page_cockpit_p)
-        st.page_link(page_live_rebalance_p)
-        st.page_link(page_positions_trade_p)
-        st.page_link(page_screener_p)
-        st.page_link(page_fundamentals_p)
-        st.page_link(page_admin_p)
+    # Flat, always-visible tabs grouped under a plain small-caps label --
+    # matches the mockup's .side-label/.tab exactly (no collapse behavior
+    # there at all), which an st.expander could never fully look like no
+    # matter how much its border/background got stripped via CSS (it still
+    # carries its own chevron/toggle chrome). st.navigation itself runs
+    # with position="hidden" below so routing/query-params/current-page
+    # tracking keep working exactly as before, just with no visible
+    # built-in widget -- this whole block is just the visible menu.
+    st.markdown('<p class="ov-side-label">Trading</p>', unsafe_allow_html=True)
+    st.page_link(page_cockpit_p)
+    st.page_link(page_live_rebalance_p)
+    st.page_link(page_positions_trade_p)
+    st.page_link(page_screener_p)
+    st.page_link(page_fundamentals_p)
+    st.page_link(page_admin_p)
+    st.page_link(page_ledger_p)
 
-    with st.expander("🗂️ Audit Trail", expanded=False):
-        st.page_link(page_tradebook_p)
-        st.page_link(page_job_log_p)
-        st.page_link(page_rebalance_history_p)
+    st.markdown('<p class="ov-side-label">Audit Trail</p>', unsafe_allow_html=True)
+    st.page_link(page_tradebook_p)
+    st.page_link(page_job_log_p)
+    st.page_link(page_rebalance_history_p)
 
-    with st.expander("🧪 Testing", expanded=False):
-        st.page_link(page_backtest_p)
+    st.markdown('<p class="ov-side-label">Testing</p>', unsafe_allow_html=True)
+    st.page_link(page_backtest_p)
+
+    # Streamlit gives the current page's link no stable DOM marker (just an
+    # unstable emotion class with a faint default tint), so CSS alone can't
+    # paint the mockup's active-tab pill. Stamp aria-current="page" on the
+    # link whose href matches the URL; the CSS above keys off it. A one-shot
+    # script is not enough -- React re-renders the sidebar links right after
+    # this script runs and wipes the attribute -- so a MutationObserver
+    # (installed once per browser session) re-stamps after every re-render.
+    # Watching childList only, not attributes, so its own setAttribute calls
+    # can't re-trigger it in a loop.
+    st.html(
+        """<script>
+        (function(){
+          function mark(){
+            const links = document.querySelectorAll(
+              '[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"]');
+            const path = location.pathname.replace(/\\/+$/, "");
+            links.forEach(a => {
+              const href = (a.getAttribute("href") || "").split("?")[0];
+              const active = href === "" ? (path === "" || path === "/")
+                                         : path.endsWith("/" + href);
+              if (active) a.setAttribute("aria-current", "page");
+              else if (a.hasAttribute("aria-current")) a.removeAttribute("aria-current");
+            });
+          }
+          mark();
+          if (!window.__ovNavMarker) {
+            // Body-wide childList observer: navigating pages re-renders the
+            // MAIN area but often leaves the sidebar links untouched, so a
+            // sidebar-scoped observer never fires and the pill stays on the
+            // old page. Any rerun mutates the body somewhere; mark() is two
+            // cheap queries over ~10 links. history hooks catch the URL
+            // change itself (Streamlit navigates via pushState, no popstate).
+            window.__ovNavMarker = new MutationObserver(mark);
+            window.__ovNavMarker.observe(document.body, {childList: true, subtree: true});
+            const push = history.pushState.bind(history);
+            history.pushState = function(){ push.apply(null, arguments); setTimeout(mark, 0); };
+            const repl = history.replaceState.bind(history);
+            history.replaceState = function(){ repl.apply(null, arguments); setTimeout(mark, 0); };
+            window.addEventListener("popstate", () => setTimeout(mark, 0));
+          }
+        })();
+        </script>""",
+        unsafe_allow_javascript=True)
 
     st.divider()
-
-    st.metric("Available cash", f"₹{available_cash:,.0f}")
-    n_skipped = len(config.UNIVERSE_RAW) - len(config.UNIVERSE)
-    skipped_note = f" ({n_skipped} skipped)" if n_skipped else ""
-    st.caption(f"F&O universe: {len(config.UNIVERSE_RAW)} stocks{skipped_note} · "
-              f"{dt.date.today():%d %b %Y}")
-
-    # Lightweight always-visible pending-action indicator -- replaces the
-    # old full-width "Action needed today" section on the Overview page,
-    # which took prime real estate for something that's usually "nothing
-    # to do" and, worse, could show already-executed items as still
-    # pending (the same staleness bug fixed in mark_rebalance_*_executed).
-    _last_run = state_db.get_last_rebalance_run()
-    if _last_run is not None:
-        _n_pending = (len(_last_run["sells"]) + len(_last_run["buys"])
-                     + len(_last_run.get("stop_updates", pd.DataFrame())))
-        if _n_pending:
-            st.page_link(page_live_rebalance_p,
-                        label=f"🔴 {_n_pending} action(s) pending", icon="📡")
-        else:
-            st.caption("✅ No rebalance actions pending")
-
-    st.divider()
-    if st.button("🚪 Log out", use_container_width=True):
+    if st.button("LOGOUT →", key="ov_logout"):
         state_db.delete_remember_token(st.context.cookies.get("remember_token", ""))
         st.session_state["dashboard_authenticated"] = False
         st.html(
@@ -2586,8 +4114,70 @@ with st.sidebar:
             unsafe_allow_javascript=True)
         st.rerun()
 
+# Global brandbar -- shown above every page's own content, matching the
+# mockup's .brandbar (which sits above the tabpanes, not inside any one of
+# them). Available cash / pending actions / universe size used to live in
+# the sidebar; moved here to match the reference design exactly.
+n_skipped = len(config.UNIVERSE_RAW) - len(config.UNIVERSE)
+skipped_note = f" ({n_skipped} skipped)" if n_skipped else ""
+_last_run = state_db.get_last_rebalance_run()
+_n_pending = 0
+if _last_run is not None:
+    _n_pending = (len(_last_run["sells"]) + len(_last_run["buys"])
+                 + len(_last_run.get("stop_updates", pd.DataFrame())))
+_pending_chip = (f'<span class="ov-chip ov-chip-danger">🔴 {_n_pending} action(s) pending</span>'
+                if _n_pending else '<span class="ov-chip ov-chip-success">✅ No actions pending</span>')
+_scan_chip_g = (f"📅 Last scan {_last_run['run_time']:%d %b %H:%M}"
+               if _last_run is not None else "📅 No scan run yet")
+_open_slots = len(state_db.get_open_positions())
+_logo_uri = _sidebar_logo_data_uri()
+_logo_html = (f'<img src="{_logo_uri}" class="ov-topbar-logo" alt="KK Trading System">'
+             if _logo_uri else
+             '<div class="ov-brand">🚀 KK Trading System '
+             '<span class="ov-sub">Calendar-entry momentum</span></div>')
+# Splitting logo/chips/sync across st.columns() kept fighting the flex
+# ratios (logo overlapping chips, chips wrapping early depending on
+# window width) no matter how the flex-basis/shrink was tuned. Back to
+# ONE markdown call for logo+chips (the original, proven .ov-header
+# space-between layout -- logo left, chips right, never had this problem
+# before the sync icon was added). The Sync button is a real widget that
+# can't be flattened into that HTML string, so instead of sharing a flex
+# row with the chips at all, it's taken OUT of the normal flow entirely
+# via absolute positioning against this container (position:relative on
+# .st-key-ov-topbar) -- it can't overlap or squeeze anything else because
+# it no longer participates in anyone else's layout math.
+with st.container(key="ov-topbar"):
+    st.markdown(
+        '<div class="ov-header" style="margin-bottom:0;">'
+        f'{_logo_html}'
+        '<div class="ov-chips">'
+        f'{_pending_chip}'
+        f'<span class="ov-chip ov-chip-accent">{_scan_chip_g}</span>'
+        f'<span class="ov-chip ov-chip-success">Slots {_open_slots}/'
+        f'{config.STRATEGY["max_positions"]}</span>'
+        f'<span class="ov-chip ov-chip-accent">F&amp;O universe: {len(config.UNIVERSE_RAW)} stocks'
+        f'{skipped_note} · {dt.date.today():%d %b %Y}</span>'
+        '</div></div>', unsafe_allow_html=True)
+    _sync_icon_uri = _asset_data_uri("synch.png")
+    if _sync_icon_uri:
+        # _OVERVIEW_CSS (injected once, module-level, earlier in this
+        # same script run) already styles .st-key-ov_sync button as a
+        # small text button -- this second <style> tag lands later in
+        # the DOM, so on equal specificity it wins without needing to
+        # touch that shared block just for this one icon swap.
+        st.markdown(
+            "<style>.st-key-ov_sync button {"
+            f"background-image:url('{_sync_icon_uri}'); background-size:18px 18px; "
+            "background-repeat:no-repeat; background-position:center; "
+            "color:transparent !important; font-size:0 !important; "
+            "width:30px !important; height:30px !important; padding:0 !important; "
+            "min-width:0 !important; border-radius:50% !important;"
+            "}</style>", unsafe_allow_html=True)
+    if st.button("Sync", key="ov_sync"):
+        st.rerun()
+
 nav = st.navigation([page_cockpit_p, page_live_rebalance_p, page_positions_trade_p,
                     page_screener_p, page_fundamentals_p, page_tradebook_p,
                     page_job_log_p, page_rebalance_history_p, page_backtest_p,
-                    page_admin_p], position="hidden")
+                    page_admin_p, page_ledger_p], position="hidden")
 nav.run()

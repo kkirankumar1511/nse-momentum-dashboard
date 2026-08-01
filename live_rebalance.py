@@ -307,7 +307,7 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
                 reason += f" -- {size_reason}"
             buys.append({
                 "symbol": sym, "qty": qty, "price": round(price, 2),
-                "stop": round(stop, 2), "score": float(row["score"]),
+                "stop": round(stop, 2), "score": float(row["score"]), "rank": rank,
                 "rsi": float(row["rsi"]), "pct_52w_high": float(row["pct_52w_high"]),
                 "vol_expansion": float(row["vol_expansion"]),
                 "fundamental_score": fscore,
@@ -348,7 +348,7 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
                 reason += f"; fundamental score {fscore:.0f}/100"
             buys.append({
                 "symbol": sym, "qty": qty, "price": round(price, 2),
-                "stop": round(stop, 2), "score": float(row["score"]),
+                "stop": round(stop, 2), "score": float(row["score"]), "rank": rank,
                 "rsi": float(row["rsi"]), "pct_52w_high": float(row["pct_52w_high"]),
                 "vol_expansion": float(row["vol_expansion"]),
                 "fundamental_score": fscore,
