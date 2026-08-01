@@ -573,6 +573,20 @@ _OVERVIEW_CSS = """
 .ov-sub { font-size:12px; color:var(--ov-text-muted); font-weight:400; }
 .ov-chips { display:flex; gap:6px; align-items:center; flex-wrap:wrap; flex-shrink:0; }
 .ov-chip { font-size:11.5px; padding:4px 10px; border-radius:11px; font-weight:500; white-space:nowrap; }
+/* flex-shrink:0 on .ov-chips (above) keeps it at its natural full width on
+   desktop -- deliberately, so it never squeezes/wraps mid-fight with the
+   logo (see the Sync-button comment further down for the history there).
+   But on a narrow phone viewport that same natural width is wider than
+   the screen, so the chips silently overflow off the right edge instead
+   of wrapping, even though flex-wrap:wrap is already set -- wrapping only
+   ever kicks in once the container is forced narrower than its content.
+   Below this breakpoint the topbar has no logo/chips fight to referee
+   (the sidebar is already collapsed to icons-only), so it's safe to let
+   the chips container actually shrink to the viewport and wrap for real. */
+@media (max-width: 600px) {
+    .ov-header { flex-direction:column; align-items:flex-start; }
+    .ov-chips { flex-shrink:1; width:100%; }
+}
 .ov-info-icon { cursor:help; font-size:13px; margin-left:4px; }
 .ov-chip-accent { background:var(--ov-blue-l); color:var(--ov-blue-d); }
 .ov-chip-success { background:var(--ov-green-l); color:var(--ov-green-d); }
@@ -3109,7 +3123,7 @@ def page_backtest():
             '<p class="ov-card-title"><span class="ov-dot" '
             'style="background:var(--ov-blue);"></span>Run configuration'
             '<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
-            'Defaults mirror the LIVE strategy exactly</span></p>',
+            'calendar-entry momentum system</span></p>',
             unsafe_allow_html=True)
 
         rc1, rc2, rc3, rc4 = st.columns([1.3, 1.6, 1.1, 1.1])
@@ -3149,19 +3163,17 @@ def page_backtest():
                      "with.")
 
         st.divider()
-        if os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
-            _hist_cached_hdr = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)
-            _hist_age_hr = (dt.datetime.now() - _hist_cached_hdr["run_time"]).total_seconds() / 3600
-            _hist_meta = (f'📁 Fundamentals history built {_hist_age_hr:.1f}h ago '
-                         f'({len(_hist_cached_hdr["history"])} symbols)')
-        else:
-            _hist_meta = "⚠ Fundamentals history not built yet"
+        _hist_available = os.path.exists(FUNDAMENTALS_HISTORY_CACHE)
+        _hist_badge_color = "var(--ov-green-d)" if _hist_available else "var(--ov-red-d)"
+        _hist_badge_text = "AVAILABLE" if _hist_available else "NOT AVAILABLE"
         st.markdown(
             '<p class="ov-card-title"><span class="ov-dot" '
             'style="background:var(--ov-purple);"></span>🎯 Strategy parameters — '
             'tested &amp; approved'
-            f'<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
-            f'{_hist_meta}</span></p>', unsafe_allow_html=True)
+            f'<span class="ov-card-meta" style="font-weight:700;margin-left:auto;'
+            f'color:{_hist_badge_color};">'
+            f'Fundamentals Build History - {_hist_badge_text}</span></p>',
+            unsafe_allow_html=True)
 
         sp1, sp2, sp3, sp4, sp5 = st.columns(5)
         with sp1:
@@ -3179,8 +3191,9 @@ def page_backtest():
                      "any further move against that same baseline, not just "
                      "eyeballing one run.")
         with sp3:
-            st.markdown('<p class="ov-muted" style="margin-bottom:2px;">Trailing stop</p>',
-                       unsafe_allow_html=True)
+            st.markdown(
+                '<p class="ov-muted" style="margin-bottom:2px;text-transform:none;">'
+                'Trailing stop</p>', unsafe_allow_html=True)
             ts1, ts2 = st.columns([1, 1])
             with ts1:
                 use_trailing = st.checkbox(
@@ -3198,8 +3211,9 @@ def page_backtest():
                          "live default): CAGR 24.30% vs baseline 22.51%, Sharpe 1.73 "
                          "vs 1.50, max drawdown -14.37% vs -18.06%.")
         with sp4:
-            st.markdown('<p class="ov-muted" style="margin-bottom:2px;">Equal-weight allocator</p>',
-                       unsafe_allow_html=True)
+            st.markdown(
+                '<p class="ov-muted" style="margin-bottom:2px;text-transform:none;">'
+                'Equal-weight allocator</p>', unsafe_allow_html=True)
             ew1, ew2 = st.columns([1, 1])
             with ew1:
                 use_equal_weight = st.checkbox(
@@ -3220,10 +3234,11 @@ def page_backtest():
                          "43.06->44.39%, Sharpe 1.64->1.67, max drawdown "
                          "-20.30->-19.58%, profit factor 2.10->2.12.")
         with sp5:
-            st.markdown('<p class="ov-muted" style="margin-bottom:2px;">Fundamental gate</p>',
-                       unsafe_allow_html=True)
+            st.markdown(
+                '<p class="ov-muted" style="margin-bottom:2px;text-transform:none;">'
+                'Fundamental gate</p>', unsafe_allow_html=True)
             use_fundamentals = st.checkbox(
-                "Point-in-time", value=True, key="bt_use_fundamentals",
+                "Enable", value=True, key="bt_use_fundamentals",
                 help="This is the LIVE default (config.STRATEGY['fundamental_gate_"
                      "enabled']=True) -- uncheck only to see the pure-technical "
                      "baseline it was A/B'd against. Uses each filing's real "
@@ -3256,14 +3271,6 @@ def page_backtest():
                      "weight above have documented A/B history; this threshold "
                      "itself has never been swept, so treat any result here as "
                      "a first look, not a verified finding.")
-        if use_fundamentals and not os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
-            st.warning("Fundamentals history not built yet — the gate will "
-                      "have no effect until you build one (top-right button).")
-
-        st.markdown(
-            '<p class="ov-muted" style="margin-top:8px;">Momentum, trend &amp; '
-            'risk — full parity with Admin → Strategy configuration, not '
-            'independently A/B-tuned here</p>', unsafe_allow_html=True)
         sp9, sp10, sp11, sp12 = st.columns(4)
         with sp9:
             mom_lookback_short_v = st.number_input(
