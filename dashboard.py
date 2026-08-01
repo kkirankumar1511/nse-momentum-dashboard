@@ -3108,7 +3108,7 @@ def page_backtest():
         st.markdown(
             '<div class="ov-header" style="margin-bottom:0;">'
             '<div><span class="ov-h1">🧪 Backtest</span> '
-            '<span class="ov-sub">· calendar-entry momentum system</span>'
+            '<span class="ov-sub">calendar-entry momentum system</span>'
             f'<span class="ov-info-icon" title="{_backtest_tip}">ℹ️</span></div></div>',
             unsafe_allow_html=True)
     with _bt_hdr_r:
@@ -3118,12 +3118,27 @@ def page_backtest():
         _run_backtest_clicked = _bt_hdr_r2.button(
             "Run backtest", type="primary", key="bt_run_hdr")
 
+    if "bt_result" not in st.session_state and os.path.exists(BACKTEST_CACHE):
+        _cached_bt = pd.read_pickle(BACKTEST_CACHE)
+        st.session_state["bt_result"] = _cached_bt["result"]
+        st.session_state["bt_bench"] = _cached_bt["bench"]
+        st.session_state["bt_run_time"] = _cached_bt["run_time"]
+        st.session_state["bt_is_cached"] = True
+
+    _bt_run_time_hdr = st.session_state.get("bt_run_time")
+    if _bt_run_time_hdr is not None:
+        _bt_cached_note_hdr = (" 📁 (from cache — click 'Run backtest' to refresh)"
+                               if st.session_state.get("bt_is_cached") else "")
+        _bt_run_meta = f"Last run: {_bt_run_time_hdr:%d %b %Y %H:%M}{_bt_cached_note_hdr}"
+    else:
+        _bt_run_meta = "Not run yet"
+
     with st.container(border=True, key="ov-card-bt-config"):
         st.markdown(
             '<p class="ov-card-title"><span class="ov-dot" '
             'style="background:var(--ov-blue);"></span>Run configuration'
-            '<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
-            'calendar-entry momentum system</span></p>',
+            f'<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+            f'{_bt_run_meta}</span></p>',
             unsafe_allow_html=True)
 
         rc1, rc2, rc3, rc4 = st.columns([1.3, 1.6, 1.1, 1.1])
@@ -3175,29 +3190,22 @@ def page_backtest():
             f'Fundamentals Build History - {_hist_badge_text}</span></p>',
             unsafe_allow_html=True)
 
-        sp1, sp2, sp3, sp4, sp5 = st.columns(5)
-        with sp1:
-            rsi_min_v = st.number_input(
-                "RSI min", min_value=0.0, max_value=100.0,
-                value=float(config.STRATEGY["rsi_min"]), step=0.01, format="%.2f",
-                help="Momentum names trade 45-80 in this system's regime; below "
-                     "this is not yet in an uptrend.")
-        with sp2:
-            rsi_max_v = st.number_input(
-                "RSI max", min_value=0.0, max_value=100.0,
-                value=float(config.STRATEGY["rsi_max"]), step=0.01, format="%.2f",
-                help="A 5-year A/B (max_positions=4) found raising this 78->80 "
-                     "improved CAGR 7.36->8.15%, Sharpe 1.14->1.25 -- re-verify "
-                     "any further move against that same baseline, not just "
-                     "eyeballing one run.")
-        with sp3:
+        def _ov_muted(text):
             st.markdown(
-                '<p class="ov-muted" style="margin-bottom:2px;text-transform:none;">'
-                'Trailing stop</p>', unsafe_allow_html=True)
+                f'<p class="ov-muted" style="margin:10px 0 2px;text-transform:none;">{text}</p>',
+                unsafe_allow_html=True)
+
+        _ov_muted("Trade management")
+        tm1, tm2, tm3 = st.columns(3)
+        with tm1:
+            atr_stop_multiple_v = st.number_input(
+                "Initial stop (× ATR)", min_value=0.5, max_value=10.0,
+                value=float(config.STRATEGY["atr_stop_multiple"]), step=0.1)
+        with tm2:
             ts1, ts2 = st.columns([1, 1])
             with ts1:
                 use_trailing = st.checkbox(
-                    "Enabled", value=bool(config.STRATEGY["trailing_stop_enabled"]),
+                    "Trailing stop", value=bool(config.STRATEGY["trailing_stop_enabled"]),
                     key="bt_use_trailing",
                     help="LIVE default is ON. Ratchets each position's stop up to "
                          "highest_close_since_entry - multiple*ATR as it gains, "
@@ -3210,14 +3218,66 @@ def page_backtest():
                     help="A 5-year sweep found an inverted-U peaking at 4.0x (the "
                          "live default): CAGR 24.30% vs baseline 22.51%, Sharpe 1.73 "
                          "vs 1.50, max drawdown -14.37% vs -18.06%.")
-        with sp4:
-            st.markdown(
-                '<p class="ov-muted" style="margin-bottom:2px;text-transform:none;">'
-                'Equal-weight allocator</p>', unsafe_allow_html=True)
+        with tm3:
+            risk_per_trade_pct_v = st.number_input(
+                "Risk per trade (% of capital)", min_value=0.1, max_value=10.0,
+                value=float(config.STRATEGY["risk_per_trade_pct"]), step=0.1)
+
+        _ov_muted("Technical indicator")
+        ti1, ti2, ti3 = st.columns(3)
+        with ti1:
+            rsi_min_v = st.number_input(
+                "RSI min", min_value=0.0, max_value=100.0,
+                value=float(config.STRATEGY["rsi_min"]), step=0.01, format="%.2f",
+                help="Momentum names trade 45-80 in this system's regime; below "
+                     "this is not yet in an uptrend.")
+        with ti2:
+            rsi_max_v = st.number_input(
+                "RSI max", min_value=0.0, max_value=100.0,
+                value=float(config.STRATEGY["rsi_max"]), step=0.01, format="%.2f",
+                help="A 5-year A/B (max_positions=4) found raising this 78->80 "
+                     "improved CAGR 7.36->8.15%, Sharpe 1.14->1.25 -- re-verify "
+                     "any further move against that same baseline, not just "
+                     "eyeballing one run.")
+        with ti3:
+            ema_fast_v = st.number_input(
+                "EMA (fast)", min_value=5, max_value=100,
+                value=int(config.STRATEGY["ema_fast"]), step=1)
+        ti4, ti5, ti6 = st.columns(3)
+        with ti4:
+            ema_slow_v = st.number_input(
+                "EMA (slow)", min_value=50, max_value=400,
+                value=int(config.STRATEGY["ema_slow"]), step=1)
+        with ti5:
+            volume_expansion_min_v = st.number_input(
+                "Min volume expansion (20d/60d)", min_value=0.0, max_value=5.0,
+                value=float(config.STRATEGY["volume_expansion_min"]), step=0.1)
+        with ti6:
+            mom_lookback_short_v = st.number_input(
+                "Momentum lookback — short (days)", min_value=5, max_value=252,
+                value=int(config.STRATEGY["mom_lookback_days_short"]), step=1)
+        ti7, ti8, ti9 = st.columns(3)
+        with ti7:
+            mom_lookback_long_v = st.number_input(
+                "Momentum lookback — long (days)", min_value=5, max_value=504,
+                value=int(config.STRATEGY["mom_lookback_days_long"]), step=1)
+        with ti8:
+            skip_recent_days_v = st.number_input(
+                "Skip most recent (days)", min_value=0, max_value=30,
+                value=int(config.STRATEGY["skip_recent_days"]), step=1)
+        with ti9:
+            history_days_v = st.number_input(
+                "Candle history fetched (days)", min_value=300, max_value=3000,
+                value=int(config.STRATEGY["history_days"]), step=100)
+
+        _ov_muted("Scanner param")
+        sc1, sc2, sc3 = st.columns(3)
+        with sc1:
             ew1, ew2 = st.columns([1, 1])
             with ew1:
                 use_equal_weight = st.checkbox(
-                    "Enabled", value=bool(config.STRATEGY["advanced_equal_weight_sizing"]),
+                    "Equal-weight allocator",
+                    value=bool(config.STRATEGY["advanced_equal_weight_sizing"]),
                     key="bt_use_equal_weight",
                     help="LIVE default is ON. Sizes the whole day's buys in one "
                          "pass -- cross-slot borrowing within tolerance, partial "
@@ -3233,12 +3293,9 @@ def page_backtest():
                          "original one-at-a-time fill on every metric at once: CAGR "
                          "43.06->44.39%, Sharpe 1.64->1.67, max drawdown "
                          "-20.30->-19.58%, profit factor 2.10->2.12.")
-        with sp5:
-            st.markdown(
-                '<p class="ov-muted" style="margin-bottom:2px;text-transform:none;">'
-                'Fundamental gate</p>', unsafe_allow_html=True)
+        with sc2:
             use_fundamentals = st.checkbox(
-                "Enable", value=True, key="bt_use_fundamentals",
+                "Fundamental gate", value=True, key="bt_use_fundamentals",
                 help="This is the LIVE default (config.STRATEGY['fundamental_gate_"
                      "enabled']=True) -- uncheck only to see the pure-technical "
                      "baseline it was A/B'd against. Uses each filing's real "
@@ -3247,9 +3304,7 @@ def page_backtest():
                      "fundamentals applied retroactively. Needs a fundamentals "
                      "history built first (top-right button) -- without one, "
                      "this checkbox has no effect regardless of its state.")
-
-        sp6, sp7 = st.columns(2)
-        with sp6:
+        with sc3:
             fundamental_bonus_weight_v = st.number_input(
                 "Fundamental bonus weight", min_value=0.0, max_value=3.0,
                 value=float(config.STRATEGY["fundamental_bonus_weight"]), step=0.1,
@@ -3260,7 +3315,8 @@ def page_backtest():
                      "default): CAGR 43.70->43.03% at 0.5, Sharpe 1.62->1.64, "
                      "max drawdown improves -24.61->-20.30% -- anything above "
                      "0.5 is a clear net negative.")
-        with sp7:
+        sc4, sc5, sc6 = st.columns(3)
+        with sc4:
             min_fundamental_score_v = st.number_input(
                 "Min fundamental score", min_value=0.0, max_value=100.0,
                 value=float(config.STRATEGY["min_fundamental_score"]), step=1.0,
@@ -3271,49 +3327,12 @@ def page_backtest():
                      "weight above have documented A/B history; this threshold "
                      "itself has never been swept, so treat any result here as "
                      "a first look, not a verified finding.")
-        sp9, sp10, sp11, sp12 = st.columns(4)
-        with sp9:
-            mom_lookback_short_v = st.number_input(
-                "Momentum lookback — short (days)", min_value=5, max_value=252,
-                value=int(config.STRATEGY["mom_lookback_days_short"]), step=1)
-        with sp10:
-            mom_lookback_long_v = st.number_input(
-                "Momentum lookback — long (days)", min_value=5, max_value=504,
-                value=int(config.STRATEGY["mom_lookback_days_long"]), step=1)
-        with sp11:
-            skip_recent_days_v = st.number_input(
-                "Skip most recent (days)", min_value=0, max_value=30,
-                value=int(config.STRATEGY["skip_recent_days"]), step=1)
-        with sp12:
+        with sc5:
             near_high_threshold_v = st.number_input(
                 "52-week-high proximity (%)", min_value=50.0, max_value=100.0,
                 value=float(config.STRATEGY["near_high_threshold"]) * 100, step=1.0,
                 help="Price must be at least this % of its 52-week high to qualify.")
-
-        sp13, sp14, sp15, sp16 = st.columns(4)
-        with sp13:
-            ema_fast_v = st.number_input(
-                "EMA (fast)", min_value=5, max_value=100,
-                value=int(config.STRATEGY["ema_fast"]), step=1)
-        with sp14:
-            ema_slow_v = st.number_input(
-                "EMA (slow)", min_value=50, max_value=400,
-                value=int(config.STRATEGY["ema_slow"]), step=1)
-        with sp15:
-            volume_expansion_min_v = st.number_input(
-                "Min volume expansion (20d/60d)", min_value=0.0, max_value=5.0,
-                value=float(config.STRATEGY["volume_expansion_min"]), step=0.1)
-        with sp16:
-            atr_stop_multiple_v = st.number_input(
-                "Initial stop (× ATR)", min_value=0.5, max_value=10.0,
-                value=float(config.STRATEGY["atr_stop_multiple"]), step=0.1)
-
-        sp17, sp18, sp19 = st.columns(3)
-        with sp17:
-            risk_per_trade_pct_v = st.number_input(
-                "Risk per trade (% of capital)", min_value=0.1, max_value=10.0,
-                value=float(config.STRATEGY["risk_per_trade_pct"]), step=0.1)
-        with sp18:
+        with sc6:
             sector_bonus_weight_v = st.number_input(
                 "Sector bonus weight", min_value=0.0, max_value=1.0,
                 value=float(config.STRATEGY["sector_bonus_weight"]), step=0.05,
@@ -3321,10 +3340,6 @@ def page_backtest():
                      "allocator specifically: loses on CAGR and Sharpe at every "
                      "weight, and drawdown gets worse too, so there's no "
                      "risk/reward trade-off to make here.")
-        with sp19:
-            history_days_v = st.number_input(
-                "Candle history fetched (days)", min_value=300, max_value=3000,
-                value=int(config.STRATEGY["history_days"]), step=100)
 
         st.caption("No per-trade cost is modeled — Zerodha charges no brokerage "
                   "on equity delivery (CNC). Statutory costs (STT, stamp duty, "
@@ -3343,13 +3358,6 @@ def page_backtest():
                         FUNDAMENTALS_HISTORY_CACHE)
             st.rerun()
 
-
-    if "bt_result" not in st.session_state and os.path.exists(BACKTEST_CACHE):
-        cached = pd.read_pickle(BACKTEST_CACHE)
-        st.session_state["bt_result"] = cached["result"]
-        st.session_state["bt_bench"] = cached["bench"]
-        st.session_state["bt_run_time"] = cached["run_time"]
-        st.session_state["bt_is_cached"] = True
 
     run_disabled = range_mode == "Custom dates" and start_date >= end_date
     if run_disabled:
@@ -3413,12 +3421,6 @@ def page_backtest():
     if "bt_result" not in st.session_state:
         st.info("Click **Run backtest** to simulate on real Kite data.")
         return
-
-    run_time = st.session_state.get("bt_run_time")
-    cached_note = " 📁 (from cache — click 'Run backtest' to refresh)" \
-        if st.session_state.get("bt_is_cached") else ""
-    if run_time is not None:
-        st.caption(f"Last run: {run_time:%d %b %Y %H:%M}{cached_note}")
 
     res = st.session_state["bt_result"]
     eq = res["equity_curve"]
