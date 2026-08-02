@@ -76,7 +76,8 @@ if os.name == "nt":
         _ProactorBasePipeTransport._connection_reset_silenced = True
 import state_db
 
-st.set_page_config(page_title="KK Trading System", layout="wide", page_icon="📈")
+st.set_page_config(page_title="KK Trading System", layout="wide",
+                   page_icon="assets/logo.png" if os.path.exists("assets/logo.png") else "📈")
 
 def _redirect_to_kite_login(error: str | None = None) -> None:
     """Auto-redirects the browser to Zerodha's real login + 2FA page --
