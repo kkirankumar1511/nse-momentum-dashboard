@@ -5,7 +5,10 @@ the raw server-rendered HTML Streamlit ships still hardcodes "Streamlit"
 and its own default favicon.png). That raw HTML is what browser/OS
 "create shortcut" and "add to home screen" flows read, so without this
 patch those show "Streamlit" with no icon regardless of page_icon/
-page_title.
+page_title. Also adds an apple-touch-icon (iOS) and a Web App Manifest
+(Android/Chrome) -- both platforms' "Add to Home Screen" ignore the
+regular favicon entirely and fall back to a plain monogram tile without
+their own specific icon declaration.
 
 This edits files INSIDE the installed streamlit package (not this repo),
 so it's not covered by git and must be re-run after every `pip install`
@@ -18,6 +21,7 @@ streamlit installation is found:
 """
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -26,19 +30,42 @@ import streamlit
 APP_NAME = "KK Trading System"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_FAVICON = REPO_ROOT / "assets" / "favicon_square.png"
+SOURCE_APPLE_ICON = REPO_ROOT / "assets" / "apple_touch_icon.png"
+SOURCE_ICON_192 = REPO_ROOT / "assets" / "icon_192.png"
+SOURCE_ICON_512 = REPO_ROOT / "assets" / "icon_512.png"
+
+# Android's "Add to Home Screen"/"Install app" reads THIS, not favicon.png
+# or apple-touch-icon -- without it Chrome falls back to a plain monogram
+# tile (the "T" the user saw), regardless of what the favicon/title say.
+MANIFEST = {
+    "name": APP_NAME,
+    "short_name": APP_NAME,
+    "start_url": ".",
+    "display": "standalone",
+    "background_color": "#f6f5f0",
+    "theme_color": "#185fa5",
+    "icons": [
+        {"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+        {"src": "icon-512.png", "sizes": "512x512", "type": "image/png"},
+    ],
+}
 
 
 def main() -> None:
     static_dir = Path(streamlit.__file__).resolve().parent / "static"
     index_html = static_dir / "index.html"
     favicon = static_dir / "favicon.png"
+    apple_icon = static_dir / "apple-touch-icon.png"
+    icon_192 = static_dir / "icon-192.png"
+    icon_512 = static_dir / "icon-512.png"
+    manifest_path = static_dir / "manifest.json"
 
     if not index_html.exists():
         raise SystemExit(f"Not found: {index_html} -- is this the right venv?")
-    if not SOURCE_FAVICON.exists():
-        raise SystemExit(
-            f"Not found: {SOURCE_FAVICON} -- run this from the repo root, "
-            "with assets/favicon_square.png already generated.")
+    for src in (SOURCE_FAVICON, SOURCE_APPLE_ICON, SOURCE_ICON_192, SOURCE_ICON_512):
+        if not src.exists():
+            raise SystemExit(f"Not found: {src} -- run this from the repo root, "
+                             "with the assets/ icon files already generated.")
 
     html = index_html.read_text(encoding="utf-8")
     changed = False
@@ -58,6 +85,27 @@ def main() -> None:
         html = html.replace("<title>", f"{apple_meta}\n    <title>", 1)
         changed = True
 
+    # iOS's "Add to Home Screen" specifically looks for rel="apple-touch-icon"
+    # (not rel="shortcut icon"/favicon.png), and Android's "Add to Home
+    # Screen"/"Install app" specifically looks for a Web App Manifest's
+    # icons array (not either favicon) -- without these, each platform
+    # falls back to a plain monogram tile (the "T" the user saw on
+    # Android) regardless of what the favicon/title say. Inserted
+    # independently (not as one combined block) so re-running this after
+    # only ONE of the two was added in a prior version doesn't duplicate
+    # the other.
+    shortcut_icon_line = '<link rel="shortcut icon" href="./favicon.png" />'
+    apple_link = '<link rel="apple-touch-icon" href="./apple-touch-icon.png" />'
+    manifest_link = '<link rel="manifest" href="./manifest.json" />'
+    if apple_link not in html:
+        html = html.replace(shortcut_icon_line,
+                            f'{shortcut_icon_line}\n    {apple_link}')
+        changed = True
+    if manifest_link not in html:
+        html = html.replace(shortcut_icon_line,
+                            f'{shortcut_icon_line}\n    {manifest_link}')
+        changed = True
+
     if changed:
         index_html.write_text(html, encoding="utf-8")
         print(f"Patched {index_html}")
@@ -66,6 +114,13 @@ def main() -> None:
 
     shutil.copyfile(SOURCE_FAVICON, favicon)
     print(f"Replaced {favicon} with {SOURCE_FAVICON}")
+    shutil.copyfile(SOURCE_APPLE_ICON, apple_icon)
+    print(f"Wrote {apple_icon} from {SOURCE_APPLE_ICON}")
+    shutil.copyfile(SOURCE_ICON_192, icon_192)
+    shutil.copyfile(SOURCE_ICON_512, icon_512)
+    print(f"Wrote {icon_192} and {icon_512}")
+    manifest_path.write_text(json.dumps(MANIFEST, indent=2), encoding="utf-8")
+    print(f"Wrote {manifest_path}")
 
 
 if __name__ == "__main__":
