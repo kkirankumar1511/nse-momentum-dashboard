@@ -364,7 +364,17 @@ _OVERVIEW_CSS = """
    overlap the logo or squeeze the chips into wrapping no matter the
    window width. That's what repeated column/flex-ratio attempts here
    kept fighting. */
-.st-key-ov_sync { position:absolute !important; top:2px !important; right:0 !important; }
+/* z-index above Streamlit's own [data-testid="stAppToolbar"] (999990) --
+   that native toolbar spans the full viewport width at the very top
+   (0-52.5px tall) on EVERY screen size, invisible/empty past its sidebar-
+   expand button but still pointer-events:auto, so it silently swallows
+   taps meant for anything under it. On desktop this container's own
+   "top:2px" position happens to land below that 52.5px strip so it never
+   came up; on a narrow phone viewport the topbar sits higher up (logo
+   stacks above the chips there -- see the @media rule above) and the
+   button's position overlaps the strip, so taps hit the toolbar's empty
+   space instead of Sync and nothing happens. */
+.st-key-ov_sync { position:absolute !important; top:2px !important; right:0 !important; z-index:1000000 !important; }
 /* Divider line under the whole brandbar row, and the positioning
    context for the absolutely-placed Sync button above. */
 .st-key-ov-topbar {
