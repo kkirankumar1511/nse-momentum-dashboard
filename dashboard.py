@@ -3844,6 +3844,48 @@ def page_fundamentals():
 
 JOB_TYPES = ["rebalance_scan", "gap_check", "fundamentals_refresh", "screen_run"]
 
+# Mirrors deploy/vps/systemd/*.timer's OnCalendar schedules -- kept in sync
+# by hand, not read from systemd itself (this dashboard process has no
+# visibility into the VPS's timer state). weekdays: 0=Mon..6=Sun.
+# screen_run has no entry -- it's the Screener page's manual "Run screen"
+# button only, never scheduled.
+_JOB_SCHEDULES = {
+    "rebalance_scan": ([0, 1, 2, 3, 4], 14, 45),
+    "gap_check": ([0, 1, 2, 3, 4], 9, 16),
+    "fundamentals_refresh": ([0], 8, 0),
+}
+
+
+def _next_scheduled_run(job_type: str, now: dt.datetime | None = None) -> dt.datetime | None:
+    """Next occurrence of job_type's systemd timer schedule, or None for a
+    manual-only job type (no entry in _JOB_SCHEDULES)."""
+    now = now or dt.datetime.now()
+    sched = _JOB_SCHEDULES.get(job_type)
+    if sched is None:
+        return None
+    weekdays, hour, minute = sched
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    for _ in range(8):  # far enough ahead to cover even a weekly schedule
+        if candidate.weekday() in weekdays and candidate > now:
+            return candidate
+        candidate = (candidate + dt.timedelta(days=1)).replace(
+            hour=hour, minute=minute, second=0, microsecond=0)
+    return None
+
+
+def _format_next_run(job_type: str, now: dt.datetime | None = None) -> str:
+    now = now or dt.datetime.now()
+    nxt = _next_scheduled_run(job_type, now)
+    if nxt is None:
+        return "Manual only -- no schedule"
+    if nxt.date() == now.date():
+        when = f"today {nxt:%H:%M}"
+    elif nxt.date() == (now + dt.timedelta(days=1)).date():
+        when = f"tomorrow {nxt:%H:%M}"
+    else:
+        when = f"{nxt:%a %d %b} {nxt:%H:%M}"
+    return f"Next: {when}"
+
 
 def page_job_log():
     _joblog_tip = html_lib.escape(
@@ -3860,8 +3902,9 @@ def page_job_log():
     for jt in JOB_TYPES:
         last = state_db.get_last_job_run(jt)
         label = COLUMN_LABELS.get(jt, jt)
+        next_run_line = _format_next_run(jt)
         if last is None:
-            _job_cards.append(_ov_metric_html(label, "never run", None, "", "coral"))
+            _job_cards.append(_ov_metric_html(label, "never run", next_run_line, "", "coral"))
             continue
         started = dt.datetime.fromisoformat(last["started_at"])
         age_hr = (dt.datetime.now() - started).total_seconds() / 3600
@@ -3874,6 +3917,7 @@ def page_job_log():
         _err_msg = last.get("error_message") or ""
         _err_last_line = _err_msg.strip().splitlines()[-1] if _err_msg.strip() else ""
         note = last.get("summary") or _err_last_line
+        note = f"{note}<br>{next_run_line}" if note else next_run_line
         _job_cards.append(_ov_metric_html(
             label, f"{badge} {age_hr:.1f}h ago", note,
             "ov-neg" if last["status"] == "failed" else "", _job_tones.get(last["status"], "coral")))
