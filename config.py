@@ -134,9 +134,6 @@ _STRATEGY_DEFAULTS = {
     "rsi_min": 45,
     "rsi_max": 80,
 
-    # Volume confirmation: 20d avg volume vs 60d avg volume
-    "volume_expansion_min": 1.0,
-
     # Risk management
     "atr_period": 14,
     "atr_stop_multiple": 2.5,          # initial stop = entry - 2.5*ATR

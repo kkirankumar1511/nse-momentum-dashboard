@@ -1868,15 +1868,12 @@ def page_admin():
                 "EMA (slow)", min_value=50, max_value=400,
                 value=int(cfg["ema_slow"]), step=1)
 
-            st.markdown('<p class="ov-muted">RSI &amp; volume</p>', unsafe_allow_html=True)
-            c12, c13, c14 = st.columns(3)
+            st.markdown('<p class="ov-muted">RSI</p>', unsafe_allow_html=True)
+            c12, c13 = st.columns(2)
             rsi_min = c12.number_input(
                 "RSI min", min_value=0, max_value=100, value=int(cfg["rsi_min"]), step=1)
             rsi_max = c13.number_input(
                 "RSI max", min_value=0, max_value=100, value=int(cfg["rsi_max"]), step=1)
-            volume_expansion_min = c14.number_input(
-                "Min volume expansion (20d/60d)", min_value=0.0, max_value=5.0,
-                value=float(cfg["volume_expansion_min"]), step=0.1)
 
             st.markdown('<p class="ov-muted">Fundamental gate &amp; sector bonus (opt-in features)</p>',
                        unsafe_allow_html=True)
@@ -1936,7 +1933,6 @@ def page_admin():
                 "ema_slow": int(ema_slow),
                 "rsi_min": int(rsi_min),
                 "rsi_max": int(rsi_max),
-                "volume_expansion_min": float(volume_expansion_min),
                 "fundamental_gate_enabled": bool(fundamental_gate_enabled),
                 "min_fundamental_score": float(min_fundamental_score),
                 "fundamental_bonus_weight": float(fundamental_bonus_weight),
@@ -3291,23 +3287,19 @@ def page_backtest():
                 "EMA (slow)", min_value=50, max_value=400,
                 value=int(config.STRATEGY["ema_slow"]), step=1)
         with ti5:
-            volume_expansion_min_v = st.number_input(
-                "Min volume expansion (20d/60d)", min_value=0.0, max_value=5.0,
-                value=float(config.STRATEGY["volume_expansion_min"]), step=0.1)
-        with ti6:
             mom_lookback_short_v = st.number_input(
                 "Momentum lookback — short (days)", min_value=5, max_value=252,
                 value=int(config.STRATEGY["mom_lookback_days_short"]), step=1)
-        ti7, ti8, ti9 = st.columns(3)
-        with ti7:
+        with ti6:
             mom_lookback_long_v = st.number_input(
                 "Momentum lookback — long (days)", min_value=5, max_value=504,
                 value=int(config.STRATEGY["mom_lookback_days_long"]), step=1)
-        with ti8:
+        ti7, ti8 = st.columns(2)
+        with ti7:
             skip_recent_days_v = st.number_input(
                 "Skip most recent (days)", min_value=0, max_value=30,
                 value=int(config.STRATEGY["skip_recent_days"]), step=1)
-        with ti9:
+        with ti8:
             history_days_v = st.number_input(
                 "Candle history fetched (days)", min_value=300, max_value=3000,
                 value=int(config.STRATEGY["history_days"]), step=100)
@@ -3444,7 +3436,6 @@ def page_backtest():
         run_cfg["near_high_threshold"] = float(near_high_threshold_v) / 100
         run_cfg["ema_fast"] = int(ema_fast_v)
         run_cfg["ema_slow"] = int(ema_slow_v)
-        run_cfg["volume_expansion_min"] = float(volume_expansion_min_v)
         run_cfg["atr_stop_multiple"] = float(atr_stop_multiple_v)
         run_cfg["risk_per_trade_pct"] = float(risk_per_trade_pct_v)
         run_cfg["sector_bonus_weight"] = float(sector_bonus_weight_v)
