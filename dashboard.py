@@ -1868,6 +1868,20 @@ def page_admin():
                 "EMA (slow)", min_value=50, max_value=400,
                 value=int(cfg["ema_slow"]), step=1)
 
+            st.markdown('<p class="ov-muted">Momentum score weights (fixed, not configurable)</p>',
+                       unsafe_allow_html=True)
+            st.caption(
+                "Score = **0.40** × 6-month relative strength + **0.25** × "
+                "3-month relative strength + **0.20** × 52-week-high "
+                "proximity + **0.15** × volume expansion (20d avg volume ÷ "
+                "60d avg volume) — each Z-scored across that day's universe "
+                "before weighting. These four weights are hardcoded in "
+                "`screener.score()`, the same function backtest.py and live "
+                "both call — there's no slider for them here because there's "
+                "nothing to save. The two tilts below (sector/fundamental "
+                "bonus) are the only adjustable additions on top of this "
+                "base score.")
+
             st.markdown('<p class="ov-muted">RSI</p>', unsafe_allow_html=True)
             c12, c13 = st.columns(2)
             rsi_min = c12.number_input(
