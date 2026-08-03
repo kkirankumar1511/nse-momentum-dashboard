@@ -252,6 +252,23 @@ _STRATEGY_DEFAULTS = {
     # same execute_sells()/execute_buys()/execute_top_ups() functions the
     # dashboard's manual buttons call, so the two paths can't drift apart.
     "auto_execute_trades": False,
+
+    # Rebalance cadence: "daily" re-evaluates the sell/keep-zone rule every
+    # time the scheduled scan runs (Mon-Fri); "monthly" only evaluates it
+    # on the first trading day of each calendar month (nse_holidays.
+    # is_month_start_trading_day), same definition backtest.py's monthly
+    # rb_dates uses. New buys/top-ups always fill whatever slots are
+    # already open regardless of this setting -- only the SELL decision
+    # (rank/200-EMA check) is gated, matching how backtest.py's own daily
+    # loop works (watchlist refreshed monthly, but a freed slot gets
+    # filled the same day it opens, not held until next rebalance).
+    # "daily" is the current default: real 2016-2026 data + a 5-seed
+    # synthetic multi-regime test both found it meaningfully reduces max
+    # drawdown (roughly -50% -> -35% over 10 years) at a real but smaller
+    # cost to CAGR -- a priced trade-off, not a free win, so this is worth
+    # re-checking against your own risk tolerance rather than assuming
+    # it's forever the right choice.
+    "rebalance_cadence": "daily",
 }
 
 STRATEGY = state_db.get_strategy_config(_STRATEGY_DEFAULTS)

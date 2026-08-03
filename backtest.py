@@ -380,6 +380,21 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         trades.append(Trade(sym, pos.entry_date, date, pos.entry_price,
                             price * (1 - cost), pos.qty, reason))
 
+    def _price_asof(sym: str, date) -> float | None:
+        """Last known close at or before `date` -- forward-fills over a
+        single-stock trading halt or an index-only session (confirmed via
+        2017-10-19: NSE's Diwali Muhurat trading -- NIFTY has a normal
+        candle that day, but only 4 of 208 universe stocks do). An exact
+        `date` match instead of this silently priced every non-trading
+        position at zero for that one day, producing a fictional
+        flash-crash-to-near-zero point in the equity curve (traced a real
+        -100% "max drawdown" to exactly this). None only if the symbol
+        has no candle at all up to `date` (shouldn't happen for a
+        position already held, since it must have had an entry-day
+        candle at or before any later date)."""
+        sliced = candles[sym].loc[:date, "close"]
+        return float(sliced.iloc[-1]) if not sliced.empty else None
+
     def try_enter(sym, row, price, stop, date, qty_override=None):
         nonlocal cash
         if len(positions) >= cfg["max_positions"] or sym in positions:
@@ -388,8 +403,8 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             qty = qty_override
         else:
             equity_now = cash + sum(
-                p.qty * float(candles[s].loc[date, "close"])
-                for s, p in positions.items() if date in candles[s].index)
+                p.qty * (_price_asof(s, date) or 0.0)
+                for s, p in positions.items())
             if cfg.get("capital_equal_weight_sizing", False):
                 open_slots_remaining = cfg["max_positions"] - len(positions)
                 qty = screener.capital_position_size(
@@ -506,13 +521,13 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                      for sym in allocator_syms}
             held_info = {}
             for sym, pos in positions.items():
-                if date in candles[sym].index:
-                    p = float(candles[sym].loc[date, "close"])
+                p = _price_asof(sym, date)
+                if p is not None:
                     held_info[sym] = (pos.qty, p)
                     prices.setdefault(sym, p)
             equity_now = cash + sum(
-                p.qty * float(candles[s].loc[date, "close"])
-                for s, p in positions.items() if date in candles[s].index)
+                p.qty * (_price_asof(s, date) or 0.0)
+                for s, p in positions.items())
             alloc = screener.allocate_equal_weight_buys(
                 allocator_syms, prices, held_info, cash_pool=cash,
                 total_equity=equity_now, max_positions=cfg["max_positions"],
@@ -547,8 +562,8 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
 
         # 3) mark to market
         mtm = cash + sum(
-            p.qty * float(candles[s].loc[date, "close"])
-            for s, p in positions.items() if date in candles[s].index)
+            p.qty * (_price_asof(s, date) or 0.0)
+            for s, p in positions.items())
         curve.append((date, mtm))
 
     # Positions still open when the date range runs out are left OPEN, not

@@ -39,6 +39,7 @@ import pandas as pd
 import config
 import indicators
 import kite_client
+import nse_holidays
 import screener
 import state_db
 
@@ -215,29 +216,40 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     keep_zone = set(candidates.head(cfg["max_positions"] * 2).index)
 
     # ---- Sells: same rebalance rule as the backtest (200 EMA / rank) ----
+    # Gated by cfg["rebalance_cadence"]: "daily" (default) evaluates this
+    # every run; "monthly" only evaluates it on the first trading day of
+    # the month (nse_holidays.is_month_start_trading_day), same definition
+    # backtest.py's monthly rb_dates uses. Buys/top-ups below are NOT
+    # gated by this -- a slot that's already open (from an earlier sell,
+    # or just fewer than max_positions currently held) still gets filled
+    # today regardless of cadence, matching backtest.py's own daily
+    # slot-fill-from-watchlist behavior.
     report("Checking held positions against the rebalance rule...", 0.85)
+    is_rebalance_day = (cfg.get("rebalance_cadence", "daily") == "daily"
+                        or nse_holidays.is_month_start_trading_day(dt.date.today()))
     sells = []
-    for sym, row in held.iterrows():
-        r = ranked.loc[sym] if sym in ranked.index else None
-        if r is None:
-            sells.append({"symbol": sym, "qty": int(row["quantity"]),
-                         "avg_price": float(row["average_price"]),
-                         "reason": "no data / not in current universe"})
-        elif not bool(r.get("above_ema200", False)):
-            sells.append({"symbol": sym, "qty": int(row["quantity"]),
-                         "avg_price": float(row["average_price"]),
-                         "reason": "closed below 200 EMA"})
-        elif sym not in keep_zone:
-            keep_zone_size = cfg["max_positions"] * 2
-            if sym in candidates.index:
-                rank = candidates.index.get_loc(sym) + 1
-                reason = (f"dropped out of top {keep_zone_size} rank "
-                         f"(now #{rank} of {len(candidates)})")
-            else:
-                reason = (f"failed a technical gate (trend/near-high/RSI) -- "
-                         f"not in the top {keep_zone_size} at all")
-            sells.append({"symbol": sym, "qty": int(row["quantity"]),
-                         "avg_price": float(row["average_price"]), "reason": reason})
+    if is_rebalance_day:
+        for sym, row in held.iterrows():
+            r = ranked.loc[sym] if sym in ranked.index else None
+            if r is None:
+                sells.append({"symbol": sym, "qty": int(row["quantity"]),
+                             "avg_price": float(row["average_price"]),
+                             "reason": "no data / not in current universe"})
+            elif not bool(r.get("above_ema200", False)):
+                sells.append({"symbol": sym, "qty": int(row["quantity"]),
+                             "avg_price": float(row["average_price"]),
+                             "reason": "closed below 200 EMA"})
+            elif sym not in keep_zone:
+                keep_zone_size = cfg["max_positions"] * 2
+                if sym in candidates.index:
+                    rank = candidates.index.get_loc(sym) + 1
+                    reason = (f"dropped out of top {keep_zone_size} rank "
+                             f"(now #{rank} of {len(candidates)})")
+                else:
+                    reason = (f"failed a technical gate (trend/near-high/RSI) -- "
+                             f"not in the top {keep_zone_size} at all")
+                sells.append({"symbol": sym, "qty": int(row["quantity"]),
+                             "avg_price": float(row["average_price"]), "reason": reason})
     sells_df = pd.DataFrame(sells)
 
     # ---- Buys: fill slots opened up by the sells above ----
@@ -386,6 +398,8 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
         "top_ups": top_ups_df,
         "stop_updates": stop_updates_df,
         "holdings": held.reset_index().rename(columns={"tradingsymbol": "symbol"}),
+        "is_rebalance_day": is_rebalance_day,
+        "rebalance_cadence": cfg.get("rebalance_cadence", "daily"),
         "open_slots": open_slots,
         "screen_candidates": len(ranked),
         "screen_gate_passers": int(ranked["all_gates"].sum()),
@@ -599,7 +613,18 @@ def main_gap_check():
     same LOG_PATH as main()'s rebalance scan, since both are automated runs
     with no console to watch. Also wrapped in state_db.job_run() -- see its
     docstring -- so the Job Log page has a persisted, filterable record on
-    top of the plain-text tail log."""
+    top of the plain-text tail log.
+
+    No-ops on an NSE trading holiday (nse_holidays.py) -- the systemd timer
+    itself has no notion of holidays and fires on every Mon-Fri regardless,
+    but there's nothing to check on a day the market never opened. Doesn't
+    create a job_run row for a skipped day, same reasoning as main() below:
+    the Job Log's "last run" should reflect the last day this genuinely
+    tried to do something, not a misleading no-op entry."""
+    if not nse_holidays.is_trading_day(dt.date.today()):
+        print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Skipping gap-check -- "
+             f"NSE holiday or weekend.")
+        return
     os.makedirs("cache", exist_ok=True)
     log_lines = [f"\n{'=' * 60}\n{dt.datetime.now():%d %b %Y %H:%M:%S} (gap-down check)"
                 f"\n{'=' * 60}"]
@@ -641,7 +666,15 @@ def main():
     state_db.job_run() -- see its docstring -- so the Job Log page has a
     persisted, filterable record on top of the plain-text tail log; a
     Kite-auth failure now also propagates (after logging) instead of
-    silently returning, so the systemd unit itself shows failed too."""
+    silently returning, so the systemd unit itself shows failed too.
+
+    No-ops on an NSE trading holiday (nse_holidays.py) -- see
+    main_gap_check()'s docstring for why this doesn't create a job_run
+    row for a skipped day."""
+    if not nse_holidays.is_trading_day(dt.date.today()):
+        print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Skipping rebalance scan -- "
+             f"NSE holiday or weekend.")
+        return
     os.makedirs("cache", exist_ok=True)
     log_lines = [f"\n{'=' * 60}\n{dt.datetime.now():%d %b %Y %H:%M:%S}\n{'=' * 60}"]
 

@@ -38,6 +38,7 @@ import fundamentals_agent as fa
 import indicators
 import kite_client
 import live_rebalance as lr
+import nse_holidays
 import screener
 import sector_universe as su
 from background_jobs import clear_background_job, get_background_job, start_background_job
@@ -1814,7 +1815,7 @@ def page_admin():
                 value=float(cfg["trailing_atr_multiple"]), step=0.1)
 
             st.markdown('<p class="ov-muted">Automation</p>', unsafe_allow_html=True)
-            c4b, c4c = st.columns(2)
+            c4b, c4c, c4d = st.columns(3)
             auto_apply_stop_updates = c4b.checkbox(
                 "Auto-apply trailing-stop ratchets", value=bool(cfg["auto_apply_stop_updates"]),
                 help="Push a ratcheted stop straight to the real broker GTT as "
@@ -1830,6 +1831,19 @@ def page_admin():
                      "review-first). Off by default -- this deploys new "
                      "capital and exits real positions, so it's a deliberate "
                      "opt-in once you trust the proposal quality.")
+            rebalance_cadence = c4d.segmented_control(
+                "Rebalance cadence", ["daily", "monthly"],
+                default=cfg.get("rebalance_cadence", "daily"), key="admin_rebalance_cadence",
+                help="How often the SELL/keep-zone decision is re-evaluated. "
+                     "'daily' checks every scheduled run; 'monthly' only on "
+                     "the first trading day of each month (matching the "
+                     "backtest's own monthly rb_dates). Either way, new buys "
+                     "still fill any already-open slot the same day it opens "
+                     "-- only the sell decision is gated. Real 2016-2026 data "
+                     "+ a 5-seed synthetic test both found daily meaningfully "
+                     "reduces max drawdown (~-50% to ~-35% over 10 years) at "
+                     "a real but smaller cost to CAGR -- a priced trade-off, "
+                     "not a free win.")
 
             st.markdown('<p class="ov-muted">Momentum &amp; trend</p>', unsafe_allow_html=True)
             c6, c7, c8 = st.columns(3)
@@ -1913,6 +1927,7 @@ def page_admin():
                 "trailing_atr_multiple": float(trailing_atr_multiple),
                 "auto_apply_stop_updates": bool(auto_apply_stop_updates),
                 "auto_execute_trades": bool(auto_execute_trades),
+                "rebalance_cadence": rebalance_cadence,
                 "mom_lookback_days_short": int(mom_lookback_days_short),
                 "mom_lookback_days_long": int(mom_lookback_days_long),
                 "skip_recent_days": int(skip_recent_days),
@@ -2466,6 +2481,11 @@ def page_live_rebalance():
                     state_db.mark_rebalance_sells_failed(result.get("run_id"), failed)
                     state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
                 st.rerun()
+        elif not result.get("is_rebalance_day", True):
+            st.caption(f"Sell/keep-zone rule not evaluated today -- "
+                      f"'{result.get('rebalance_cadence', 'daily')}' cadence selected in "
+                      f"Admin, only checked on the first trading day of the month. "
+                      f"New buys still fill any already-open slot as usual.")
         else:
             st.caption("No current holdings fail the rebalance rule today.")
 
@@ -3208,7 +3228,7 @@ def page_backtest():
                 unsafe_allow_html=True)
 
         _ov_muted("Trade management")
-        tm1, tm2, tm3 = st.columns(3)
+        tm1, tm2, tm3, tm4 = st.columns(4)
         with tm1:
             atr_stop_multiple_v = st.number_input(
                 "Initial stop (× ATR)", min_value=0.5, max_value=10.0,
@@ -3234,6 +3254,16 @@ def page_backtest():
             risk_per_trade_pct_v = st.number_input(
                 "Risk per trade (% of capital)", min_value=0.1, max_value=10.0,
                 value=float(config.STRATEGY["risk_per_trade_pct"]), step=0.1)
+        with tm4:
+            rebalance_cadence_v = st.segmented_control(
+                "Rebalance cadence", ["daily", "monthly"],
+                default=config.STRATEGY.get("rebalance_cadence", "daily"),
+                key="bt_rebalance_cadence",
+                help="Mirrors the LIVE Admin setting. 'daily' re-checks the "
+                     "sell/keep-zone rule every trading day (matches the live "
+                     "default); 'monthly' only re-checks it on the first "
+                     "trading day of each month. Buys/top-ups always fill open "
+                     "slots daily either way, in both live and this backtest.")
 
         _ov_muted("Technical indicator")
         ti1, ti2, ti3 = st.columns(3)
@@ -3419,9 +3449,11 @@ def page_backtest():
         run_cfg["risk_per_trade_pct"] = float(risk_per_trade_pct_v)
         run_cfg["sector_bonus_weight"] = float(sector_bonus_weight_v)
         run_cfg["history_days"] = int(history_days_v)
+        run_cfg["rebalance_cadence"] = rebalance_cadence_v
         with st.spinner("Simulating..."):
             res = bt.run_backtest(candles_bt, bench_bt, run_cfg,
                                   initial_capital=bt_capital,
+                                  rebalance="D" if rebalance_cadence_v == "daily" else "MS",
                                   fundamentals_history=fundamentals_history)
             run_time = dt.datetime.now()
             st.session_state["bt_result"] = res
@@ -3857,16 +3889,22 @@ _JOB_SCHEDULES = {
 
 
 def _next_scheduled_run(job_type: str, now: dt.datetime | None = None) -> dt.datetime | None:
-    """Next occurrence of job_type's systemd timer schedule, or None for a
-    manual-only job type (no entry in _JOB_SCHEDULES)."""
+    """Next occurrence of job_type's systemd timer schedule, skipping NSE
+    trading holidays (nse_holidays.py) on top of the timer's own weekday
+    filter -- the timer itself fires on every Mon-Fri regardless of NSE
+    holidays (systemd has no notion of them), so this is a display-only
+    projection of when the job would next do something meaningful, not a
+    claim about exactly when systemd will next invoke the service. None
+    for a manual-only job type (no entry in _JOB_SCHEDULES)."""
     now = now or dt.datetime.now()
     sched = _JOB_SCHEDULES.get(job_type)
     if sched is None:
         return None
     weekdays, hour, minute = sched
     candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    for _ in range(8):  # far enough ahead to cover even a weekly schedule
-        if candidate.weekday() in weekdays and candidate > now:
+    for _ in range(21):  # far enough to clear a holiday cluster + a weekly schedule
+        if (candidate.weekday() in weekdays and candidate > now
+                and not nse_holidays.is_trading_holiday(candidate.date())):
             return candidate
         candidate = (candidate + dt.timedelta(days=1)).replace(
             hour=hour, minute=minute, second=0, microsecond=0)
