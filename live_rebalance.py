@@ -424,6 +424,7 @@ def execute_sells(sells_df: pd.DataFrame) -> tuple[list[str], list[str], dict[st
                 ltp = None
             state_db.close_trade(r["symbol"], ltp, r["reason"])
             pos = state_db.get_open_positions().get(r["symbol"])
+            state_db.close_position(r["symbol"], ltp)
             gtt_id = pos.get("gtt_trigger_id") if pos else None
             if gtt_id:
                 try:

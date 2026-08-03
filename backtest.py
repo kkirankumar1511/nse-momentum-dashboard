@@ -330,6 +330,15 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
       stops   : if day's low touches the stop -> exit at stop (GTT proxy)
       exits   : at rebalance, drop anything below its 200 EMA or outside the
                 top 2x max_positions ranking
+
+    rebalance: "MS" (default) re-evaluates the 200-EMA/rank exit rule on the
+    first trading day of each month only -- this is the cadence every
+    documented A/B result in config.py/README was actually measured at.
+    "D" re-evaluates it every trading day instead, matching the cadence
+    live_rebalance.py's scheduled job actually runs at (Mon-Fri) if its
+    proposal is executed that often -- added specifically to let that
+    live/backtest cadence gap be measured rather than assumed. No other
+    value is supported.
     """
     cfg = dict(cfg or config.STRATEGY)
     cost = cost_bps / 10_000
@@ -340,9 +349,12 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
 
     dates = bench.index.sort_values()
     dates = dates[warmup_days:]
-    # first trading day of each month
-    rb_dates = set(pd.Series(dates).groupby(
-        [dates.year, dates.month]).min())
+    if rebalance == "D":
+        rb_dates = set(dates)
+    else:
+        # first trading day of each month
+        rb_dates = set(pd.Series(dates).groupby(
+            [dates.year, dates.month]).min())
 
     cash = initial_capital
     positions: dict[str, Position] = {}

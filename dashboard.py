@@ -3045,6 +3045,7 @@ def page_positions_trade():
                     except Exception:
                         exit_ltp = None
                     state_db.close_trade(symbol, exit_ltp, "manual_square_off")
+                    state_db.close_position(symbol, exit_ltp)
                     # A stale GTT left pointing at a position you no longer
                     # hold can trigger and attempt to sell shares that aren't
                     # there, or just confusingly linger in the Kite GTT list.
@@ -3306,7 +3307,9 @@ def page_backtest():
                          "-20.30->-19.58%, profit factor 2.10->2.12.")
         with sc2:
             use_fundamentals = st.checkbox(
-                "Fundamental gate", value=True, key="bt_use_fundamentals",
+                "Fundamental gate",
+                value=bool(config.STRATEGY["fundamental_gate_enabled"]),
+                key="bt_use_fundamentals",
                 help="This is the LIVE default (config.STRATEGY['fundamental_gate_"
                      "enabled']=True) -- uncheck only to see the pure-technical "
                      "baseline it was A/B'd against. Uses each filing's real "
@@ -3705,6 +3708,7 @@ def page_fundamentals():
     }
 
     if "value_scores" not in st.session_state:
+        st.info("Click **Run value score scan** to fetch XBRL filings and score the universe.")
         return
     vdf = st.session_state["value_scores"].copy()
 

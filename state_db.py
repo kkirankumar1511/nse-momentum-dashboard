@@ -346,6 +346,9 @@ def _migrate_trades_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+_backfill_missing_trades_done = False
+
+
 def _migrate_backfill_missing_trades(conn: sqlite3.Connection) -> None:
     """Any OPEN position without a matching OPEN trades row (bought before
     the trades/tradebook table existed) silently breaks top_up_trade()'s
@@ -358,8 +361,20 @@ def _migrate_backfill_missing_trades(conn: sqlite3.Connection) -> None:
     currently-known qty/entry_price/stop -- the actual entry-day technical/
     fundamental snapshot isn't recoverable retroactively, so those columns
     stay null, same convention every other optional trades column already
-    uses. The NOT EXISTS guard makes this idempotent -- safe on every
-    get_conn() call, only ever inserts once per position."""
+    uses.
+
+    Only ever runs once per process (module-level guard below), NOT on
+    every get_conn() call despite being invoked from get_conn() like the
+    other migrations -- record_new_position() and record_trade_entry() each
+    open their own connection, so a fresh buy has a real (if brief) window
+    where the position is committed 'open' but its trades row hasn't been
+    inserted yet. Re-running this on every call could catch that window and
+    insert a phantom duplicate trades row that then never closes (close_
+    trade() only ever closes the most recently inserted open match) --
+    found via QA sandbox testing, where it fired on every single buy."""
+    global _backfill_missing_trades_done
+    if _backfill_missing_trades_done:
+        return
     conn.execute(
         "INSERT INTO trades (position_id, symbol, entry_date, entry_price, "
         "qty, initial_stop, entry_reason, status) "
@@ -368,6 +383,7 @@ def _migrate_backfill_missing_trades(conn: sqlite3.Connection) -> None:
         "'open' FROM positions p WHERE p.status = 'open' AND NOT EXISTS ("
         "SELECT 1 FROM trades t WHERE t.symbol = p.symbol AND t.status = 'open')")
     conn.commit()
+    _backfill_missing_trades_done = True
 
 
 def _migrate_rebalance_buys_schema(conn: sqlite3.Connection) -> None:
@@ -537,6 +553,32 @@ def reconciled_positions(held_symbols: set[str],
     for symbol, exit_price in newly_closed:
         close_trade(symbol, exit_price, "gtt_fill_or_external")
     return {r["symbol"]: dict(r) for r in remaining}
+
+
+def close_position(symbol: str, exit_price: float | None) -> None:
+    """Closes the open positions row for symbol immediately (status='closed',
+    closed_date=today, exit_price/realized_pnl same convention as
+    reconciled_positions()). Call this right after a known, immediate exit
+    (manual square-off, rebalance sell) instead of waiting for the next
+    scan's reconciled_positions() pass -- without it, get_open_positions()
+    keeps counting the symbol as open (inflating the topbar's Slots chip)
+    until the next scheduled scan or gap-check happens to run. No-ops if
+    there's no open position for this symbol."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM positions WHERE symbol = ? AND status = 'open'",
+        (symbol,)).fetchone()
+    if row is None:
+        conn.close()
+        return
+    realized_pnl = ((exit_price - row["entry_price"]) * row["qty"]
+                    if exit_price is not None else None)
+    conn.execute(
+        "UPDATE positions SET status = 'closed', closed_date = ?, "
+        "exit_price = ?, realized_pnl = ? WHERE id = ?",
+        (dt.date.today().isoformat(), exit_price, realized_pnl, row["id"]))
+    conn.commit()
+    conn.close()
 
 
 def get_realized_pnl() -> float:
