@@ -4192,9 +4192,22 @@ def page_job_log():
             st.info("No job runs match these filters.")
             return
 
+        # error_message holds the FULL traceback (real value in the
+        # "full error detail" expander below) -- dumping that raw into a
+        # table cell blew up that row's height/width for every failed
+        # run. Same last-non-empty-line truncation as the quick-glance
+        # cards above; summary already stays blank on a failed run
+        # (finish_job_run() only ever sets one or the other), so this
+        # only ever fills in where summary was empty.
+        _display_runs = runs.drop(columns=["id", "error_message"]).copy()
+        _display_runs["summary"] = runs.apply(
+            lambda r: r["summary"] or (
+                str(r["error_message"]).strip().splitlines()[-1]
+                if pd.notna(r["error_message"]) and str(r["error_message"]).strip() else ""),
+            axis=1)
         st.markdown(
             _ov_table_html(
-                runs.drop(columns=["id"]), num_fmt={"duration_sec": "{:.1f}s"},
+                _display_runs, num_fmt={"duration_sec": "{:.1f}s"},
                 badges={
                     "status": {"success": "ov-badge-green", "failed": "ov-badge-red",
                               "running": "ov-badge-amber"},
