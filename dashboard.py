@@ -2527,8 +2527,11 @@ def page_live_rebalance():
     if rebalance_running:
         st.info(f"⏳ Scan running since {rebalance_job['started_at']:%H:%M:%S} — safe to switch tabs.")
     if auto_exec:
-        if st.button("Run today's scan", type="primary", disabled=rebalance_running):
-            _run_scan_now()
+        _, _scan_col = st.columns([5, 2])
+        with _scan_col:
+            if st.button("Run today's scan", type="primary",
+                        disabled=rebalance_running, key="lr_run_scan_autoexec"):
+                _run_scan_now()
 
     @st.fragment(run_every="1s" if rebalance_running else None)
     def _rebalance_job_status():
