@@ -1485,6 +1485,17 @@ def job_run(job_type: str, trigger_type: str):
         raise
     else:
         finish_job_run(run_id, "success", summary=result.get("summary"))
+        # Only the unattended scheduled run gets a completion push -- a
+        # manual "Run today's scan" click means you're already watching
+        # the screen, so a push for that would just be noise.
+        if job_type == "rebalance_scan" and trigger_type == "scheduled":
+            title = "KK Trading -- rebalance complete"
+            message = result.get("summary") or "Rebalance scan finished."
+            notify.send_push(title=title, message=message,
+                             url=notify.DASHBOARD_URL or None)
+            for dead in notify.send_webpush_all(get_push_subscriptions(),
+                                                title, message, notify.DASHBOARD_URL):
+                delete_push_subscription(dead)
 
 
 def cleanup_stale_manual_jobs() -> int:
