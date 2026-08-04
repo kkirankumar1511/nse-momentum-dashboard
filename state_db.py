@@ -240,6 +240,18 @@ CREATE TABLE IF NOT EXISTS trades (
     status TEXT NOT NULL DEFAULT 'open',
     updated_at TEXT
 );
+
+-- Browser push notification subscriptions (see notify.py, push_server.py,
+-- static/sw.js) -- one row per device/browser that's clicked "Enable
+-- notifications" in the dashboard. `endpoint` is the browser vendor's
+-- push service URL for that specific subscription and is unique per
+-- device, so it doubles as the natural primary key.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -1458,12 +1470,15 @@ def job_run(job_type: str, trigger_type: str):
         # Safety net alongside check_kite_token.py's proactive ~07:00
         # check -- covers a token that expires/gets revoked mid-day for
         # any other reason, or the proactive check itself not having run.
-        notify.send_push(
-            title="KK Trading -- Kite login needed",
-            message=f"{job_type} failed: Kite session expired. Log in "
-                    f"to resume automated runs.",
-            url=notify.DASHBOARD_URL or None, priority="urgent",
-            tags=["warning", "key"])
+        title = "KK Trading -- Kite login needed"
+        message = (f"{job_type} failed: Kite session expired. Log in "
+                  f"to resume automated runs.")
+        notify.send_push(title=title, message=message,
+                         url=notify.DASHBOARD_URL or None, priority="urgent",
+                         tags=["warning", "key"])
+        for dead in notify.send_webpush_all(get_push_subscriptions(), title,
+                                            message, notify.DASHBOARD_URL):
+            delete_push_subscription(dead)
         raise
     except Exception:
         finish_job_run(run_id, "failed", error=traceback.format_exc())
@@ -1651,3 +1666,41 @@ def get_trades(symbol: str | None = None, status: str | None = None,
         conn, params=params)
     conn.close()
     return df
+
+
+# ---------------------------------------------------------------------------
+# Browser push notification subscriptions (see notify.py, push_server.py)
+# ---------------------------------------------------------------------------
+
+def save_push_subscription(endpoint: str, p256dh: str, auth: str) -> None:
+    """Upsert -- re-subscribing the same device (endpoint) just refreshes
+    its keys rather than erroring on the PRIMARY KEY."""
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO push_subscriptions (endpoint, p256dh, auth) VALUES (?, ?, ?) "
+        "ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth",
+        (endpoint, p256dh, auth))
+    conn.commit()
+    conn.close()
+
+
+def delete_push_subscription(endpoint: str) -> None:
+    """Called both for an explicit unsubscribe and for cleaning up a
+    subscription notify.send_webpush_all() found dead (410 Gone/404 from
+    the browser vendor's push service -- e.g. the device was uninstalled
+    or notifications were revoked outside this app)."""
+    conn = get_conn()
+    conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+    conn.commit()
+    conn.close()
+
+
+def get_push_subscriptions() -> list[dict]:
+    """All currently-registered devices, in the shape pywebpush's
+    subscription_info expects -- {"endpoint": ..., "keys": {"p256dh":
+    ..., "auth": ...}}."""
+    conn = get_conn()
+    rows = conn.execute("SELECT endpoint, p256dh, auth FROM push_subscriptions").fetchall()
+    conn.close()
+    return [{"endpoint": r["endpoint"],
+             "keys": {"p256dh": r["p256dh"], "auth": r["auth"]}} for r in rows]

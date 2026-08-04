@@ -1,0 +1,15 @@
+[Unit]
+Description=Push-subscription HTTPS endpoint for browser notifications (see push_server.py, notify.py)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nseapp
+WorkingDirectory=/opt/nse-momentum-dashboard
+ExecStart=/opt/nse-momentum-dashboard/.venv/bin/python push_server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

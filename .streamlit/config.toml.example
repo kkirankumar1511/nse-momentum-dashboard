@@ -8,6 +8,11 @@
 sslCertFile = ".streamlit/certs/your-device.your-tailnet.ts.net.crt"
 sslKeyFile = ".streamlit/certs/your-device.your-tailnet.ts.net.key"
 headless = true
+# Serves static/sw.js at /app/static/sw.js on the dashboard's own origin
+# -- required for browser push notifications (see notify.py, push_server.py):
+# a service worker can only be registered from the SAME origin as the page
+# registering it, unlike a plain fetch() which can be cross-origin.
+enableStaticServing = true
 
 [client]
 toolbarMode = "minimal"

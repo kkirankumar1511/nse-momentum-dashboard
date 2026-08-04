@@ -21,15 +21,37 @@ that calls send_push().
 
 from __future__ import annotations
 
+import json
 import os
 
 import requests
 from dotenv import load_dotenv
+from pywebpush import WebPushException, webpush
 
 load_dotenv()
 
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "")
+
+# Browser push (see static/sw.js, push_server.py). VAPID_PRIVATE_KEY is the
+# raw url-safe-base64 32-byte EC private key pywebpush accepts directly (no
+# PEM file needed); VAPID_PUBLIC_KEY is the matching uncompressed-point
+# public key the browser's PushManager.subscribe() needs -- safe to expose
+# client-side, that's the point of it being the "public" half. Generate a
+# pair with:
+#   python -c "from py_vapid import Vapid02; import base64; v=Vapid02(); \
+#     v.generate_keys(); pn=v.private_key.private_numbers(); \
+#     pub=v.public_key.public_numbers(); \
+#     print('VAPID_PRIVATE_KEY=' + base64.urlsafe_b64encode(pn.private_value.to_bytes(32,'big')).rstrip(b'=').decode()); \
+#     print('VAPID_PUBLIC_KEY=' + base64.urlsafe_b64encode(b'\x04'+pub.x.to_bytes(32,'big')+pub.y.to_bytes(32,'big')).rstrip(b'=').decode())"
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "")
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "")
+VAPID_CLAIMS_EMAIL = os.getenv("VAPID_CLAIMS_EMAIL", "")
+
+# push_server.py's own port -- dashboard.py's JS derives the full URL from
+# this plus the page's own hostname (window.location.hostname), so no
+# separate PUSH_SERVER_URL env var is needed.
+PUSH_SERVER_PORT = os.getenv("PUSH_SERVER_PORT", "8503")
 
 
 def send_push(title: str, message: str, url: str | None = None,
@@ -53,3 +75,37 @@ def send_push(title: str, message: str, url: str | None = None,
     except Exception as e:
         print(f"[notify] push failed: {e}")
         return False
+
+
+def send_webpush_all(subscriptions: list[dict], title: str, message: str,
+                     url: str | None = None) -> list[str]:
+    """Sends to every subscription in the pywebpush subscription_info shape
+    (see state_db.get_push_subscriptions()). Returns the endpoints found
+    dead (410 Gone / 404 -- the device uninstalled the app or revoked
+    notifications outside this app) so the caller can delete them from
+    state_db; a subscription failing for any OTHER reason (network blip,
+    the push service being briefly down) is left alone so a transient
+    error doesn't silently unsubscribe a still-valid device.
+
+    No-op (returns []) if VAPID keys aren't configured -- same
+    "notifications are optional, never a hard dependency" contract as
+    send_push()."""
+    if not VAPID_PRIVATE_KEY or not subscriptions:
+        return []
+    payload = json.dumps({"title": title, "message": message, "url": url or ""})
+    dead = []
+    for sub in subscriptions:
+        try:
+            webpush(
+                subscription_info=sub, data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": f"mailto:{VAPID_CLAIMS_EMAIL or 'admin@localhost'}"})
+        except WebPushException as e:
+            status = getattr(e.response, "status_code", None)
+            if status in (404, 410):
+                dead.append(sub["endpoint"])
+            else:
+                print(f"[notify] webpush failed ({status}): {e}")
+        except Exception as e:
+            print(f"[notify] webpush failed: {e}")
+    return dead

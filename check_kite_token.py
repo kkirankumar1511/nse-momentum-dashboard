@@ -22,17 +22,21 @@ from kiteconnect.exceptions import TokenException
 import config
 import kite_client
 import notify
+import state_db
 
 
 def _alert():
     print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Kite token EXPIRED -- "
          f"sending push notification.")
-    notify.send_push(
-        title="KK Trading -- Kite login needed",
-        message="Today's Kite session has expired. Log in before the "
-                "09:16 gap-check / market open.",
-        url=notify.DASHBOARD_URL or None,
-        priority="urgent", tags=["warning", "key"])
+    title = "KK Trading -- Kite login needed"
+    message = ("Today's Kite session has expired. Log in before the "
+              "09:16 gap-check / market open.")
+    notify.send_push(title=title, message=message,
+                     url=notify.DASHBOARD_URL or None,
+                     priority="urgent", tags=["warning", "key"])
+    for dead in notify.send_webpush_all(state_db.get_push_subscriptions(),
+                                        title, message, notify.DASHBOARD_URL):
+        state_db.delete_push_subscription(dead)
 
 
 def main():

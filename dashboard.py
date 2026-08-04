@@ -39,6 +39,7 @@ import fundamentals_agent as fa
 import indicators
 import kite_client
 import live_rebalance as lr
+import notify
 import nse_holidays
 import screener
 import sector_universe as su
@@ -1973,6 +1974,77 @@ def page_admin():
             state_db.update_strategy_config(updates)
             config.STRATEGY.update(updates)  # live for this process -- no restart needed
             st.success("Strategy settings saved — in effect immediately.")
+
+    st.markdown(
+        '<p class="ov-card-title" style="margin-top:14px;"><span class="ov-dot" '
+        'style="background:var(--ov-blue);"></span>🔔 Push notifications</p>',
+        unsafe_allow_html=True)
+    with st.container(border=True, key="ov-card-admin-push"):
+        _n_subs = len(state_db.get_push_subscriptions())
+        if not notify.VAPID_PUBLIC_KEY:
+            st.caption("Not configured -- set VAPID_PRIVATE_KEY/VAPID_PUBLIC_KEY "
+                      "in .env to enable this (see notify.py's docstring for "
+                      "how to generate a keypair).")
+        else:
+            st.caption(f"{_n_subs} device(s) currently subscribed. Alerts fire "
+                      "when today's Kite session expires and needs a fresh "
+                      "login (the daily ~07:00 check, or any scheduled job "
+                      "that hits it mid-run) -- same alert also goes out via "
+                      "ntfy if that's configured. Click below on every phone "
+                      "or laptop browser you want alerted.")
+            pb1, pb2 = st.columns(2)
+            if pb1.button("Enable notifications on this device"):
+                st.html(f"""
+<script>
+(async () => {{
+  try {{
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {{
+      alert('Push notifications are not supported in this browser.');
+      return;
+    }}
+    function urlBase64ToUint8Array(base64String) {{
+      const padding = '='.repeat((4 - base64String.length % 4) % 4);
+      const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+      const rawData = window.atob(base64);
+      const arr = new Uint8Array(rawData.length);
+      for (let i = 0; i < rawData.length; ++i) arr[i] = rawData.charCodeAt(i);
+      return arr;
+    }}
+    const reg = await navigator.serviceWorker.register('/app/static/sw.js');
+    await navigator.serviceWorker.ready;
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') {{ alert('Notification permission was not granted.'); return; }}
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {{
+      sub = await reg.pushManager.subscribe({{
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array('{notify.VAPID_PUBLIC_KEY}')
+      }});
+    }}
+    const pushServerUrl = 'https://' + window.location.hostname + ':{notify.PUSH_SERVER_PORT}';
+    const resp = await fetch(pushServerUrl + '/subscribe', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify(sub.toJSON())
+    }});
+    alert(resp.ok ? 'Notifications enabled on this device.'
+                  : 'Could not save the subscription (server error). Try again in a moment.');
+  }} catch (e) {{
+    alert('Failed to enable notifications: ' + e.message);
+  }}
+}})();
+</script>
+""")
+            if pb2.button("Send test notification", disabled=_n_subs == 0):
+                _dead = notify.send_webpush_all(
+                    state_db.get_push_subscriptions(),
+                    "KK Trading -- test notification",
+                    "If you see this, browser push is wired up correctly.",
+                    notify.DASHBOARD_URL)
+                for _d in _dead:
+                    state_db.delete_push_subscription(_d)
+                st.success(f"Sent to {_n_subs - len(_dead)} device(s)."
+                          + (f" Removed {len(_dead)} dead subscription(s)." if _dead else ""))
 
     _skip_tip = html_lib.escape(
         "Manually excluded symbols are removed from config.UNIVERSE — the "

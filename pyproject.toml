@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "nse-momentum-dashboard"
 version = "0.1.0"
 description = "NSE calendar-entry momentum trading dashboard, live rebalance automation, and Windows service wrapper"
-requires-python = ">=3.10"
+requires-python = ">=3.11"  # push_server.py uses stdlib tomllib (3.11+)
 dependencies = [
     "kiteconnect>=5.0.1",
     "streamlit>=1.35.0",
@@ -15,6 +15,7 @@ dependencies = [
     "requests>=2.31.0",
     "python-dotenv>=1.0.0",
     "plotly>=5.20.0",
+    "pywebpush>=2.0.0",
     "pywin32; sys_platform == 'win32'",
 ]
 
@@ -43,6 +44,7 @@ py-modules = [
     "notify",
     "nse_api",
     "nse_holidays",
+    "push_server",
     "screener",
     "sector_universe",
     "state_db",
