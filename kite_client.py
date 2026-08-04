@@ -87,6 +87,27 @@ def instrument_map() -> dict:
 
 
 @lru_cache(maxsize=1)
+def tick_size_map() -> dict:
+    """symbol -> tick_size (Rs) for NSE equities. Kite rejects any LIMIT
+    price that isn't an exact multiple of a stock's own tick size, which
+    is NOT a flat value across the exchange -- commonly 0.05, but 0.10/
+    0.50/1.00 for others. Needed by place_order()'s market-protection
+    LIMIT retry below, which used to round to a flat 1 decimal place and
+    silently failed live on any stock whose real tick size was coarser
+    than that (confirmed 2026-08-04: DIVISLAB/ABB at 0.50 tick and OFSS/
+    BAJAJ-AUTO at 1.00 tick all rejected with "Tick size for this script
+    is 0.50/1.00" -- RADICO/BAJFINANCE only happened to work because a
+    flat 1-decimal rounding coincidentally satisfied their tick size)."""
+    kite = get_kite()
+    instruments = kite.instruments("NSE")
+    return {
+        row["tradingsymbol"]: row["tick_size"]
+        for row in instruments
+        if row["segment"] == "NSE" and row["instrument_type"] == "EQ"
+    }
+
+
+@lru_cache(maxsize=1)
 def index_instrument_map() -> dict:
     """tradingsymbol -> instrument_token for NSE indices (NIFTY 50, sector
     indices like NIFTY AUTO/NIFTY BANK/NIFTY ENERGY, etc.) -- these are a
@@ -260,8 +281,10 @@ def place_order(symbol: str, qty: int, side: str,
         if order_type == "MARKET" and "market protection" in str(e).lower():
             ltp = get_ltp([symbol])[symbol]
             buffer = 1.005 if side == "BUY" else 0.995
+            raw_price = ltp * buffer
+            tick = tick_size_map().get(symbol, 0.05)
             kwargs["order_type"] = "LIMIT"
-            kwargs["price"] = round(ltp * buffer, 1)
+            kwargs["price"] = round(round(raw_price / tick) * tick, 2)
             return kite.place_order(**kwargs)
         raise
 
