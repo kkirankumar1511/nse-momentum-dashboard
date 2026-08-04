@@ -2011,7 +2011,6 @@ def page_admin():
       return arr;
     }}
     const reg = await navigator.serviceWorker.register('/app/static/sw.js');
-    await navigator.serviceWorker.ready;
     const perm = await Notification.requestPermission();
     if (perm !== 'granted') {{ alert('Notification permission was not granted.'); return; }}
     let sub = await reg.pushManager.getSubscription();
