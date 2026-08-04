@@ -1105,12 +1105,13 @@ def merged_holdings() -> pd.DataFrame:
     return merged.drop(columns="cost")
 
 
-def log_equity_snapshot(value: float, invested_amount: float | None = None) -> pd.DataFrame:
-    """Upserts today's portfolio value (and cost basis, for the chart
-    overlay), so the Cockpit can chart account growth over time -- Kite
-    has no such history endpoint for a specific strategy's slice of the
-    account. See state_db.py."""
-    return state_db.log_equity_snapshot(value, invested_amount)
+def log_equity_snapshot(value: float, invested_amount: float | None = None,
+                        holdings_value: float | None = None) -> pd.DataFrame:
+    """Upserts today's portfolio value (and cost basis / holdings-only
+    market value, for the chart overlay), so the Cockpit can chart
+    account growth over time -- Kite has no such history endpoint for a
+    specific strategy's slice of the account. See state_db.py."""
+    return state_db.log_equity_snapshot(value, invested_amount, holdings_value)
 
 
 def _annualized_returns(portfolio_value: float,
@@ -1365,7 +1366,7 @@ def page_cockpit():
     portfolio_value = available_cash + holdings_value
 
     if portfolio_value > 0:
-        log = log_equity_snapshot(portfolio_value, invested_amount)
+        log = log_equity_snapshot(portfolio_value, invested_amount, holdings_value)
     else:
         # A Kite auth failure or transient fetch error can silently leave
         # available_cash/holdings_value at 0 -- logging that as a real
@@ -1414,10 +1415,10 @@ def page_cockpit():
 
             fig = go.Figure()
             fig.add_trace(go.Scatter(
-                x=plot_log["date"], y=plot_log["value"], name="Total capital (₹)",
+                x=plot_log["date"], y=plot_log["holdings_value"], name="Holdings value (₹)",
                 mode="lines+markers", line=dict(color="#16a34a", width=2),
                 marker=dict(size=5),
-                hovertemplate="₹%{y:,.0f}<extra>Total capital</extra>"))
+                hovertemplate="₹%{y:,.0f}<extra>Holdings value</extra>"))
             if plot_log["invested_amount"].notna().any():
                 fig.add_trace(go.Scatter(
                     x=plot_log["date"], y=plot_log["invested_amount"],
@@ -1433,7 +1434,7 @@ def page_cockpit():
             # LOOKS flat/broken even though the underlying data is fine. Padding
             # off the actual min/max instead makes real day-to-day change
             # visible regardless of how large the total balance is.
-            all_vals = pd.concat([plot_log["value"], plot_log["invested_amount"]]).dropna()
+            all_vals = pd.concat([plot_log["holdings_value"], plot_log["invested_amount"]]).dropna()
             y_lo, y_hi = float(all_vals.min()), float(all_vals.max())
             pad = (y_hi - y_lo) * 0.15 or max(y_hi * 0.02, 100.0)
             fig.update_layout(
@@ -1445,9 +1446,12 @@ def page_cockpit():
             chart_selection = st.plotly_chart(
                 fig, width="stretch", on_select="rerun", selection_mode="points",
                 key="equity_chart_select")
-            if plot_log["invested_amount"].isna().any():
-                st.caption("Invested amount only started being logged recently — "
-                          "earlier days show a gap until enough history builds up.")
+            if plot_log["holdings_value"].isna().any() or plot_log["invested_amount"].isna().any():
+                st.caption("Holdings value / invested amount only started being logged "
+                          "recently — earlier days show a gap until enough history "
+                          "builds up. (Total capital, cash+holdings, is still tracked "
+                          "in the KPI strip above; this chart is holdings-only vs cost "
+                          "basis, so idle cash doesn't make the comparison misleading.)")
             st.caption("Click a point on the chart above for that day's detail.")
 
             _clicked_points = chart_selection.selection.points if chart_selection else []
@@ -1457,9 +1461,13 @@ def page_cockpit():
                 _prev = plot_log.iloc[_idx - 1] if _idx > 0 else None
                 with st.expander(f"📅 {_day['date']:%d %b %Y} detail", expanded=True):
                     dc1, dc2, dc3 = st.columns(3)
-                    dc1.metric("Total capital", f"₹{_day['value']:,.0f}",
-                              delta=(f"₹{_day['value'] - _prev['value']:+,.0f} vs prev. day"
-                                    if _prev is not None else None))
+                    _day_holdings = _day["holdings_value"]
+                    _prev_holdings = _prev["holdings_value"] if _prev is not None else None
+                    dc1.metric("Holdings value",
+                              f"₹{_day_holdings:,.0f}" if pd.notna(_day_holdings) else "—",
+                              delta=(f"₹{_day_holdings - _prev_holdings:+,.0f} vs prev. day"
+                                    if pd.notna(_day_holdings) and pd.notna(_prev_holdings)
+                                    else None))
                     _day_invested = _day["invested_amount"]
                     _prev_invested = _prev["invested_amount"] if _prev is not None else None
                     dc2.metric("Invested amount",

@@ -455,15 +455,29 @@ def _migrate_rebalance_status_columns(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_equity_log_schema(conn: sqlite3.Connection) -> None:
-    """Adds invested_amount to an already-existing equity_log table -- lets
-    the Overview page's chart overlay cost basis alongside total portfolio
-    value, so growth from new capital vs actual returns is visually
-    distinguishable. Only ever populated going forward (log_equity_snapshot
-    is called once/day) -- there's no way to backfill historical cost
-    basis for days before this column existed."""
+    """Adds invested_amount, then holdings_value, to an already-existing
+    equity_log table.
+
+    invested_amount lets the Overview page's chart overlay cost basis
+    alongside total portfolio value, so growth from new capital vs actual
+    returns is visually distinguishable.
+
+    holdings_value (added later) is the market value of holdings ONLY,
+    no cash -- `value` is cash+holdings, which made the chart's
+    Invested-amount-vs-value comparison misleading whenever real cash
+    was sitting uninvested (value looked inflated by idle cash that was
+    never "invested" at all, same basis-mismatch class of bug as the
+    Capital-allocation-per-stock fix). holdings_value is the correct,
+    apples-to-apples counterpart to invested_amount.
+
+    Both are only ever populated going forward (log_equity_snapshot is
+    called once/day) -- there's no way to backfill historical figures
+    for days before each column existed."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(equity_log)")}
     if "invested_amount" not in cols:
         conn.execute("ALTER TABLE equity_log ADD COLUMN invested_amount REAL")
+    if "holdings_value" not in cols:
+        conn.execute("ALTER TABLE equity_log ADD COLUMN holdings_value REAL")
     conn.commit()
 
 
@@ -841,24 +855,28 @@ def ensure_first_cash_flow_captured(available_cash: float) -> None:
 # Equity log
 # ---------------------------------------------------------------------------
 
-def log_equity_snapshot(value: float, invested_amount: float | None = None) -> pd.DataFrame:
-    """Upserts today's portfolio value (and optionally cost basis, for the
-    Overview page's chart overlay); returns the full log as a DataFrame
-    with ["date", "value", "invested_amount"]. Uses COALESCE on conflict
-    rather than a blind overwrite -- this runs on every page load, so a
-    later call that doesn't pass invested_amount (or an older caller that
-    doesn't know about it) won't silently wipe out a value an earlier
+def log_equity_snapshot(value: float, invested_amount: float | None = None,
+                        holdings_value: float | None = None) -> pd.DataFrame:
+    """Upserts today's portfolio value (and optionally cost basis /
+    holdings-only market value, for the Overview page's chart); returns
+    the full log as a DataFrame with ["date", "value", "invested_amount",
+    "holdings_value"]. Uses COALESCE on conflict rather than a blind
+    overwrite -- this runs on every page load, so a later call that
+    doesn't pass invested_amount/holdings_value (or an older caller that
+    doesn't know about them) won't silently wipe out a value an earlier
     call already recorded for today."""
     conn = get_conn()
     today = dt.date.today().isoformat()
     conn.execute(
-        "INSERT INTO equity_log (date, value, invested_amount) VALUES (?, ?, ?) "
+        "INSERT INTO equity_log (date, value, invested_amount, holdings_value) "
+        "VALUES (?, ?, ?, ?) "
         "ON CONFLICT(date) DO UPDATE SET value = excluded.value, "
-        "invested_amount = COALESCE(excluded.invested_amount, equity_log.invested_amount)",
-        (today, value, invested_amount))
+        "invested_amount = COALESCE(excluded.invested_amount, equity_log.invested_amount), "
+        "holdings_value = COALESCE(excluded.holdings_value, equity_log.holdings_value)",
+        (today, value, invested_amount, holdings_value))
     conn.commit()
     log = pd.read_sql(
-        "SELECT date, value, invested_amount FROM equity_log ORDER BY date", conn)
+        "SELECT date, value, invested_amount, holdings_value FROM equity_log ORDER BY date", conn)
     conn.close()
     return log
 
@@ -874,7 +892,7 @@ def get_equity_log() -> pd.DataFrame:
     up from a live install)."""
     conn = get_conn()
     log = pd.read_sql(
-        "SELECT date, value, invested_amount FROM equity_log ORDER BY date", conn)
+        "SELECT date, value, invested_amount, holdings_value FROM equity_log ORDER BY date", conn)
     conn.close()
     return log
 
