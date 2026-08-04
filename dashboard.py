@@ -1496,7 +1496,19 @@ def page_cockpit():
                 _screen = _load_screen_cache()
                 _rank_map = {}
                 if _screen is not None and "score" in _screen.columns:
-                    _rank_map = {sym: i + 1 for i, sym in enumerate(_screen.index)}
+                    # Rank among GATE-PASSERS only (all_gates), matching both
+                    # the Screener page's own "rank" column (candidates =
+                    # t[t["all_gates"]]) and live_rebalance.py's candidates =
+                    # ranked[ranked["all_gates"]] -- was ranking across the
+                    # FULL unfiltered universe instead, so a stock scoring
+                    # higher than everyone but failing a gate silently
+                    # shifted every gate-passer's rank number down by one
+                    # (or more) versus what the Screener page showed for the
+                    # exact same stock. Confirmed live 2026-08-04: KALYANKJIL
+                    # showed #1 on Screener, #2 here.
+                    _screen_candidates = (_screen[_screen["all_gates"]] if "all_gates" in _screen.columns
+                                         else _screen)
+                    _rank_map = {sym: i + 1 for i, sym in enumerate(_screen_candidates.index)}
                 _keep_zone = (config.STRATEGY.get("max_positions") or 0) * 2
 
                 # Sort by momentum rank (ascending -- rank 1 first), matching
