@@ -1049,7 +1049,7 @@ COLUMN_LABELS = {
     "entry_vol_expansion": "Entry vol expansion",
     "entry_fundamental_score": "Entry fundamental score",
     "exit_reason": "Exit reason", "entry_reason": "Why this trade",
-    "latest_recommended_stop": "Latest stop (scan-ratcheted, else initial GTT)",
+    "latest_recommended_stop": "Latest stop",
     "extra_qty": "Extra qty",
     "trigger_price": "GTT trigger price", "updated_at": "Last updated",
     "apply_error": "Why it needs attention",
@@ -1326,6 +1326,10 @@ def _live_kpi_row():
             f"₹{live_unrealized_pnl:+,.0f} unrealized",
             "ov-pos" if live_unrealized_pnl >= 0 else "ov-neg", "green",
             "ov-pos" if live_total_pnl >= 0 else "ov-neg"),
+        _ov_metric_html(
+            "Realized P&L", f"₹{live_realized_pnl:+,.0f}",
+            "From closed trades", "", "green",
+            "ov-pos" if live_realized_pnl >= 0 else "ov-neg"),
         _ov_metric_html(
             "XIRR — year",
             f"{live_current_xirr * 100:+.1f}%" if live_current_xirr is not None else "—",
@@ -4365,11 +4369,13 @@ def page_tradebook():
             filtered = filtered[filtered["exit_reason"].isin(reason_filter)]
 
         st.caption(f"Showing {len(filtered)} of {len(trades)} trades")
-        rest_cols = [c for c in filtered.columns
-                    if c not in ("id", "position_id", "status", "latest_recommended_stop")]
-        stop_idx = rest_cols.index("initial_stop") + 1
-        display_cols = (["status"] + rest_cols[:stop_idx] + ["latest_recommended_stop"]
-                       + rest_cols[stop_idx:])
+        _priority_cols = ["symbol", "entry_date", "entry_price", "qty", "initial_stop",
+                         "latest_recommended_stop", "exit_date", "exit_price",
+                         "realized_pnl", "realized_ret_pct", "holding_days"]
+        _remaining_cols = [c for c in filtered.columns
+                          if c not in ("id", "position_id", "status") and c not in _priority_cols]
+        display_cols = (["status"] + [c for c in _priority_cols if c in filtered.columns]
+                       + _remaining_cols)
         st.markdown(
             _ov_table_html(
                 filtered[display_cols], sym_cols=["symbol"],
