@@ -1989,9 +1989,9 @@ def page_admin():
             st.caption(f"{_n_subs} device(s) currently subscribed. Alerts fire "
                       "when today's Kite session expires and needs a fresh "
                       "login (the daily ~07:00 check, or any scheduled job "
-                      "that hits it mid-run) -- same alert also goes out via "
-                      "ntfy if that's configured. Click below on every phone "
-                      "or laptop browser you want alerted.")
+                      "that hits it mid-run), and after every scheduled "
+                      "rebalance completes. Click below on every phone or "
+                      "laptop browser you want alerted.")
             pb1, pb2 = st.columns(2)
             if pb1.button("Enable notifications on this device"):
                 st.html(f"""

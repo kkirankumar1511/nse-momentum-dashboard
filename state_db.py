@@ -1473,9 +1473,6 @@ def job_run(job_type: str, trigger_type: str):
         title = "KK Trading -- Kite login needed"
         message = (f"{job_type} failed: Kite session expired. Log in "
                   f"to resume automated runs.")
-        notify.send_push(title=title, message=message,
-                         url=notify.DASHBOARD_URL or None, priority="urgent",
-                         tags=["warning", "key"])
         for dead in notify.send_webpush_all(get_push_subscriptions(), title,
                                             message, notify.DASHBOARD_URL):
             delete_push_subscription(dead)
@@ -1491,8 +1488,6 @@ def job_run(job_type: str, trigger_type: str):
         if job_type == "rebalance_scan" and trigger_type == "scheduled":
             title = "KK Trading -- rebalance complete"
             message = result.get("summary") or "Rebalance scan finished."
-            notify.send_push(title=title, message=message,
-                             url=notify.DASHBOARD_URL or None)
             for dead in notify.send_webpush_all(get_push_subscriptions(),
                                                 title, message, notify.DASHBOARD_URL):
                 delete_push_subscription(dead)

@@ -18,9 +18,8 @@ Create a `.env` file next to this one (only needed for that first run):
     DASHBOARD_PASSWORD=your_password     # optional -- defaults to "Admin"
 
     # Optional push notifications (see notify.py) -- read directly by
-    # notify.py, not by this file. Leave NTFY_TOPIC/VAPID_PRIVATE_KEY blank
-    # to disable that channel; nothing else depends on either being set.
-    NTFY_TOPIC=                  # a private ntfy.sh topic name you pick
+    # notify.py, not by this file. Leave VAPID_PRIVATE_KEY blank to disable;
+    # nothing else depends on it being set.
     DASHBOARD_URL=               # e.g. https://your-host.ts.net:8501/ --
                                   # included as a clickable link in alerts
 

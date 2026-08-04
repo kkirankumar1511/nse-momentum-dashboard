@@ -31,9 +31,6 @@ def _alert():
     title = "KK Trading -- Kite login needed"
     message = ("Today's Kite session has expired. Log in before the "
               "09:16 gap-check / market open.")
-    notify.send_push(title=title, message=message,
-                     url=notify.DASHBOARD_URL or None,
-                     priority="urgent", tags=["warning", "key"])
     for dead in notify.send_webpush_all(state_db.get_push_subscriptions(),
                                         title, message, notify.DASHBOARD_URL):
         state_db.delete_push_subscription(dead)
