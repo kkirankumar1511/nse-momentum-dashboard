@@ -65,6 +65,17 @@ def fno_value_scan(symbols: list[str] | None = None, n_years: int = 3,
                 score = xbrl_parser.life_insurance_score(bs)
             elif taxonomy == "general":
                 score = xbrl_parser.value_score(bs, market_price=prices.get(sym))
+                # quality_score only applies to the general taxonomy -- see
+                # its docstring (interest_coverage/roce don't hold for
+                # banks/NBFCs/insurers, which have their own pillars).
+                try:
+                    promoter_series = nse_api.promoter_series_with_broadcast(sym)
+                    promoter = (xbrl_parser.promoter_trend_asof(promoter_series, dt.date.today())
+                               if promoter_series else None)
+                except Exception:
+                    promoter = None
+                qscore = xbrl_parser.quality_score(bs, promoter)
+                score["quality_score"] = qscore["total_score"]
             else:
                 score = {"total_score": None, "rubric": taxonomy,
                         "missing_pillars": ["unsupported_taxonomy"]}
@@ -77,7 +88,7 @@ def fno_value_scan(symbols: list[str] | None = None, n_years: int = 3,
         time.sleep(pause)  # be polite to NSE
 
     df = pd.DataFrame(rows).set_index("symbol")
-    cols = ["total_score", "rubric", "roe", "roa", "debt_to_equity",
+    cols = ["total_score", "quality_score", "rubric", "roe", "roa", "debt_to_equity",
             "current_ratio", "revenue_cagr_pct", "fcf_yoy_pct", "peg",
             "gross_npa_pct", "net_npa_pct", "nim_proxy_pct",
             "combined_ratio_pct", "incurred_claim_ratio_pct",
@@ -97,7 +108,15 @@ def build_fundamentals_history(symbols: list[str] | None = None, n_years: int = 
     step for point-in-time backtesting: score_asof() then does the actual
     per-date scoring purely in memory against this, with zero network calls.
 
-    Returns {symbol: {"taxonomy": str, "bs_years": list[dict]}}.
+    Also fetches each symbol's full promoter-shareholding disclosure series
+    (nse_api.promoter_series_with_broadcast, each row already carrying its
+    own known_as_of) for the 'general' taxonomy only -- the same taxonomy
+    restriction quality_score() itself applies -- so score_asof() can build
+    a point-in-time-safe promoter trend without a network call per backtest
+    date (see xbrl_parser.promoter_trend_asof).
+
+    Returns {symbol: {"taxonomy": str, "bs_years": list[dict],
+                      "promoter_series": list[dict]}}.
     """
     symbols = symbols if symbols is not None else config.UNIVERSE
     history: dict = {}
@@ -107,10 +126,13 @@ def build_fundamentals_history(symbols: list[str] | None = None, n_years: int = 
         try:
             taxonomy = nse_api.filing_taxonomy(sym)
             bs = xbrl_parser.annual_balance_sheet(sym, n_years=n_years)
+            promoter_series = (nse_api.promoter_series_with_broadcast(sym)
+                               if taxonomy == "general" else [])
         except Exception as e:
             print(f"[build_fundamentals_history] {sym}: failed: {e}", flush=True)
-            taxonomy, bs = "error", []
-        history[sym] = {"taxonomy": taxonomy, "bs_years": bs}
+            taxonomy, bs, promoter_series = "error", [], []
+        history[sym] = {"taxonomy": taxonomy, "bs_years": bs,
+                        "promoter_series": promoter_series}
         time.sleep(pause)  # be polite to NSE
     return history
 
@@ -148,7 +170,13 @@ def score_asof(history: dict, date, score_cache: dict | None = None) -> pd.DataF
     rows = []
     for sym, entry in history.items():
         filtered = xbrl_parser.fundamentals_asof(entry["bs_years"], date)
-        key = (sym, tuple(r["qe_date"] for r in filtered))
+        # promoter_series is only ever non-empty for the 'general' taxonomy
+        # (see build_fundamentals_history) -- filtering an empty list is a
+        # cheap no-op for every other taxonomy.
+        promoter_filtered = xbrl_parser.fundamentals_asof(
+            entry.get("promoter_series") or [], date)
+        key = (sym, tuple(r["qe_date"] for r in filtered),
+               tuple(r["qe_date"] for r in promoter_filtered))
         if key in score_cache:
             score = score_cache[key]
         else:
@@ -158,6 +186,10 @@ def score_asof(history: dict, date, score_cache: dict | None = None) -> pd.DataF
                     score = _SCORERS[taxonomy](filtered)
                 elif taxonomy == "general":
                     score = xbrl_parser.value_score(filtered)
+                    promoter = xbrl_parser.promoter_trend_asof(
+                        entry.get("promoter_series") or [], date)
+                    qscore = xbrl_parser.quality_score(filtered, promoter)
+                    score["quality_score"] = qscore["total_score"]
                 else:
                     score = {"total_score": None, "rubric": taxonomy,
                             "missing_pillars": ["unsupported_taxonomy"]}
@@ -171,7 +203,7 @@ def score_asof(history: dict, date, score_cache: dict | None = None) -> pd.DataF
         rows.append(row)
 
     df = pd.DataFrame(rows).set_index("symbol")
-    cols = ["total_score", "rubric", "roe", "roa", "debt_to_equity",
+    cols = ["total_score", "quality_score", "rubric", "roe", "roa", "debt_to_equity",
             "current_ratio", "revenue_cagr_pct", "fcf_yoy_pct",
             "gross_npa_pct", "net_npa_pct", "nim_proxy_pct",
             "combined_ratio_pct", "incurred_claim_ratio_pct",

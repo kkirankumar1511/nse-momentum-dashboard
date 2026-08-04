@@ -103,6 +103,14 @@ def apply_gates(tech: pd.DataFrame,
         fund = fundamentals.reindex(t.index)
         t["fundamental_score"] = fund["total_score"]
         t["fundamental_rubric"] = fund.get("rubric")
+        # quality_score is a DIFFERENT signal from fundamental_score (see
+        # xbrl_parser.quality_score) -- only ever affects screener.score()'s
+        # quality_bonus_weight tilt, never this gate. NaN (not computed for
+        # this symbol's taxonomy, or fundamentals df predates this column)
+        # is handled the same way score()'s zscore already treats missing
+        # fundamental_score: neutral, not penalized.
+        if "quality_score" in fund.columns:
+            t["quality_score"] = fund["quality_score"]
         min_score = cfg["min_fundamental_score"]
         if gate_enabled:
             t["quality_ok"] = (t["fundamental_score"].isna()
@@ -154,6 +162,17 @@ def score(t: pd.DataFrame, cfg: dict = config.STRATEGY) -> pd.DataFrame:
     if cfg.get("fundamental_bonus_weight", 0.0) and "fundamental_score" in t.columns:
         t["score"] += (cfg["fundamental_bonus_weight"]
                        * _zscore(t["fundamental_score"].astype(float)).fillna(0))
+
+    # Quality ranking tilt (xbrl_parser.quality_score: margin trend,
+    # interest coverage, ROCE, promoter trend) -- separate signal from
+    # fundamental_bonus_weight above, same mechanic and same no-op-until-
+    # earned-by-an-A/B-backtest default (quality_bonus_weight=0.0, see
+    # config.py). NaN quality_score (taxonomy other than 'general', or not
+    # yet computed) -> zscore NaN -> fillna(0), neutral rather than
+    # penalized -- same policy as the fundamental tilt.
+    if cfg.get("quality_bonus_weight", 0.0) and "quality_score" in t.columns:
+        t["score"] += (cfg["quality_bonus_weight"]
+                       * _zscore(t["quality_score"].astype(float)).fillna(0))
 
     return t.sort_values("score", ascending=False)
 

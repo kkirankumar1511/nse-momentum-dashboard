@@ -290,7 +290,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                  cfg: dict | None = None,
                  initial_capital: float = 1_000_000,
                  cost_bps: float = 0.0,
-                 rebalance: str = "MS",
+                 rebalance: str = "D",
                  warmup_days: int = 260,
                  verbose: bool = False,
                  fundamentals_history: dict | None = None,
@@ -331,14 +331,22 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
       exits   : at rebalance, drop anything below its 200 EMA or outside the
                 top 2x max_positions ranking
 
-    rebalance: "MS" (default) re-evaluates the 200-EMA/rank exit rule on the
-    first trading day of each month only -- this is the cadence every
-    documented A/B result in config.py/README was actually measured at.
-    "D" re-evaluates it every trading day instead, matching the cadence
-    live_rebalance.py's scheduled job actually runs at (Mon-Fri) if its
-    proposal is executed that often -- added specifically to let that
-    live/backtest cadence gap be measured rather than assumed. No other
-    value is supported.
+    rebalance: "D" (default, changed 2026-08-04) re-evaluates the 200-EMA/
+    rank exit rule every trading day -- matching live_rebalance.py's actual
+    schedule (nse-rebalance.timer, Mon-Fri) exactly, so a backtest run
+    without explicitly overriding this can no longer silently diverge from
+    how the strategy is actually traded. This is materially slower (~25x
+    more rank_universe_asof calls than monthly over a multi-year run, since
+    nothing about a day's technical/fundamental re-rank is cached across
+    days) -- for a quick sanity check or an early-stage parameter sweep
+    where the exact cadence doesn't matter yet, pass "MS" (first trading
+    day of each month only) for a faster approximation.
+
+    Every A/B result documented in config.py/README before 2026-08-04 was
+    measured under the OLD "MS" default -- those conclusions were never
+    re-verified against "D" as part of this change, so treat their exact
+    numbers as measured under a different (faster, but live-diverging)
+    cadence until re-run. No value other than "D"/"MS" is supported.
     """
     cfg = dict(cfg or config.STRATEGY)
     cost = cost_bps / 10_000

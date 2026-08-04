@@ -275,6 +275,24 @@ def _derive_ratios(out: dict) -> dict:
     if pat and out.get("total_assets"):
         out["roa"] = pat / out["total_assets"] * 100
 
+    # Interest coverage and ROCE -- added 2026-08-04 to fill two identified
+    # gaps in the "general" rubric using fields ALREADY extracted for other
+    # ratios above (pbt, finance_cost, total_debt, total_equity), not a new
+    # data source. EBIT approximated as PBT + finance_cost (PBT is already
+    # after interest, before tax -- adding interest back gives operating
+    # profit before either). Only meaningful for non-financial companies
+    # (banking/NBFC/insurance don't tag finance_cost/pbt the same way and
+    # already have their own leverage/profitability pillars) -- these two
+    # fields are only ever read by quality_score() below, not by
+    # bank_score()/nbfc_score()/general_insurance_score()/life_insurance_
+    # score(), so they're harmless no-ops for those taxonomies regardless.
+    if pbt is not None and fin:
+        ebit = pbt + fin
+        out["interest_coverage"] = ebit / fin
+        capital_employed = (out.get("total_debt") or 0) + (equity or 0)
+        if capital_employed > 0:
+            out["roce"] = ebit / capital_employed * 100
+
     # Bank-specific: net interest income and a NIM-style proxy. No CASA or
     # capital-adequacy tag exists in this taxonomy (checked) — not attempted.
     ie, iex = out.get("interest_earned"), out.get("interest_expended")
@@ -787,6 +805,46 @@ def fundamentals_asof(bs_years: list[dict], date) -> list[dict]:
            and pd.Timestamp(r["known_as_of"]).normalize() <= cutoff]
 
 
+def _promoter_trend(known: list[dict]) -> dict | None:
+    """Trend computation over an ALREADY known-as-of-filtered promoter
+    series (see promoter_trend_asof) -- the latest knowable disclosure vs
+    the one from ~1 year earlier (by qe_date) within that same filtered
+    set, so a backtest at date `date` never compares against a disclosure
+    that wasn't itself public yet. Falls back to the oldest available
+    disclosure if less than a year of filtered history exists rather than
+    returning None outright -- some signal (even a short-window one) beats
+    none, and the pillar this feeds is already excluded when None."""
+    if len(known) < 2:
+        return None
+    known = sorted(known, key=lambda r: r["qe_date"])
+    latest = known[-1]
+    prior = None
+    for r in reversed(known[:-1]):
+        if (latest["qe_date"] - r["qe_date"]).days >= 300:
+            prior = r
+            break
+    if prior is None:
+        prior = known[0]
+    return {
+        "promoter_holding_pct": latest["value"],
+        "promoter_change_pp": latest["value"] - prior["value"],
+        "as_of_qe": latest["qe_date"],
+        "compared_to_qe": prior["qe_date"],
+        "known_as_of": latest["known_as_of"],
+    }
+
+
+def promoter_trend_asof(series: list[dict], date) -> dict | None:
+    """Point-in-time-safe promoter-holding trend: filters `series` (from
+    nse_api.promoter_series_with_broadcast) down to disclosures knowable as
+    of `date` (same known_as_of <= cutoff rule as fundamentals_asof, reused
+    directly since promoter_series_with_broadcast's rows already carry
+    known_as_of in the same shape), then compares the latest knowable
+    disclosure against the one from ~1 year earlier. Returns None if fewer
+    than 2 disclosures are knowable as of `date`."""
+    return _promoter_trend(fundamentals_asof(series, date))
+
+
 def _bucket(value: float | None, thresholds: list[tuple[float, int]]) -> int | None:
     """thresholds: [(min_value, score), ...] sorted descending by min_value.
     Returns the score for the first threshold value is >= to."""
@@ -884,6 +942,71 @@ def value_score(bs_years: list[dict], market_price: float | None = None) -> dict
         "roe": latest.get("roe"), "debt_to_equity": latest.get("debt_to_equity"),
         "current_ratio": latest.get("current_ratio"), "fcf": latest.get("fcf"),
         "fcf_yoy_pct": fcf_yoy, "revenue_cagr_pct": rev_cagr, "peg": peg,
+        "fiscal_year_end": latest.get("qe_date"),
+    }
+
+
+def quality_score(bs_years: list[dict], promoter: dict | None = None) -> dict:
+    """0-100 'quality' tilt -- separate from value_score's core rubric,
+    meant to feed screener.score()'s quality_bonus_weight ranking tilt
+    rather than a gate (see config.py). Combines four signals that were
+    already fully derivable from data this codebase already extracts but
+    were never wired into scoring: margin trend (operating leverage vs
+    cyclicality, from the same net_margin already in each bs_years row),
+    interest coverage and ROCE (both added to _derive_ratios from fields
+    already extracted for other ratios -- pbt, finance_cost, total_debt,
+    total_equity, no new data source), and promoter holding trend (insider
+    conviction/exit signal, via promoter_trend_asof for backtest safety --
+    pass None to leave that pillar out entirely, e.g. when no promoter data
+    was fetched for this symbol).
+
+    Only meaningful for the 'general' (non-financial) taxonomy: interest_
+    coverage/roce assume a PBT-plus-finance-cost EBIT approximation that
+    doesn't hold for banks/NBFCs/insurers, which already have their own
+    leverage/profitability pillars in bank_score/nbfc_score/etc -- callers
+    should only invoke this for taxonomy == 'general' (see
+    fundamentals_agent.fno_value_scan/score_asof).
+
+    Same missing-data-lowers-confidence-not-score policy as value_score,
+    via _aggregate_pillars -- a stock with no promoter data isn't
+    penalized, it just has one fewer pillar contributing to the total.
+    """
+    latest = bs_years[0] if bs_years else {}
+    prior = bs_years[1] if len(bs_years) > 1 else {}
+
+    sub_scores: dict[str, int | None] = {}
+
+    margin_trend_pp = None
+    if latest.get("net_margin") is not None and prior.get("net_margin") is not None:
+        margin_trend_pp = latest["net_margin"] - prior["net_margin"]
+    sub_scores["margin_trend"] = _bucket(margin_trend_pp, [
+        (3, 5), (1, 4), (0, 3), (-2, 2)])
+
+    sub_scores["interest_coverage"] = _bucket(latest.get("interest_coverage"), [
+        (10, 5), (6, 4), (3, 3), (1.5, 2)])
+
+    sub_scores["roce"] = _bucket(latest.get("roce"), [
+        (20, 5), (15, 4), (10, 3), (5, 2)])
+
+    promoter_change_pp = promoter.get("promoter_change_pp") if promoter else None
+    sub_scores["promoter_trend"] = _bucket(promoter_change_pp, [
+        (2, 5), (0.5, 4), (-0.5, 3), (-2, 2)])
+
+    pillars = {
+        "earnings_quality": ["margin_trend", "interest_coverage", "roce"],
+        "ownership": ["promoter_trend"],
+    }
+    pillar_scores, missing, total = _aggregate_pillars(sub_scores, pillars)
+
+    return {
+        "total_score": total, "rubric": "quality",
+        "pillar_scores": {k: round(v, 2) for k, v in pillar_scores.items()},
+        "sub_scores": sub_scores,
+        "missing_pillars": missing,
+        "margin_trend_pp": margin_trend_pp,
+        "interest_coverage": latest.get("interest_coverage"),
+        "roce": latest.get("roce"),
+        "promoter_change_pp": promoter_change_pp,
         "fiscal_year_end": latest.get("qe_date"),
     }
 

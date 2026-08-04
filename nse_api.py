@@ -276,6 +276,43 @@ def promoter_trend(symbol: str) -> dict:
             "promoter_trend": trend, "promoter_series": series}
 
 
+def promoter_series_with_broadcast(symbol: str) -> list[dict]:
+    """Like promoter_trend()'s raw series, but keeps each disclosure's own
+    broadcastDate (when NSE actually published it) alongside the quarter-end
+    'date' it reports on -- promoter_trend() above uses only the quarter-end
+    date, which would be a real lookahead bug if reused for point-in-time
+    backtesting (a shareholding disclosure for quarter-end 30-Jun isn't
+    public until its SEBI-mandated filing deadline, typically ~3 weeks
+    later; confirmed real gap on a live HCLTECH filing: quarter-end
+    30-JUN-2026, broadcastDate 18-JUL-2026). Added 2026-08-04 specifically
+    so a promoter-holding-trend signal can be included in the fundamental
+    quality tilt without corrupting backtest correctness -- see
+    xbrl_parser.promoter_trend_asof().
+
+    Returns [{"qe_date": date, "value": float, "known_as_of": datetime}, ...],
+    sorted by qe_date, skipping any row with an unparseable value or
+    broadcast timestamp (excluded, never guessed at -- same policy as
+    _parse_broadcast() for XBRL filings)."""
+    rows = shareholding_pattern(symbol)
+    series = []
+    for r in rows:
+        d = _parse_nse_date(r.get("date", ""))
+        # _parse_nse_date already tries "%d-%b-%Y %H:%M:%S" among its
+        # formats, which matches broadcastDate's actual shape -- reused
+        # rather than duplicating a second date parser. Truncates to a
+        # date (day-level), consistent with fundamentals_asof()'s own
+        # .normalize() day-level comparison for XBRL known_as_of.
+        bc = _parse_nse_date(r.get("broadcastDate", ""))
+        try:
+            v = float(r.get("pr_and_prgrp"))
+        except (TypeError, ValueError):
+            continue
+        if d and bc:
+            series.append({"qe_date": d, "value": v, "known_as_of": bc})
+    series.sort(key=lambda x: x["qe_date"])
+    return series
+
+
 # Announcement categories that historically precede trouble or upside
 RED_FLAG_PATTERNS = [
     (r"resignation.*(cfo|chief financial|auditor|managing director|md\b)",

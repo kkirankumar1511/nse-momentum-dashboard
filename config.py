@@ -207,6 +207,19 @@ _STRATEGY_DEFAULTS = {
     # gate itself. Anything above 0.5 is a clear net negative.
     "fundamental_bonus_weight": 0.5,
 
+    # Quality ranking tilt (screener.score(), same mechanic as
+    # fundamental_bonus_weight above but a DIFFERENT signal --
+    # xbrl_parser.quality_score(): margin trend, interest coverage, ROCE,
+    # promoter holding trend. Fills gaps identified in the value_score
+    # rubric (profitability/financial-health/growth-valuation) without
+    # touching the existing fundamental gate -- a stock scoring below 50 on
+    # value_score already fails min_fundamental_score's gate regardless of
+    # this tilt, so this only affects WHERE gate-passers rank. 0 = off,
+    # matching this codebase's pattern of shipping a new scoring dimension
+    # disabled until an A/B backtest earns it a spot as the default (see
+    # sector_bonus_weight, the removed breakout-bonus tier).
+    "quality_bonus_weight": 0.0,
+
     # Sector relative-strength bonus (see sector_universe.py): tilts ranking
     # toward stocks in currently-outperforming sectors. 0 = off, matching
     # this codebase's pattern of shipping a new scoring dimension disabled
