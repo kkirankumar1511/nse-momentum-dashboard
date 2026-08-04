@@ -1021,7 +1021,7 @@ COLUMN_LABELS = {
     # Screener / momentum
     "score": "Score", "price": "Price", "rs_3m": "RS 3M", "rs_6m": "RS 6M",
     "pct_52w_high": "% of 52W high", "rsi": "RSI",
-    "vol_expansion": "Vol expansion", "atr_pct": "ATR %",
+    "vol_expansion": "Vol expansion", "avg_volume_3m": "3M Avg Volume", "atr_pct": "ATR %",
     "fundamental_score": "Fundamental score", "fundamental_rubric": "Sector rubric",
     "trend_ok": "Trend", "near_high_ok": "Near-high", "rsi_ok": "RSI",
     "quality_ok": "Quality", "quality_fails": "Quality fails",
@@ -2379,7 +2379,7 @@ def page_screener():
     candidates = t[t["all_gates"]].copy()  # already sorted by score, descending
     candidates.insert(0, "rank", range(1, len(candidates) + 1))
     show_cols = ["rank", "score", "price", "rs_3m", "rs_6m", "pct_52w_high", "rsi",
-                "vol_expansion", "atr_pct", "suggested_stop",
+                "vol_expansion", "avg_volume_3m", "atr_pct", "suggested_stop",
                 "fundamental_score", "fundamental_rubric"]
     show_cols = [c for c in show_cols if c in candidates.columns]
     if "fundamental_score" not in t.columns:
@@ -2391,10 +2391,19 @@ def page_screener():
                   "with **Include fundamental quality gate** off, or "
                   "fundamentals data wasn't available at scan time. Check the "
                   "box above and click **Run screen** again to include it.")
-    # fundamental_rubric is a string column ("general"/"nbfc"/...) and rank is
-    # already a plain int -- a single global "{:.2f}" format spec would crash
-    # on the former and add pointless decimals to the latter.
-    num_fmt = {c: "{:.2f}" for c in show_cols if c not in ("fundamental_rubric", "rank")}
+    if "avg_volume_3m" not in candidates.columns:
+        st.caption("ℹ️ No 3M Avg Volume column — this result is from a cached "
+                  "scan run before this metric was added. Click **Run screen** "
+                  "again to include it.")
+    # fundamental_rubric is a string column ("general"/"nbfc"/...), rank is
+    # already a plain int, and avg_volume_3m is a whole-share-count that
+    # reads better with thousands separators than 2 decimals -- a single
+    # global "{:.2f}" format spec would crash on the first and look wrong
+    # on the other two.
+    num_fmt = {c: "{:.2f}" for c in show_cols
+              if c not in ("fundamental_rubric", "rank", "avg_volume_3m")}
+    if "avg_volume_3m" in show_cols:
+        num_fmt["avg_volume_3m"] = "{:,.0f}"
 
     keep_zone_size = config.STRATEGY["max_positions"] * 2
     _candidates_tip = html_lib.escape(

@@ -102,6 +102,7 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict) -> dict:
         "ema50_rising": float(ema_f.iloc[-1]) > float(ema_f.iloc[-6]),
         "macd_bullish": float(hist.iloc[-1]) > 0,
         "vol_expansion": volume_expansion(volume),
+        "avg_volume_3m": float(volume.tail(cfg["mom_lookback_days_short"]).mean()),
         "atr": atr_now,
         "atr_pct": atr_now / price * 100,
         "suggested_stop": price - cfg["atr_stop_multiple"] * atr_now,
