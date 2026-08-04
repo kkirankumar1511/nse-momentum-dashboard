@@ -1423,7 +1423,7 @@ def page_cockpit():
                 fig.add_trace(go.Scatter(
                     x=plot_log["date"], y=plot_log["invested_amount"],
                     name="Invested amount (₹)", mode="lines+markers",
-                    line=dict(color="#6b7280", width=1.5, dash="dot"),
+                    line=dict(color="#378add", width=2),
                     marker=dict(size=5),
                     hovertemplate="₹%{y:,.0f}<extra>Invested amount</extra>"))
             # No fill-to-zero and an explicit, padded y-range -- with a small
@@ -1452,7 +1452,6 @@ def page_cockpit():
                           "builds up. (Total capital, cash+holdings, is still tracked "
                           "in the KPI strip above; this chart is holdings-only vs cost "
                           "basis, so idle cash doesn't make the comparison misleading.)")
-            st.caption("Click a point on the chart above for that day's detail.")
 
             _clicked_points = chart_selection.selection.points if chart_selection else []
             if _clicked_points:
