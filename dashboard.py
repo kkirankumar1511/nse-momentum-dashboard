@@ -31,6 +31,7 @@ import os
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from kiteconnect.exceptions import TokenException
 
 import backtest as bt
 import config
@@ -236,6 +237,14 @@ if _pending_cookie:
 # above succeeds. Shows the Kite login redirect ONLY when the token is
 # actually missing/expired; a still-valid token falls straight through to
 # the normal dashboard pages below.
+#
+# Only TokenException triggers the login redirect -- previously a bare
+# `except Exception` treated ANY margins() failure (a transient network
+# blip, Kite API hiccup, timeout) identically to a genuinely expired
+# token, so a real login prompt couldn't be trusted to mean "your session
+# actually expired." Anything else surfaces as an explicit retryable
+# error instead, since re-doing Zerodha's login+2FA wouldn't fix it
+# anyway.
 # ---------------------------------------------------------------------------
 if not config.KITE_ACCESS_TOKEN:
     _redirect_to_kite_login()
@@ -243,8 +252,16 @@ if not config.KITE_ACCESS_TOKEN:
 try:
     margins = kite_client.get_margins()
     available_cash = margins["equity"]["available"]["live_balance"]
-except Exception:
+except TokenException:
     _redirect_to_kite_login()
+except Exception as e:
+    st.error(f"Couldn't reach Kite to check your account: {e}")
+    st.caption("This looks like a transient network/API issue, not an "
+              "expired session -- your Kite login should still be fine. "
+              "Try again in a moment.")
+    if st.button("Retry"):
+        st.rerun()
+    st.stop()
 
 SCREEN_CACHE = os.path.join("cache", "screen.pkl")
 VALUE_SCORE_CACHE = os.path.join("cache", "fno_value_scores.pkl")
