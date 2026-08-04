@@ -27,6 +27,7 @@ import datetime as dt
 import html as html_lib
 import math
 import os
+import re
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -794,10 +795,23 @@ _OV_HEX_CYCLE = ["#534ab7", "#7f77dd", "#1d9e75", "#5dcaa5", "#ef9f27",
                 "#378add", "#d85a30", "#d4537e"]
 
 
+def _ov_arrow(better: bool | None) -> str:
+    """A small ▲/▼ span, colored green/red -- better=True renders the "this
+    improved" arrow (▲), False the "this worsened" arrow (▼), None (the
+    reference value is missing, e.g. no entry-rank on record) renders
+    nothing. Shared by every arrow_cols comparison in _ov_table_html so
+    "up/down vs a reference column" always looks the same everywhere."""
+    if better is None:
+        return ""
+    cls = "ov-pos" if better else "ov-neg"
+    arrow = "▲" if better else "▼"
+    return f'<span class="{cls}">{arrow}</span> '
+
+
 def _ov_table_html(df: pd.DataFrame, columns: list[str] | None = None,
                    badges: dict | None = None, pnl_cols: list[str] | None = None,
                    num_fmt: dict | None = None, sym_cols: list[str] | None = None,
-                   na_rep: str = "—") -> str:
+                   arrow_cols: dict | None = None, na_rep: str = "—") -> str:
     """Renders a DataFrame as the mockup's compact .ov-table -- plain HTML,
     no Streamlit dataframe chrome (sort/resize/selection). Used for every
     purely-DISPLAY table site-wide: none of these ever used row-selection
@@ -811,16 +825,38 @@ def _ov_table_html(df: pd.DataFrame, columns: list[str] | None = None,
     pnl_cols: columns whose sign colors the cell green/red (also bolded).
     num_fmt: {col: format_spec} for numeric columns (right-aligned).
     sym_cols: columns rendered bold (e.g. the symbol column).
+    arrow_cols: {displayed_col: (value_col, reference_col, higher_is_better)}
+        -- prepends a ▲/▼ to displayed_col's cell comparing df[value_col]
+        against df[reference_col] for the same row (value_col is usually
+        displayed_col itself -- e.g. current_capital vs invested_capital
+        -- but can differ, e.g. displaying the badge-formatted "rank_fmt"
+        string while comparing the underlying numeric "rank" against
+        "entry_rank"; lower is better for rank, so higher_is_better=
+        False there). Missing/NaN/equal values render no arrow rather
+        than a misleading one. Composes with badges/pnl_cols/num_fmt --
+        the arrow is just prepended to whatever that cell would
+        otherwise show.
     """
     columns = columns or list(df.columns)
     num_fmt = num_fmt or {}
     badges = badges or {}
     pnl_cols = set(pnl_cols or [])
     sym_cols = set(sym_cols or [])
+    arrow_cols = arrow_cols or {}
     right_cols = set(num_fmt) | pnl_cols
 
     def _label(c):
         return COLUMN_LABELS.get(c, c.replace("_", " ").title())
+
+    def _arrow_prefix(c, row) -> str:
+        if c not in arrow_cols:
+            return ""
+        value_col, ref_col, higher_is_better = arrow_cols[c]
+        v, ref = row.get(value_col), row.get(ref_col)
+        if pd.isna(v) or pd.isna(ref) or v == ref:
+            return _ov_arrow(None)
+        better = (v > ref) == higher_is_better
+        return _ov_arrow(better)
 
     header = "".join(
         f'<th{" class=\"r\"" if c in right_cols else ""}>{html_lib.escape(_label(c))}</th>'
@@ -838,19 +874,20 @@ def _ov_table_html(df: pd.DataFrame, columns: list[str] | None = None,
             elif c in badges:
                 mapping = badges[c]
                 css = mapping(v) if callable(mapping) else mapping.get(v, "ov-badge-gray")
-                cells.append(f'<td{r_attr}><span class="ov-badge {css}">'
+                cells.append(f'<td{r_attr}>{_arrow_prefix(c, row)}<span class="ov-badge {css}">'
                             f'{html_lib.escape(str(v))}</span></td>')
             elif c in pnl_cols:
                 fv = float(v)
                 cls = "ov-pos" if fv >= 0 else "ov-neg"
                 fmt = num_fmt.get(c, "{:+,.2f}")
-                cells.append(f'<td{r_attr}><span class="{cls} ov-sym">'
+                cells.append(f'<td{r_attr}>{_arrow_prefix(c, row)}<span class="{cls} ov-sym">'
                             f'{fmt.format(fv)}</span></td>')
             elif c in num_fmt:
-                cells.append(f'<td{r_attr}><span class="{sym_cls}">'
+                cells.append(f'<td{r_attr}>{_arrow_prefix(c, row)}<span class="{sym_cls}">'
                             f'{num_fmt[c].format(v)}</span></td>')
             else:
-                cells.append(f'<td><span class="{sym_cls}">{html_lib.escape(str(v))}</span></td>')
+                cells.append(f'<td>{_arrow_prefix(c, row)}<span class="{sym_cls}">'
+                            f'{html_lib.escape(str(v))}</span></td>')
         rows_html.append(f"<tr>{''.join(cells)}</tr>")
 
     return (f'<div class="ov-tbl-scroll"><table class="ov-table">'
@@ -979,7 +1016,7 @@ COLUMN_LABELS = {
     "value": "Current value (₹)", "allocation_pct": "Allocation %",
     "run_id": "Run ID", "run_time": "Run time", "action_type": "Action",
     "detail": "Reason/Detail", "resolved_at": "Resolved at",
-    "current_qty": "Current qty", "rank": "Momentum rank",
+    "current_qty": "Current qty", "rank": "Momentum rank", "rank_fmt": "Rank",
 
     # Screener / momentum
     "score": "Score", "price": "Price", "rs_3m": "RS 3M", "rs_6m": "RS 6M",
@@ -1337,10 +1374,18 @@ def page_cockpit():
             plot_log_full = log.copy()
             plot_log_full["date"] = pd.to_datetime(plot_log_full["date"])
 
+            _chart_title_slot = st.empty()
             _range_days = {"1W": 7, "1M": 30, "3M": 90, "6M": 182, "1Y": 365, "All": None}
             _range_choice = st.segmented_control(
                 "Range", list(_range_days), default="All", required=True,
                 key="perf_range", label_visibility="collapsed")
+            _chart_title_slot.markdown(
+                '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+                '<span class="ov-dot" style="background:var(--ov-green);"></span>'
+                'Portfolio value over time'
+                f'<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+                f'{html_lib.escape(_range_choice)}</span></p>',
+                unsafe_allow_html=True)
             _cutoff_days = _range_days[_range_choice]
             if _cutoff_days:
                 _cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=_cutoff_days)
@@ -1378,8 +1423,7 @@ def page_cockpit():
             y_lo, y_hi = float(all_vals.min()), float(all_vals.max())
             pad = (y_hi - y_lo) * 0.15 or max(y_hi * 0.02, 100.0)
             fig.update_layout(
-                title=dict(text="Portfolio value over time", x=0, xanchor="left"),
-                height=340, margin=dict(l=10, r=10, t=50, b=10),
+                height=310, margin=dict(l=10, r=10, t=20, b=10),
                 hovermode="x unified",
                 yaxis=dict(tickprefix="₹", separatethousands=True,
                           range=[y_lo - pad, y_hi + pad]),
@@ -1437,6 +1481,26 @@ def page_cockpit():
                 pos_desc = merged.sort_values("value", ascending=False).reset_index(drop=True)
                 pos_desc["rank"] = pos_desc["symbol"].map(_rank_map)
 
+                # Entry rank -- the "Ranked #N of M momentum candidates"
+                # this symbol's FIRST open trade recorded (live_rebalance.
+                # propose_rebalance()'s buy reason string, see state_db.
+                # record_trade_entry()) -- so the arrow below reflects
+                # this specific holding's own rank drift since it was
+                # bought, not just today's snapshot. Absent for a position
+                # opened outside this app (backfilled trades, no rank in
+                # their reason text), which renders as no arrow rather
+                # than a misleading one.
+                _open_trades = state_db.get_trades(status="open")
+                _entry_rank_map = {}
+                if not _open_trades.empty:
+                    _first_entries = (_open_trades.sort_values("entry_date")
+                                     .groupby("symbol").first())
+                    for _sym, _t in _first_entries.iterrows():
+                        _m = re.search(r"Ranked #(\d+)", str(_t.get("entry_reason") or ""))
+                        if _m:
+                            _entry_rank_map[_sym] = int(_m.group(1))
+                pos_desc["entry_rank"] = pos_desc["symbol"].map(_entry_rank_map)
+
                 def _rank_badge_cls(v: str) -> str:
                     if v == "—":
                         return "ov-badge-gray"
@@ -1449,7 +1513,8 @@ def page_cockpit():
                         pos_desc, columns=["symbol", "value", "rank_fmt", "pnl"],
                         sym_cols=["symbol"], pnl_cols=["pnl"],
                         num_fmt={"value": "₹{:,.0f}"},
-                        badges={"rank_fmt": _rank_badge_cls}),
+                        badges={"rank_fmt": _rank_badge_cls},
+                        arrow_cols={"rank_fmt": ("rank", "entry_rank", False)}),
                     unsafe_allow_html=True)
 
                 # Real, data-driven equivalent of the mockup's "likely
@@ -1530,12 +1595,19 @@ def page_cockpit():
             n_sectors = len(sector_group)
             svg = _ov_donut_svg(list(sector_group.values), str(n_sectors))
             max_sector_pct = float((sector_group / donut_total * 100).max())
+            # margin-top here (unlike the Positions card's own "Likely
+            # exit" ov-alert) -- that one sits inside a real st.container,
+            # where Streamlit's own inter-block gap already separates it
+            # from the table above; this one is glued into one raw HTML
+            # string right after the donut/legend markup with no such
+            # gap, so it needs its own spacing to not look flush/cramped.
             if max_sector_pct <= 25:
-                alert_html = ('<div class="ov-alert ov-alert-success">✓ Diversified — '
-                             'no sector above 25%</div>')
+                alert_html = ('<div class="ov-alert ov-alert-success" style="margin-top:8px;">'
+                             '✓ Diversified — no sector above 25%</div>')
             else:
                 top_sector = (sector_group / donut_total * 100).idxmax()
-                alert_html = (f'<div class="ov-alert">⚠ Concentrated — {top_sector} is '
+                alert_html = (f'<div class="ov-alert" style="margin-top:8px;">'
+                             f'⚠ Concentrated — {top_sector} is '
                              f'{max_sector_pct:.0f}% of the portfolio</div>')
             donut_html = (
                 '<div class="ov-card"><p class="ov-card-title">'
@@ -2605,15 +2677,21 @@ def page_live_rebalance():
             # proposal already sitting in session state (or loaded from a
             # run stored before this change) won't have it, so build the
             # column list from what's actually present rather than assume.
+            _buys_display = result["buys"].copy()
+            _buys_display["amount"] = _buys_display["qty"] * _buys_display["price"]
             _buys_cols = [c for c in
-                         ["symbol", "rank", "score", "price", "qty", "stop",
-                          "fundamental_score"] if c in result["buys"].columns]
+                         ["symbol", "rank", "score", "price", "qty", "amount", "stop",
+                          "fundamental_score"] if c in _buys_display.columns]
             st.markdown(
                 _ov_table_html(
-                    result["buys"], columns=_buys_cols, sym_cols=["symbol"],
+                    _buys_display, columns=_buys_cols, sym_cols=["symbol"],
                     num_fmt={"rank": "{:.0f}", "qty": "{:.0f}", "price": "₹{:.2f}",
-                             "stop": "₹{:.2f}", "score": "{:.2f}",
+                             "amount": "₹{:,.0f}", "stop": "₹{:.2f}", "score": "{:.2f}",
                              "fundamental_score": "{:.1f}"}),
+                unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="ov-row"><span class="ov-card-meta">Total amount</span>'
+                f'<span class="ov-sym">₹{_buys_display["amount"].sum():,.0f}</span></div>',
                 unsafe_allow_html=True)
             place_gtt = st.checkbox("Also place a GTT stop-loss for each buy",
                                     value=True, key="rebal_gtt")
@@ -2659,9 +2737,20 @@ def page_live_rebalance():
                     "buys above — the position's existing stop-loss carries over "
                     "unchanged, only its GTT quantity gets updated to cover the new "
                     "total.")
+                _topups_display = top_ups.copy()
+                _topups_display["amount"] = _topups_display["extra_qty"] * _topups_display["price"]
+                _topups_cols = [c for c in
+                               ["symbol", "extra_qty", "price", "amount", "gtt_trigger_id"]
+                               if c in _topups_display.columns]
                 st.markdown(
-                    _ov_table_html(top_ups, sym_cols=["symbol"],
-                                  num_fmt={"extra_qty": "{:.0f}", "price": "₹{:.2f}"}),
+                    _ov_table_html(
+                        _topups_display, columns=_topups_cols, sym_cols=["symbol"],
+                        num_fmt={"extra_qty": "{:.0f}", "price": "₹{:.2f}",
+                                "amount": "₹{:,.0f}"}),
+                    unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="ov-row"><span class="ov-card-meta">Total amount</span>'
+                    f'<span class="ov-sym">₹{_topups_display["amount"].sum():,.0f}</span></div>',
                     unsafe_allow_html=True)
                 confirm_topup = st.checkbox(
                     "I confirm I want to execute ALL proposed top-ups at market",
@@ -2861,7 +2950,9 @@ def page_positions_trade():
                         num_fmt={"quantity": "{:.0f}", "average_price": "₹{:.2f}",
                                 "last_price": "₹{:.2f}", "invested_capital": "₹{:,.0f}",
                                 "current_capital": "₹{:,.0f}", "pnl": "{:+,.0f}",
-                                "pnl_pct": "{:+.2f}%"}),
+                                "pnl_pct": "{:+.2f}%"},
+                        arrow_cols={"current_capital":
+                                   ("current_capital", "invested_capital", True)}),
                     unsafe_allow_html=True)
                 _hold_pnl = float(live_hold["pnl"].sum())
                 _hold_pnl_cls = "ov-pos" if _hold_pnl >= 0 else "ov-neg"
