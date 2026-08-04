@@ -1075,7 +1075,17 @@ def merged_holdings() -> pd.DataFrame:
     hold = kite_client.get_holdings()
     rows = []
     if not pos.empty and "quantity" in pos.columns:
-        for _, r in pos[pos["quantity"] != 0].iterrows():
+        # > 0, not != 0 -- a same-day SELL of an existing holding shows up
+        # here as a NEGATIVE "day" quantity (the settlement-lag leg, nets
+        # to 0 against the holding once it clears), not a real short
+        # position (this app is long-only CNC swing trading). Including
+        # it double-counted a fully-closed position as still "held" with
+        # a negative qty, which also poisoned avg_price = cost/qty here
+        # (dividing by a negative number). Confirmed live 2026-08-04: a
+        # same-day SONACOMS sell left qty=-13 in positions(), 0 in
+        # holdings() -- summed to a phantom -13 "holding" instead of
+        # correctly disappearing.
+        for _, r in pos[pos["quantity"] > 0].iterrows():
             rows.append({"symbol": r["tradingsymbol"], "qty": r["quantity"],
                         "avg_price": r["average_price"], "ltp": r["last_price"],
                         "pnl": r["pnl"]})
@@ -3025,7 +3035,15 @@ def page_positions_trade():
 
     all_syms = []
     if not pos.empty:
-        all_syms += list(pos[pos["quantity"] != 0]["tradingsymbol"])
+        # > 0, not != 0 -- a same-day SELL leaves a NEGATIVE "day"
+        # quantity here (settlement-lag artifact, nets to 0 against the
+        # holding overnight), not a real short (long-only CNC swing
+        # trading) -- see merged_holdings()'s identical fix for the full
+        # story. Without this, a symbol sold entirely TODAY still showed
+        # up as "unprotected, needs a stop-loss" even though it's not
+        # actually held anymore and there was never a GTT to place or
+        # delete for it.
+        all_syms += list(pos[pos["quantity"] > 0]["tradingsymbol"])
     if not hold.empty:
         all_syms += list(hold[hold["quantity"] > 0]["tradingsymbol"])
     all_syms = sorted(set(all_syms))

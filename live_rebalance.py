@@ -121,7 +121,14 @@ def get_live_holdings() -> pd.DataFrame:
     frames = []
     pos = kite_client.get_positions()
     if not pos.empty and "quantity" in pos.columns:
-        p = pos[pos["quantity"] != 0][["tradingsymbol", "quantity", "average_price"]]
+        # > 0, not != 0 -- a same-day SELL of an existing holding leaves a
+        # NEGATIVE "day" quantity here (the settlement-lag leg, nets to 0
+        # against the holding overnight), not a real short (long-only CNC
+        # swing trading). Including it phantom-counted a fully-sold symbol
+        # as still held with a negative qty -- confirmed live 2026-08-04,
+        # a same-day SONACOMS sell left it appearing "held" again on the
+        # very next page refresh after execute_sells() ran.
+        p = pos[pos["quantity"] > 0][["tradingsymbol", "quantity", "average_price"]]
         frames.append(p)
     hold = kite_client.get_holdings()
     if not hold.empty and "quantity" in hold.columns:
