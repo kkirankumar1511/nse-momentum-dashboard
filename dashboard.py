@@ -2405,10 +2405,19 @@ def page_live_rebalance():
     # the actual "Run today's scan" button in the header instead, since
     # that's the one thing this page's whole title bar exists to trigger.
     if auto_exec:
+        _auto_exec_tip = html_lib.escape(
+            "auto_execute_trades is ON — the scheduled daily scan places "
+            "these sells/buys/top-ups as real orders automatically, with no "
+            "confirmation step. The buttons below still work as a manual "
+            "override for whatever's left (e.g. a manual 'Run today's scan'). "
+            "Turn this off in Admin → Strategy configuration to go back to "
+            "manual-only.")
         st.markdown(
             '<div class="ov-header"><div><span class="ov-h1">📡 Live Rebalance</span> '
             '<span class="ov-sub">· review, then execute</span></div>'
-            '<div class="ov-chips"><span class="ov-chip ov-chip-amber">'
+            '<div class="ov-chips">'
+            f'<span class="ov-info-icon" title="{_auto_exec_tip}">ℹ️</span>'
+            '<span class="ov-chip ov-chip-amber">'
             '⚠ Auto-execute ON</span></div></div>', unsafe_allow_html=True)
     else:
         _hdr_l, _hdr_r = st.columns([5, 2])
@@ -2422,15 +2431,6 @@ def page_live_rebalance():
             if st.button("Run today's scan", type="primary",
                         disabled=rebalance_running, key="lr_run_scan_hdr"):
                 _run_scan_now()
-
-    if auto_exec:
-        st.warning(
-            "**auto_execute_trades is ON** — the scheduled daily scan places "
-            "these sells/buys/top-ups as real orders automatically, with no "
-            "confirmation step. The buttons below still work as a manual "
-            "override for whatever's left (e.g. a manual 'Run today's scan'). "
-            "Turn this off in Admin → Strategy configuration to go back to "
-            "manual-only.")
 
     if "rebalance_proposal" not in st.session_state:
         last_run = state_db.get_last_rebalance_run()
