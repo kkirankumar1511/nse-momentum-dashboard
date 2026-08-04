@@ -16,6 +16,13 @@ Create a `.env` file next to this one (only needed for that first run):
     KITE_ACCESS_TOKEN=            # filled daily after login flow
     DASHBOARD_USERNAME=your_username     # optional -- defaults to "Admin"
     DASHBOARD_PASSWORD=your_password     # optional -- defaults to "Admin"
+
+    # Optional push notifications (see notify.py) -- read directly by
+    # notify.py, not by this file. Leave NTFY_TOPIC blank to disable
+    # notifications entirely; nothing else depends on it being set.
+    NTFY_TOPIC=                  # a private ntfy.sh topic name you pick
+    DASHBOARD_URL=               # e.g. https://your-host.ts.net:8501/ --
+                                  # included as a clickable link in alerts
 """
 
 import os

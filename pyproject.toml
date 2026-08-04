@@ -32,6 +32,7 @@ trading-app = "trading_service:main"
 [tool.setuptools]
 py-modules = [
     "backtest",
+    "check_kite_token",
     "config",
     "dashboard",
     "fno_universe",
@@ -39,7 +40,9 @@ py-modules = [
     "indicators",
     "kite_client",
     "live_rebalance",
+    "notify",
     "nse_api",
+    "nse_holidays",
     "screener",
     "sector_universe",
     "state_db",

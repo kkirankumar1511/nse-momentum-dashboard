@@ -1,0 +1,8 @@
+[Unit]
+Description=Proactive daily check that today's Kite session is still valid, pushes a login-needed notification (ntfy.sh, see notify.py) if not
+
+[Service]
+Type=oneshot
+User=nseapp
+WorkingDirectory=/opt/nse-momentum-dashboard
+ExecStart=/opt/nse-momentum-dashboard/.venv/bin/python check_kite_token.py

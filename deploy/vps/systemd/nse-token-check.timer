@@ -1,0 +1,10 @@
+[Unit]
+Description=Check the Kite login daily at 07:00 (weekdays) -- well after the ~6 AM token reset, well before the 09:16 gap-check and 09:15 market open, giving time to log in
+
+[Timer]
+OnCalendar=Mon..Fri 07:00
+Persistent=false
+Unit=nse-token-check.service
+
+[Install]
+WantedBy=timers.target

@@ -27,6 +27,9 @@ import time
 import traceback
 
 import pandas as pd
+from kiteconnect.exceptions import TokenException
+
+import notify
 
 DB_PATH = os.path.join("cache", "state.db")
 _LEGACY_EQUITY_LOG = os.path.join("cache", "equity_log.csv")
@@ -1450,6 +1453,18 @@ def job_run(job_type: str, trigger_type: str):
     result: dict = {"summary": None}
     try:
         yield result
+    except TokenException:
+        finish_job_run(run_id, "failed", error=traceback.format_exc())
+        # Safety net alongside check_kite_token.py's proactive ~07:00
+        # check -- covers a token that expires/gets revoked mid-day for
+        # any other reason, or the proactive check itself not having run.
+        notify.send_push(
+            title="KK Trading -- Kite login needed",
+            message=f"{job_type} failed: Kite session expired. Log in "
+                    f"to resume automated runs.",
+            url=notify.DASHBOARD_URL or None, priority="urgent",
+            tags=["warning", "key"])
+        raise
     except Exception:
         finish_job_run(run_id, "failed", error=traceback.format_exc())
         raise
