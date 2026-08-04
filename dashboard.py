@@ -1499,8 +1499,16 @@ def page_cockpit():
                     _rank_map = {sym: i + 1 for i, sym in enumerate(_screen.index)}
                 _keep_zone = (config.STRATEGY.get("max_positions") or 0) * 2
 
-                pos_desc = merged.sort_values("value", ascending=False).reset_index(drop=True)
+                # Sort by momentum rank (ascending -- rank 1 first), matching
+                # the "By momentum rank" label above; a symbol not in
+                # today's ranked universe (rank is NaN) sorts to the end
+                # rather than breaking the sort. Was sorting by value
+                # (position size) instead while still claiming "By momentum
+                # rank" -- confirmed real mismatch, fixed 2026-08-04.
+                pos_desc = merged.copy()
                 pos_desc["rank"] = pos_desc["symbol"].map(_rank_map)
+                pos_desc = pos_desc.sort_values(
+                    "rank", ascending=True, na_position="last").reset_index(drop=True)
 
                 # Entry rank -- the "Ranked #N of M momentum candidates"
                 # this symbol's FIRST open trade recorded (live_rebalance.
