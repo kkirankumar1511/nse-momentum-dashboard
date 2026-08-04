@@ -237,24 +237,9 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     sells = []
     if is_rebalance_day:
         for sym, row in held.iterrows():
-            r = ranked.loc[sym] if sym in ranked.index else None
-            if r is None:
-                sells.append({"symbol": sym, "qty": int(row["quantity"]),
-                             "avg_price": float(row["average_price"]),
-                             "reason": "no data / not in current universe"})
-            elif not bool(r.get("above_ema200", False)):
-                sells.append({"symbol": sym, "qty": int(row["quantity"]),
-                             "avg_price": float(row["average_price"]),
-                             "reason": "closed below 200 EMA"})
-            elif sym not in keep_zone:
-                keep_zone_size = cfg["max_positions"] * 2
-                if sym in candidates.index:
-                    rank = candidates.index.get_loc(sym) + 1
-                    reason = (f"dropped out of top {keep_zone_size} rank "
-                             f"(now #{rank} of {len(candidates)})")
-                else:
-                    reason = (f"failed a technical gate (trend/near-high/RSI) -- "
-                             f"not in the top {keep_zone_size} at all")
+            reason = screener.sell_check(sym, ranked, candidates, keep_zone,
+                                        cfg["max_positions"])
+            if reason:
                 sells.append({"symbol": sym, "qty": int(row["quantity"]),
                              "avg_price": float(row["average_price"]), "reason": reason})
     sells_df = pd.DataFrame(sells)

@@ -196,6 +196,41 @@ def capital_position_size(total_equity: float, remaining_cash: float, price: flo
     return max(int(per_slot_budget / price), 0)
 
 
+def sell_check(sym: str, ranked: pd.DataFrame, candidates: pd.DataFrame,
+              keep_zone: set, max_positions: int) -> str | None:
+    """Returns the reason `sym` should be sold at rebalance, or None to
+    keep holding it. Pulled out as one shared function 2026-08-04 --
+    backtest.py's daily loop and live_rebalance.py's propose_rebalance()
+    each had their own independently hand-written copy of this exact
+    rule before this, verified consistent by inspection but with no
+    structural guarantee against one drifting from the other on a future
+    edit (unlike the gates/scoring/sizing functions in this module,
+    which both already called directly). Pure refactor -- same priority
+    order both callers already used (not-in-universe, then below 200
+    EMA, then outside the keep zone), same short-circuit semantics,
+    verified byte-identical output on real data before/after.
+
+    ranked: full point-in-time screener output (apply_gates + score).
+    candidates: ranked[ranked["all_gates"]] -- gate-passers only, still
+    sorted by score descending (score() itself sorts).
+    keep_zone: set(candidates.head(max_positions * 2).index).
+    """
+    r = ranked.loc[sym] if sym in ranked.index else None
+    if r is None:
+        return "no data / not in current universe"
+    if not bool(r.get("above_ema200", False)):
+        return "closed below 200 EMA"
+    if sym not in keep_zone:
+        keep_zone_size = max_positions * 2
+        if sym in candidates.index:
+            rank = candidates.index.get_loc(sym) + 1
+            return (f"dropped out of top {keep_zone_size} rank "
+                    f"(now #{rank} of {len(candidates)})")
+        return (f"failed a technical gate (trend/near-high/RSI) -- "
+                f"not in the top {keep_zone_size} at all")
+    return None
+
+
 def allocate_equal_weight_buys(ranked_syms: list[str], prices: dict[str, float],
                                held: dict[str, tuple[int, float]], cash_pool: float,
                                total_equity: float, max_positions: int,

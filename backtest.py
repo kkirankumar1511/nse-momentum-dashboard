@@ -482,11 +482,11 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 keep_zone = set(candidates.head(cfg["max_positions"] * 2).index)
 
                 for sym in list(positions):
-                    row = ranked.loc[sym] if sym in ranked.index else None
                     px = candles[sym].loc[date, "close"] if date in candles[sym].index else None
                     if px is None:
                         continue
-                    if row is None or not bool(row["above_ema200"]) or sym not in keep_zone:
+                    if screener.sell_check(sym, ranked, candidates, keep_zone,
+                                          cfg["max_positions"]):
                         close_position(sym, float(px), date, "rebalance")
 
                 # Replace the watchlist wholesale -- next rebalance is the
