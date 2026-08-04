@@ -1550,12 +1550,23 @@ def page_cockpit():
         max_positions = config.STRATEGY.get("max_positions") or 0
         target_pct = 100.0 / max_positions if max_positions else None
         total_value = float(merged["value"].sum())
+        # Denominator for weight/drift is TOTAL portfolio value (cash +
+        # holdings), matching target_pct's own basis -- screener.
+        # allocate_equal_weight_buys() defines its target as total_equity
+        # (cash+holdings) / max_positions, not holdings-only. Using
+        # holdings-only here (the previous behavior) systematically
+        # understated drift whenever real cash was sitting uninvested --
+        # e.g. 10 positions each truly at 7.5% of a $200k account with
+        # $50k idle cash would each read as exactly 10.0%/on-target
+        # instead of correctly showing -2.5% drift, since 15k/150k
+        # (holdings-only) = 10% even though 15k/200k (true) = 7.5%.
+        total_equity = available_cash + total_value
         alloc_desc = merged.sort_values("value", ascending=False).reset_index(drop=True)
 
         allocbar_segments, alloc_rows = [], []
         for i, row in alloc_desc.iterrows():
             color = _OV_HEX_CYCLE[i % len(_OV_HEX_CYCLE)]
-            weight_pct = (row["value"] / total_value * 100) if total_value else 0.0
+            weight_pct = (row["value"] / total_equity * 100) if total_equity else 0.0
             allocbar_segments.append(f'<div style="width:{weight_pct:.2f}%;background:{color};"></div>')
             if target_pct:
                 drift = weight_pct - target_pct
