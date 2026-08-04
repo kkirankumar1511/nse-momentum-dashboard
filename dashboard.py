@@ -2034,7 +2034,7 @@ def page_admin():
   }}
 }})();
 </script>
-""")
+""", unsafe_allow_javascript=True)
             if pb2.button("Send test notification", disabled=_n_subs == 0):
                 _dead = notify.send_webpush_all(
                     state_db.get_push_subscriptions(),
