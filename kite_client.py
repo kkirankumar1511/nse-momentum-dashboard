@@ -107,6 +107,15 @@ def tick_size_map() -> dict:
     }
 
 
+def _round_to_tick(symbol: str, price: float) -> float:
+    """Rounds `price` to the nearest valid multiple of this symbol's own
+    tick size -- shared by every place/modify order or GTT call below
+    that used to round to a flat 1 decimal place and got rejected
+    outright on any stock with a coarser tick size (0.50/1.00)."""
+    tick = tick_size_map().get(symbol, 0.05)
+    return round(round(price / tick) * tick, 2)
+
+
 @lru_cache(maxsize=1)
 def index_instrument_map() -> dict:
     """tradingsymbol -> instrument_token for NSE indices (NIFTY 50, sector
@@ -281,10 +290,8 @@ def place_order(symbol: str, qty: int, side: str,
         if order_type == "MARKET" and "market protection" in str(e).lower():
             ltp = get_ltp([symbol])[symbol]
             buffer = 1.005 if side == "BUY" else 0.995
-            raw_price = ltp * buffer
-            tick = tick_size_map().get(symbol, 0.05)
             kwargs["order_type"] = "LIMIT"
-            kwargs["price"] = round(round(raw_price / tick) * tick, 2)
+            kwargs["price"] = _round_to_tick(symbol, ltp * buffer)
             return kite.place_order(**kwargs)
         raise
 
@@ -294,18 +301,19 @@ def place_gtt_stoploss(symbol: str, qty: int, trigger_price: float,
     """Place a GTT stop-loss (good for delivery positions held weeks/months —
     a plain SL order expires end of day, GTT persists)."""
     kite = get_kite()
+    trigger = _round_to_tick(symbol, trigger_price)
     return kite.place_gtt(
         trigger_type=kite.GTT_TYPE_SINGLE,
         tradingsymbol=symbol,
         exchange=kite.EXCHANGE_NSE,
-        trigger_values=[round(trigger_price, 1)],
+        trigger_values=[trigger],
         last_price=last_price,
         orders=[{
             "transaction_type": kite.TRANSACTION_TYPE_SELL,
             "quantity": int(qty),
             "product": kite.PRODUCT_CNC,
             "order_type": kite.ORDER_TYPE_LIMIT,
-            "price": round(trigger_price * 0.995, 1),
+            "price": _round_to_tick(symbol, trigger_price * 0.995),
         }],
     )["trigger_id"]
 
@@ -324,19 +332,20 @@ def modify_gtt_trigger(trigger_id: int, symbol: str, qty: int,
     order shape exactly, just targeting an existing trigger_id instead of
     creating a new one."""
     kite = get_kite()
+    trigger = _round_to_tick(symbol, new_trigger_price)
     return kite.modify_gtt(
         trigger_id=trigger_id,
         trigger_type=kite.GTT_TYPE_SINGLE,
         tradingsymbol=symbol,
         exchange=kite.EXCHANGE_NSE,
-        trigger_values=[round(new_trigger_price, 1)],
+        trigger_values=[trigger],
         last_price=last_price,
         orders=[{
             "transaction_type": kite.TRANSACTION_TYPE_SELL,
             "quantity": int(qty),
             "product": kite.PRODUCT_CNC,
             "order_type": kite.ORDER_TYPE_LIMIT,
-            "price": round(new_trigger_price * 0.995, 1),
+            "price": _round_to_tick(symbol, new_trigger_price * 0.995),
         }],
     )["trigger_id"]
 
