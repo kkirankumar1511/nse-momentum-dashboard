@@ -2639,6 +2639,40 @@ def page_live_rebalance():
 
     _rebalance_job_status()
 
+    # Everything below this only ever shows the SINGLE latest run -- if a
+    # later manual re-scan superseded an earlier run today (e.g. the
+    # scheduled auto-execute run, then a manual "Run today's scan" that
+    # found nothing new), that earlier run's real outcome (what got
+    # bought/sold/topped-up) drops out of view entirely down there. Pure
+    # read from state_db.get_rebalance_history() (already powers the
+    # Rebalance History page) -- no new writes, no change to what any
+    # Execute button does. Independent of session_state/current proposal
+    # so it still shows even before a scan's been run this session.
+    _today_activity = state_db.get_rebalance_history(
+        since=dt.date.today().isoformat(), limit=200)
+    if not _today_activity.empty:
+        _today_runs = _today_activity["run_id"].nunique()
+        with st.expander(
+                f"📅 Today's activity — {len(_today_activity)} item(s) across "
+                f"{_today_runs} run(s)", expanded=_today_runs > 1):
+            st.caption(
+                "Every sell/buy/top-up/stop-update proposed today, across "
+                "EVERY scan run today (not just the one shown below, which is "
+                "always just the latest) -- see 📜 Rebalance History for older "
+                "days.")
+            st.markdown(
+                _ov_table_html(
+                    _today_activity,
+                    columns=["run_time", "action_type", "symbol", "qty", "price",
+                            "status", "detail"],
+                    sym_cols=["symbol"],
+                    num_fmt={"qty": "{:.0f}", "price": "₹{:.2f}"},
+                    badges={"status": {"proposed": "ov-badge-amber",
+                                       "executed": "ov-badge-green",
+                                       "error": "ov-badge-red",
+                                       "expired": "ov-badge-gray"}}),
+                unsafe_allow_html=True)
+
     if "rebalance_proposal" not in st.session_state:
         st.info("Click **Run today's scan** to generate a proposal.")
         return
