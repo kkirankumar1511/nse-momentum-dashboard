@@ -426,6 +426,20 @@ _OVERVIEW_CSS = """
     display:flex !important; flex-direction:row !important;
     align-items:center !important; justify-content:flex-end !important; gap:12px !important;
 }
+/* Both "Run today's scan" buttons: a plain flex child (or a narrow
+   [5,2] column) shrinks below the button's natural single-line width
+   under pressure, wrapping "Run today's" / "scan" onto two lines --
+   flex-shrink:0 stops the button itself from being squeezed, and
+   white-space:nowrap on its label is the actual fix for the wrap (belt
+   and suspenders: shrink:0 alone doesn't stop text inside from
+   wrapping if the button's own width still ends up smaller than the
+   text needs). */
+.st-key-lr_run_scan_hdr, .st-key-lr_run_scan_autoexec {
+    flex-shrink:0 !important; width:fit-content !important;
+}
+.st-key-lr_run_scan_hdr button p, .st-key-lr_run_scan_autoexec button p {
+    white-space:nowrap !important;
+}
 /* Segmented control's real root is [data-testid="stButtonGroup"] (found
    by reading Streamlit's own source -- button_group.py/ButtonGroup.*.js
    -- after several guesses at the wrong element failed). It has exactly
