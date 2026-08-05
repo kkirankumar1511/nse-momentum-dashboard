@@ -971,15 +971,14 @@ def save_rebalance_failure(error_message: str) -> None:
 def get_rebalance_run_items(run_id: int) -> dict:
     """Like get_last_rebalance_run()'s sells/buys/top_ups/stop_updates
     queries, but EVERY status for this run_id (not status='proposed' only),
-    each row carrying its own 'status' -- lets the Live Rebalance page show
-    a persistent record of what a run proposed AND what happened to each
-    item (proposed/executed/error/expired), instead of an item silently
-    vanishing from the page the moment it resolves. Deliberately a
-    SEPARATE function rather than changing get_last_rebalance_run() itself:
-    trading_service.py's auto-execute loop and the Overview/sidebar
-    'likely exit' hints both depend on that function's proposed-only
-    filtering to know what's still actually pending -- broadening it would
-    make already-resolved items look pending again there."""
+    each row carrying its own 'status' -- the single-run building block
+    get_rebalance_day_items() below uses to cover a whole day's worth of
+    runs at once. Deliberately a SEPARATE function rather than changing
+    get_last_rebalance_run() itself: trading_service.py's auto-execute
+    loop and the Overview/sidebar 'likely exit' hints both depend on that
+    function's proposed-only filtering to know what's still actually
+    pending -- broadening it would make already-resolved items look
+    pending again there."""
     conn = get_conn()
     sells = pd.read_sql(
         "SELECT symbol, qty, avg_price, reason, status FROM rebalance_sells "
@@ -994,6 +993,52 @@ def get_rebalance_run_items(run_id: int) -> dict:
     top_ups = pd.read_sql(
         "SELECT symbol, extra_qty, price, gtt_trigger_id, status "
         "FROM rebalance_top_ups WHERE run_id = ?", conn, params=(run_id,))
+    conn.close()
+    return {"sells": sells, "buys": buys, "stop_updates": stop_updates, "top_ups": top_ups}
+
+
+def get_rebalance_day_items(date: str) -> dict:
+    """Like get_rebalance_run_items(), but aggregates EVERY run's items
+    for a given calendar date (YYYY-MM-DD, matched against rebalance_runs.
+    run_time) instead of a single run_id -- so the Live Rebalance page's
+    Proposed sells/buys/top-ups/stop-updates sections can show the FULL
+    day's activity (e.g. an early auto-execute run followed by a later
+    manual re-scan that found nothing new) with each row's own status,
+    rather than only the single latest run in isolation. Each row also
+    carries run_id/run_time so multiple runs' items are distinguishable
+    once merged into one table. Newest run first.
+
+    Duplicate symbols across runs the same day (e.g. a top-up proposed at
+    10am, superseded by a re-proposal at 2pm) are NOT deduped here --
+    save_rebalance_run()'s own expiry step already marks the earlier one
+    'expired' when a later run re-proposes the same symbol, so only ever
+    one row per symbol carries status='proposed' at a time; both rows are
+    kept so the day's full history stays visible, exactly like
+    get_rebalance_run_items()'s single-run version already does within
+    one run."""
+    conn = get_conn()
+    like = f"{date}%"
+    sells = pd.read_sql(
+        "SELECT rb.symbol, rb.qty, rb.avg_price, rb.reason, rb.status, "
+        "rb.run_id, rr.run_time FROM rebalance_sells rb "
+        "JOIN rebalance_runs rr ON rb.run_id = rr.id "
+        "WHERE rr.run_time LIKE ? ORDER BY rr.run_time DESC", conn, params=(like,))
+    buys = pd.read_sql(
+        "SELECT rb.symbol, rb.qty, rb.price, rb.stop, rb.score, "
+        "rb.fundamental_score, rb.fundamental_rubric, rb.rsi, rb.pct_52w_high, "
+        "rb.vol_expansion, rb.reason, rb.status, rb.run_id, rr.run_time "
+        "FROM rebalance_buys rb JOIN rebalance_runs rr ON rb.run_id = rr.id "
+        "WHERE rr.run_time LIKE ? ORDER BY rr.run_time DESC", conn, params=(like,))
+    stop_updates = pd.read_sql(
+        "SELECT rb.symbol, rb.qty, rb.current_stop, rb.recommended_stop, "
+        "rb.gtt_trigger_id, rb.status, rb.run_id, rr.run_time "
+        "FROM rebalance_stop_updates rb JOIN rebalance_runs rr ON rb.run_id = rr.id "
+        "WHERE rr.run_time LIKE ? ORDER BY rr.run_time DESC", conn, params=(like,))
+    top_ups = pd.read_sql(
+        "SELECT rb.symbol, rb.extra_qty, rb.price, rb.gtt_trigger_id, rb.status, "
+        "rb.run_id, rr.run_time FROM rebalance_top_ups rb "
+        "JOIN rebalance_runs rr ON rb.run_id = rr.id "
+        "WHERE rr.run_time LIKE ? ORDER BY rr.run_time DESC", conn, params=(like,))
     conn.close()
     return {"sells": sells, "buys": buys, "stop_updates": stop_updates, "top_ups": top_ups}
 

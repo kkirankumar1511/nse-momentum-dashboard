@@ -2518,39 +2518,28 @@ def page_screener():
 # Page: Live Rebalance
 # ---------------------------------------------------------------------------
 
-def _tag_proposed_status(result: dict) -> dict:
-    """A just-completed propose_rebalance() result: every row is
-    'proposed' by construction (save_rebalance_run() only just persisted
-    it, nothing could have executed yet) -- tag each of sells/buys/
-    top_ups/stop_updates locally rather than re-querying state_db, which
-    preserves display-only computed columns (e.g. 'rank') that only ever
-    exist in this in-memory result and are never persisted to
-    rebalance_buys etc. See _with_full_item_status for the DB-backed
-    version used everywhere status needs to reflect what ACTUALLY
-    happened (already-executed items, a page reload, ...)."""
-    for key in ("sells", "buys", "top_ups", "stop_updates"):
-        df = result.get(key)
-        if df is not None and not df.empty:
-            df = df.copy()
-            df["status"] = "proposed"
-            result[key] = df
-    return result
-
-
-def _with_full_item_status(result: dict) -> dict:
-    """Overlays result's sells/buys/top_ups/stop_updates with the FULL
-    (every status, not just 'proposed') version from state_db, keyed off
-    result['run_id']. Lets the Live Rebalance page show a persistent
-    status per row (including ones already resolved by auto-execute or a
-    prior session) instead of executed/error/expired items silently
-    disappearing -- see get_rebalance_run_items(). Trade-off: loses any
-    column that only ever existed in the in-memory propose_rebalance()
-    result and was never persisted (e.g. 'rank') -- the buys table
-    already degrades gracefully for that (builds its column list from
-    whatever's actually present)."""
-    run_id = result.get("run_id")
-    if run_id is not None:
-        result.update(state_db.get_rebalance_run_items(run_id))
+def _with_day_item_status(result: dict) -> dict:
+    """Overlays result's sells/buys/top_ups/stop_updates with EVERY item
+    from EVERY run on the SAME CALENDAR DAY as result['run_time'] -- not
+    just the single run_id that produced/loaded this result -- so the
+    Proposed sells/buys/top-ups/stop-updates sections on the Live
+    Rebalance page show the full day's activity (e.g. an early auto-
+    execute run followed by a later manual re-scan that found nothing
+    new) with each row's real status, instead of only the latest run in
+    isolation and instead of executed/error/expired items silently
+    disappearing. See get_rebalance_day_items(). Safe to call right after
+    a fresh scan too: propose_rebalance() already persists via
+    save_rebalance_run() before returning, so the DB is authoritative by
+    the time this runs. Trade-off: loses any column that only ever
+    existed in the in-memory propose_rebalance() result and was never
+    persisted (e.g. 'rank') -- the buys table already degrades
+    gracefully for that (builds its column list from whatever's actually
+    present)."""
+    run_time = result.get("run_time")
+    if run_time is None:
+        return result
+    date_str = run_time.date().isoformat() if hasattr(run_time, "date") else str(run_time)[:10]
+    result.update(state_db.get_rebalance_day_items(date_str))
     return result
 
 
@@ -2609,7 +2598,7 @@ def page_live_rebalance():
             # fresh here regardless of when the underlying proposal ran.
             last_run["holdings"] = lr.get_live_holdings().reset_index().rename(
                 columns={"tradingsymbol": "symbol"})
-            st.session_state["rebalance_proposal"] = _with_full_item_status(last_run)
+            st.session_state["rebalance_proposal"] = _with_day_item_status(last_run)
 
     if rebalance_running:
         st.info(f"⏳ Scan running since {rebalance_job['started_at']:%H:%M:%S} — safe to switch tabs.")
@@ -2633,58 +2622,11 @@ def page_live_rebalance():
         if job["error"]:
             st.error(f"Scan failed: {job['error']}")
         else:
-            st.session_state["rebalance_proposal"] = _tag_proposed_status(job["result"])
+            st.session_state["rebalance_proposal"] = _with_day_item_status(job["result"])
         clear_background_job("rebalance_run")
         st.rerun()
 
     _rebalance_job_status()
-
-    # Everything below this only ever shows the SINGLE latest run -- if a
-    # later manual re-scan superseded an earlier run the same day (e.g. the
-    # scheduled auto-execute run, then a manual "Run today's scan" that
-    # found nothing new), that earlier run's real outcome (what got
-    # bought/sold/topped-up) drops out of view entirely down there. Pure
-    # read from state_db.get_rebalance_history() (already powers the
-    # Rebalance History page) -- no new writes, no change to what any
-    # Execute button does. Independent of session_state/current proposal
-    # so it still shows even before a scan's been run this session.
-    #
-    # Filters to the MOST RECENT day that actually has activity, not a
-    # strict "since midnight today" -- fetched once with no date filter
-    # (most-recent-first, capped at 200 rows) so this keeps showing
-    # yesterday's full picture across a calendar rollover with no new run
-    # yet today, instead of silently going blank the moment the clock
-    # ticks past midnight (confirmed happening: checked this exact gap
-    # live against production the morning after a run).
-    _recent_activity = state_db.get_rebalance_history(limit=200)
-    if not _recent_activity.empty:
-        _latest_day = _recent_activity["run_time"].max()[:10]
-        _today_activity = _recent_activity[
-            _recent_activity["run_time"].str.startswith(_latest_day)]
-        _day_label = ("Today" if _latest_day == dt.date.today().isoformat()
-                      else _latest_day)
-        _today_runs = _today_activity["run_id"].nunique()
-        with st.expander(
-                f"📅 {_day_label}'s activity — {len(_today_activity)} item(s) across "
-                f"{_today_runs} run(s)", expanded=_today_runs > 1):
-            st.caption(
-                f"Every sell/buy/top-up/stop-update proposed on {_latest_day} "
-                "(the most recent day with any activity), across EVERY scan "
-                "run that day -- not just the one shown below, which is "
-                "always just the latest. See 📜 Rebalance History for older "
-                "days.")
-            st.markdown(
-                _ov_table_html(
-                    _today_activity,
-                    columns=["run_time", "action_type", "symbol", "qty", "price",
-                            "status", "detail"],
-                    sym_cols=["symbol"],
-                    num_fmt={"qty": "{:.0f}", "price": "₹{:.2f}"},
-                    badges={"status": {"proposed": "ov-badge-amber",
-                                       "executed": "ov-badge-green",
-                                       "error": "ov-badge-red",
-                                       "expired": "ov-badge-gray"}}),
-                unsafe_allow_html=True)
 
     if "rebalance_proposal" not in st.session_state:
         st.info("Click **Run today's scan** to generate a proposal.")
@@ -2698,7 +2640,7 @@ def page_live_rebalance():
 
     def _pending(df: pd.DataFrame) -> pd.DataFrame:
         """The still-actionable subset of a sells/buys/top_ups/stop_updates
-        table -- these now carry every status (see _with_full_item_status),
+        table -- these now carry every status (see _with_day_item_status),
         so counts/badges/what-Execute-acts-on all need this rather than
         the raw row count."""
         return df[df["status"] == "proposed"] if "status" in df.columns else df
@@ -2782,10 +2724,19 @@ def page_live_rebalance():
                 _sells_display["ltp"] = pd.NA
             _sells_display["pnl"] = (
                 (_sells_display["ltp"] - _sells_display["avg_price"]) * _sells_display["qty"])
+            # Rows can now come from several runs today (see
+            # _with_day_item_status) -- show which run each came from so
+            # two rows for the same symbol (e.g. re-proposed after an
+            # earlier one expired) aren't just confusing duplicates.
+            if "run_time" in _sells_display.columns:
+                _sells_display["run_time"] = pd.to_datetime(
+                    _sells_display["run_time"]).dt.strftime("%d %b %H:%M")
+            _sells_cols = [c for c in
+                          ["run_time", "symbol", "qty", "avg_price", "ltp", "pnl",
+                           "reason", "status"] if c in _sells_display.columns]
             st.markdown(
                 _ov_table_html(
-                    _sells_display,
-                    columns=["symbol", "qty", "avg_price", "ltp", "pnl", "reason", "status"],
+                    _sells_display, columns=_sells_cols,
                     sym_cols=["symbol"], pnl_cols=["pnl"],
                     num_fmt={"qty": "{:.0f}", "avg_price": "₹{:.2f}", "ltp": "₹{:.2f}",
                              "pnl": "₹{:+,.0f}"},
@@ -2810,7 +2761,7 @@ def page_live_rebalance():
                         # the marks above) rather than hand-patching this dict --
                         # keeps every already-resolved row visible with its real
                         # status instead of dropping it from the table.
-                        st.session_state["rebalance_proposal"] = _with_full_item_status(result)
+                        st.session_state["rebalance_proposal"] = _with_day_item_status(result)
                     st.rerun()
             else:
                 st.caption("All resolved — nothing left to execute here.")
@@ -2838,14 +2789,17 @@ def page_live_rebalance():
         if not result["buys"].empty:
             # "rank" only ever exists on a just-completed scan's in-memory
             # result (never persisted to rebalance_buys -- see
-            # _with_full_item_status) -- a proposal reloaded from state_db
+            # _with_day_item_status) -- a proposal reloaded from state_db
             # won't have it, so build the column list from what's actually
             # present rather than assume.
             _buys_display = result["buys"].copy()
             _buys_display["amount"] = _buys_display["qty"] * _buys_display["price"]
+            if "run_time" in _buys_display.columns:
+                _buys_display["run_time"] = pd.to_datetime(
+                    _buys_display["run_time"]).dt.strftime("%d %b %H:%M")
             _buys_cols = [c for c in
-                         ["symbol", "rank", "score", "price", "qty", "amount", "stop",
-                          "fundamental_score", "status"] if c in _buys_display.columns]
+                         ["run_time", "symbol", "rank", "score", "price", "qty", "amount",
+                          "stop", "fundamental_score", "status"] if c in _buys_display.columns]
             st.markdown(
                 _ov_table_html(
                     _buys_display, columns=_buys_cols, sym_cols=["symbol"],
@@ -2875,7 +2829,7 @@ def page_live_rebalance():
                         state_db.mark_rebalance_buys_executed(result.get("run_id"), succeeded)
                         state_db.mark_rebalance_buys_failed(result.get("run_id"), failed)
                         state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
-                        st.session_state["rebalance_proposal"] = _with_full_item_status(result)
+                        st.session_state["rebalance_proposal"] = _with_day_item_status(result)
                     st.rerun()
             else:
                 st.caption("All resolved — nothing left to execute here.")
@@ -2907,8 +2861,12 @@ def page_live_rebalance():
                     "total.")
                 _topups_display = top_ups.copy()
                 _topups_display["amount"] = _topups_display["extra_qty"] * _topups_display["price"]
+                if "run_time" in _topups_display.columns:
+                    _topups_display["run_time"] = pd.to_datetime(
+                        _topups_display["run_time"]).dt.strftime("%d %b %H:%M")
                 _topups_cols = [c for c in
-                               ["symbol", "extra_qty", "price", "amount", "gtt_trigger_id", "status"]
+                               ["run_time", "symbol", "extra_qty", "price", "amount",
+                                "gtt_trigger_id", "status"]
                                if c in _topups_display.columns]
                 st.markdown(
                     _ov_table_html(
@@ -2934,7 +2892,7 @@ def page_live_rebalance():
                         if resolved:
                             state_db.mark_rebalance_top_ups_executed(result.get("run_id"), succeeded)
                             state_db.mark_rebalance_top_ups_failed(result.get("run_id"), failed)
-                            st.session_state["rebalance_proposal"] = _with_full_item_status(result)
+                            st.session_state["rebalance_proposal"] = _with_day_item_status(result)
                         st.rerun()
                 else:
                     st.caption("All resolved — nothing left to execute here.")
@@ -2961,8 +2919,12 @@ def page_live_rebalance():
                 _stops_display = stop_updates.copy()
                 _stops_display["gtt_status"] = _stops_display["gtt_trigger_id"].apply(
                     lambda v: "none active" if pd.isna(v) else "active")
+                if "run_time" in _stops_display.columns:
+                    _stops_display["run_time"] = pd.to_datetime(
+                        _stops_display["run_time"]).dt.strftime("%d %b %H:%M")
                 _stops_cols = [c for c in
-                              ["symbol", "current_stop", "recommended_stop", "gtt_status", "status"]
+                              ["run_time", "symbol", "current_stop", "recommended_stop",
+                               "gtt_status", "status"]
                               if c in _stops_display.columns]
                 st.markdown(
                     _ov_table_html(
@@ -3008,7 +2970,7 @@ def page_live_rebalance():
                         if resolved:
                             state_db.mark_rebalance_stop_updates_executed(result.get("run_id"), succeeded)
                             state_db.mark_rebalance_stop_updates_failed(result.get("run_id"), failed)
-                            st.session_state["rebalance_proposal"] = _with_full_item_status(result)
+                            st.session_state["rebalance_proposal"] = _with_day_item_status(result)
                         st.rerun()
                 else:
                     st.caption("All resolved — nothing left to apply here.")
