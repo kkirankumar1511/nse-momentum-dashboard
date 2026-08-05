@@ -699,6 +699,31 @@ def get_open_positions() -> dict[str, dict]:
     return {r["symbol"]: dict(r) for r in rows}
 
 
+def get_topup_history(symbol: str | None = None) -> pd.DataFrame:
+    """Every top-up that has actually EXECUTED at the broker, newest first --
+    the append-only audit trail behind top_up_trade()'s in-place weighted-
+    average update to the trades/positions rows. That update alone leaves
+    no visible trace that a top-up happened (it just silently changes qty/
+    entry_price on the existing row) -- this reads rebalance_top_ups
+    (already populated by live_rebalance.execute_top_ups via mark_
+    rebalance_top_ups_executed) so the Tradebook can show it explicitly.
+    'proposed'/'expired' rows are excluded -- only ones that actually
+    filled at the broker count as a real top-up event."""
+    conn = get_conn()
+    where = "WHERE t.status = 'executed'"
+    params = []
+    if symbol:
+        where += " AND t.symbol = ?"
+        params.append(symbol)
+    df = pd.read_sql(
+        f"SELECT t.symbol, t.extra_qty, t.price, t.resolved_at, r.run_time "
+        f"FROM rebalance_top_ups t LEFT JOIN rebalance_runs r ON t.run_id = r.id "
+        f"{where} ORDER BY t.resolved_at DESC",
+        conn, params=params)
+    conn.close()
+    return df
+
+
 def top_up_trade(symbol: str, extra_qty: int, price: float) -> None:
     """Call right after buying MORE shares of an ALREADY-open position
     (screener.allocate_equal_weight_buys' top-up mechanic) succeeds --

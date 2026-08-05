@@ -1055,6 +1055,7 @@ COLUMN_LABELS = {
     "apply_error": "Why it needs attention",
     "realized_pnl": "Realized P&L",
     "realized_ret_pct": "Realized return %",
+    "topups": "Top-ups",
 }
 
 
@@ -4404,8 +4405,41 @@ def page_tradebook():
         if reason_filter:
             filtered = filtered[filtered["exit_reason"].isin(reason_filter)]
 
+        # top_up_trade() (state_db.py) weighted-averages a top-up straight
+        # into the existing trade row (new qty, new blended entry_price) --
+        # correct for the numbers, but it leaves no visible trace that a
+        # top-up happened on any given row. Surface that explicitly here
+        # from rebalance_top_ups (the real executed-fill audit trail)
+        # rather than silently letting a topped-up row look identical to
+        # one that was never touched after entry.
+        topups_all = state_db.get_topup_history()
+        if not topups_all.empty:
+            _last = (topups_all.sort_values("resolved_at")
+                    .groupby("symbol").last()
+                    [["extra_qty", "price", "resolved_at"]]
+                    .rename(columns={"extra_qty": "last_topup_qty",
+                                     "price": "last_topup_price",
+                                     "resolved_at": "last_topup_at"}))
+            _count = topups_all.groupby("symbol").size().rename("topup_count")
+            topup_summary = _last.join(_count).reset_index()
+        else:
+            topup_summary = pd.DataFrame(
+                columns=["symbol", "last_topup_qty", "last_topup_price",
+                        "last_topup_at", "topup_count"])
+        filtered = filtered.merge(topup_summary, on="symbol", how="left")
+
+        def _topup_label(r):
+            if pd.isna(r["topup_count"]):
+                return ""
+            when = str(r["last_topup_at"])[:10]
+            suffix = f" (+{int(r['topup_count']) - 1} earlier)" if r["topup_count"] > 1 else ""
+            return f"+{int(r['last_topup_qty'])} @ ₹{r['last_topup_price']:.2f} on {when}{suffix}"
+        filtered["topups"] = filtered.apply(_topup_label, axis=1)
+        filtered = filtered.drop(columns=["last_topup_qty", "last_topup_price",
+                                          "last_topup_at", "topup_count"])
+
         st.caption(f"Showing {len(filtered)} of {len(trades)} trades")
-        _priority_cols = ["symbol", "entry_date", "entry_price", "qty", "initial_stop",
+        _priority_cols = ["symbol", "entry_date", "entry_price", "qty", "topups", "initial_stop",
                          "latest_recommended_stop", "exit_date", "exit_price",
                          "realized_pnl", "realized_ret_pct", "holding_days"]
         _remaining_cols = [c for c in filtered.columns
@@ -4425,6 +4459,16 @@ def page_tradebook():
             unsafe_allow_html=True)
         st.download_button("Download tradebook CSV (filtered view)",
                            filtered.to_csv(index=False), "tradebook.csv")
+
+        _visible_topups = topups_all[topups_all["symbol"].isin(filtered["symbol"])] \
+            if not topups_all.empty else topups_all
+        if not _visible_topups.empty:
+            with st.expander(f"Top-up history for these trades ({len(_visible_topups)})"):
+                st.markdown(
+                    _ov_table_html(
+                        _visible_topups, sym_cols=["symbol"],
+                        num_fmt={"price": "₹{:.2f}", "extra_qty": "{:.0f}"}),
+                    unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
