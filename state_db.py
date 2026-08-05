@@ -968,6 +968,36 @@ def save_rebalance_failure(error_message: str) -> None:
     conn.close()
 
 
+def get_rebalance_run_items(run_id: int) -> dict:
+    """Like get_last_rebalance_run()'s sells/buys/top_ups/stop_updates
+    queries, but EVERY status for this run_id (not status='proposed' only),
+    each row carrying its own 'status' -- lets the Live Rebalance page show
+    a persistent record of what a run proposed AND what happened to each
+    item (proposed/executed/error/expired), instead of an item silently
+    vanishing from the page the moment it resolves. Deliberately a
+    SEPARATE function rather than changing get_last_rebalance_run() itself:
+    trading_service.py's auto-execute loop and the Overview/sidebar
+    'likely exit' hints both depend on that function's proposed-only
+    filtering to know what's still actually pending -- broadening it would
+    make already-resolved items look pending again there."""
+    conn = get_conn()
+    sells = pd.read_sql(
+        "SELECT symbol, qty, avg_price, reason, status FROM rebalance_sells "
+        "WHERE run_id = ?", conn, params=(run_id,))
+    buys = pd.read_sql(
+        "SELECT symbol, qty, price, stop, score, fundamental_score, "
+        "fundamental_rubric, rsi, pct_52w_high, vol_expansion, reason, status "
+        "FROM rebalance_buys WHERE run_id = ?", conn, params=(run_id,))
+    stop_updates = pd.read_sql(
+        "SELECT symbol, qty, current_stop, recommended_stop, gtt_trigger_id, status "
+        "FROM rebalance_stop_updates WHERE run_id = ?", conn, params=(run_id,))
+    top_ups = pd.read_sql(
+        "SELECT symbol, extra_qty, price, gtt_trigger_id, status "
+        "FROM rebalance_top_ups WHERE run_id = ?", conn, params=(run_id,))
+    conn.close()
+    return {"sells": sells, "buys": buys, "stop_updates": stop_updates, "top_ups": top_ups}
+
+
 def get_last_rebalance_run() -> dict | None:
     """Same shape dashboard.py/live_rebalance.py already expect from the
     old pickle: {"run_time", "sells", "buys", "stop_updates", "open_slots"}

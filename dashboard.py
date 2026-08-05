@@ -2518,6 +2518,42 @@ def page_screener():
 # Page: Live Rebalance
 # ---------------------------------------------------------------------------
 
+def _tag_proposed_status(result: dict) -> dict:
+    """A just-completed propose_rebalance() result: every row is
+    'proposed' by construction (save_rebalance_run() only just persisted
+    it, nothing could have executed yet) -- tag each of sells/buys/
+    top_ups/stop_updates locally rather than re-querying state_db, which
+    preserves display-only computed columns (e.g. 'rank') that only ever
+    exist in this in-memory result and are never persisted to
+    rebalance_buys etc. See _with_full_item_status for the DB-backed
+    version used everywhere status needs to reflect what ACTUALLY
+    happened (already-executed items, a page reload, ...)."""
+    for key in ("sells", "buys", "top_ups", "stop_updates"):
+        df = result.get(key)
+        if df is not None and not df.empty:
+            df = df.copy()
+            df["status"] = "proposed"
+            result[key] = df
+    return result
+
+
+def _with_full_item_status(result: dict) -> dict:
+    """Overlays result's sells/buys/top_ups/stop_updates with the FULL
+    (every status, not just 'proposed') version from state_db, keyed off
+    result['run_id']. Lets the Live Rebalance page show a persistent
+    status per row (including ones already resolved by auto-execute or a
+    prior session) instead of executed/error/expired items silently
+    disappearing -- see get_rebalance_run_items(). Trade-off: loses any
+    column that only ever existed in the in-memory propose_rebalance()
+    result and was never persisted (e.g. 'rank') -- the buys table
+    already degrades gracefully for that (builds its column list from
+    whatever's actually present)."""
+    run_id = result.get("run_id")
+    if run_id is not None:
+        result.update(state_db.get_rebalance_run_items(run_id))
+    return result
+
+
 def page_live_rebalance():
     auto_exec = bool(config.STRATEGY.get("auto_execute_trades", False))
     rebalance_job = get_background_job("rebalance_run")
@@ -2573,7 +2609,7 @@ def page_live_rebalance():
             # fresh here regardless of when the underlying proposal ran.
             last_run["holdings"] = lr.get_live_holdings().reset_index().rename(
                 columns={"tradingsymbol": "symbol"})
-            st.session_state["rebalance_proposal"] = last_run
+            st.session_state["rebalance_proposal"] = _with_full_item_status(last_run)
 
     if rebalance_running:
         st.info(f"⏳ Scan running since {rebalance_job['started_at']:%H:%M:%S} — safe to switch tabs.")
@@ -2597,7 +2633,7 @@ def page_live_rebalance():
         if job["error"]:
             st.error(f"Scan failed: {job['error']}")
         else:
-            st.session_state["rebalance_proposal"] = job["result"]
+            st.session_state["rebalance_proposal"] = _tag_proposed_status(job["result"])
         clear_background_job("rebalance_run")
         st.rerun()
 
@@ -2613,17 +2649,26 @@ def page_live_rebalance():
                   "it finishes, so you can't execute against this now-stale "
                   "proposal while a fresh one is being computed.")
 
+    def _pending(df: pd.DataFrame) -> pd.DataFrame:
+        """The still-actionable subset of a sells/buys/top_ups/stop_updates
+        table -- these now carry every status (see _with_full_item_status),
+        so counts/badges/what-Execute-acts-on all need this rather than
+        the raw row count."""
+        return df[df["status"] == "proposed"] if "status" in df.columns else df
+
     _real_max_positions = config.STRATEGY["max_positions"]
     _real_target = result.get("target_per_slot") or 0
     _cash_pool = result.get("cash_pool") or 0
+    _pending_sells = _pending(result["sells"])
+    _pending_buys = _pending(result["buys"])
     st.markdown(
         '<div class="ov-grid-metrics">'
         + _ov_metric_html("Current holdings", str(len(result["holdings"])), "CNC positions", "", "blue")
-        + _ov_metric_html("Proposed sells", str(len(result["sells"])),
-                         (result["sells"].iloc[0]["symbol"] if not result["sells"].empty else None),
+        + _ov_metric_html("Proposed sells", str(len(_pending_sells)),
+                         (_pending_sells.iloc[0]["symbol"] if not _pending_sells.empty else None),
                          "", "red")
-        + _ov_metric_html("Proposed buys", str(len(result["buys"])),
-                         (result["buys"].iloc[0]["symbol"] if not result["buys"].empty else None),
+        + _ov_metric_html("Proposed buys", str(len(_pending_buys)),
+                         (_pending_buys.iloc[0]["symbol"] if not _pending_buys.empty else None),
                          "", "green")
         + _ov_metric_html("Open slots after sells", str(result["open_slots"]),
                          f"of {_real_max_positions} max", "", "purple")
@@ -2638,8 +2683,8 @@ def page_live_rebalance():
     # longer relevant to anything still actionable, so skip it entirely
     # rather than show a stale "buys below may be partial" next to an
     # empty buys table.
-    still_actionable = (not result["buys"].empty
-                        or not result.get("top_ups", pd.DataFrame()).empty)
+    still_actionable = (not _pending_buys.empty
+                        or not _pending(result.get("top_ups", pd.DataFrame())).empty)
     if still_actionable and result.get("cash_shortfall") is not None:
         target = result.get("target_per_slot") or 0
         pool = result.get("cash_pool") or 0
@@ -2672,12 +2717,12 @@ def page_live_rebalance():
         st.markdown(
             '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
             '<span class="ov-dot" style="background:var(--ov-red);">'
-            f'</span>Proposed sells <span class="ov-badge ov-badge-red">{len(result["sells"])}</span>'
+            f'</span>Proposed sells <span class="ov-badge ov-badge-red">{len(_pending_sells)}</span>'
             f'<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
             f'Dropped out of the top-{_keep_zone_size} keep zone</span></p>',
             unsafe_allow_html=True)
         if st.session_state.get("sell_exec_log"):
-            st.success("Sell(s) executed and removed from the list below.")
+            st.success("Sell(s) executed — status below reflects the result.")
             for line in st.session_state["sell_exec_log"]:
                 st.write(line)
             del st.session_state["sell_exec_log"]
@@ -2693,28 +2738,35 @@ def page_live_rebalance():
             st.markdown(
                 _ov_table_html(
                     _sells_display,
-                    columns=["symbol", "qty", "avg_price", "ltp", "pnl", "reason"],
+                    columns=["symbol", "qty", "avg_price", "ltp", "pnl", "reason", "status"],
                     sym_cols=["symbol"], pnl_cols=["pnl"],
                     num_fmt={"qty": "{:.0f}", "avg_price": "₹{:.2f}", "ltp": "₹{:.2f}",
-                             "pnl": "₹{:+,.0f}"}),
+                             "pnl": "₹{:+,.0f}"},
+                    badges={"status": {"proposed": "ov-badge-amber", "executed": "ov-badge-green",
+                                       "error": "ov-badge-red", "expired": "ov-badge-gray"}}),
                 unsafe_allow_html=True)
-            confirm_sell = st.checkbox(
-                "I confirm I want to execute ALL proposed sells at market",
-                key="confirm_sell_all")
-            if st.button("Execute all sells", disabled=not confirm_sell or rebalance_running,
-                        use_container_width=True, key="lr_execute_sells"):
-                log, succeeded, failed = lr.execute_sells(result["sells"])
-                st.session_state["sell_exec_log"] = log
-                resolved = succeeded + list(failed)
-                if resolved:
-                    result["sells"] = result["sells"][
-                        ~result["sells"]["symbol"].isin(resolved)].reset_index(drop=True)
-                    result["open_slots"] = result.get("open_slots", 0) + len(succeeded)
-                    st.session_state["rebalance_proposal"] = result
-                    state_db.mark_rebalance_sells_executed(result.get("run_id"), succeeded)
-                    state_db.mark_rebalance_sells_failed(result.get("run_id"), failed)
-                    state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
-                st.rerun()
+            if not _pending_sells.empty:
+                confirm_sell = st.checkbox(
+                    "I confirm I want to execute ALL proposed sells at market",
+                    key="confirm_sell_all")
+                if st.button("Execute all sells", disabled=not confirm_sell or rebalance_running,
+                            use_container_width=True, key="lr_execute_sells"):
+                    log, succeeded, failed = lr.execute_sells(_pending_sells)
+                    st.session_state["sell_exec_log"] = log
+                    resolved = succeeded + list(failed)
+                    if resolved:
+                        result["open_slots"] = result.get("open_slots", 0) + len(succeeded)
+                        state_db.mark_rebalance_sells_executed(result.get("run_id"), succeeded)
+                        state_db.mark_rebalance_sells_failed(result.get("run_id"), failed)
+                        state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
+                        # Re-read from state_db (already the source of truth after
+                        # the marks above) rather than hand-patching this dict --
+                        # keeps every already-resolved row visible with its real
+                        # status instead of dropping it from the table.
+                        st.session_state["rebalance_proposal"] = _with_full_item_status(result)
+                    st.rerun()
+            else:
+                st.caption("All resolved — nothing left to execute here.")
         elif not result.get("is_rebalance_day", True):
             st.caption(f"Sell/keep-zone rule not evaluated today -- "
                       f"'{result.get('rebalance_cadence', 'daily')}' cadence selected in "
@@ -2727,70 +2779,75 @@ def page_live_rebalance():
         st.markdown(
             '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
             '<span class="ov-dot" style="background:var(--ov-green);">'
-            f'</span>Proposed buys <span class="ov-badge ov-badge-green">{len(result["buys"])}</span>'
+            f'</span>Proposed buys <span class="ov-badge ov-badge-green">{len(_pending_buys)}</span>'
             '<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
             'Sized off real available cash</span></p>',
             unsafe_allow_html=True)
         if st.session_state.get("buy_exec_log"):
-            st.success("Buy(s) executed and removed from the list below.")
+            st.success("Buy(s) executed — status below reflects the result.")
             for line in st.session_state["buy_exec_log"]:
                 st.write(line)
             del st.session_state["buy_exec_log"]
         if not result["buys"].empty:
-            # "rank" was added to the buys dict alongside this restyle -- a
-            # proposal already sitting in session state (or loaded from a
-            # run stored before this change) won't have it, so build the
-            # column list from what's actually present rather than assume.
+            # "rank" only ever exists on a just-completed scan's in-memory
+            # result (never persisted to rebalance_buys -- see
+            # _with_full_item_status) -- a proposal reloaded from state_db
+            # won't have it, so build the column list from what's actually
+            # present rather than assume.
             _buys_display = result["buys"].copy()
             _buys_display["amount"] = _buys_display["qty"] * _buys_display["price"]
             _buys_cols = [c for c in
                          ["symbol", "rank", "score", "price", "qty", "amount", "stop",
-                          "fundamental_score"] if c in _buys_display.columns]
+                          "fundamental_score", "status"] if c in _buys_display.columns]
             st.markdown(
                 _ov_table_html(
                     _buys_display, columns=_buys_cols, sym_cols=["symbol"],
                     num_fmt={"rank": "{:.0f}", "qty": "{:.0f}", "price": "₹{:.2f}",
                              "amount": "₹{:,.0f}", "stop": "₹{:.2f}", "score": "{:.2f}",
-                             "fundamental_score": "{:.1f}"}),
+                             "fundamental_score": "{:.1f}"},
+                    badges={"status": {"proposed": "ov-badge-amber", "executed": "ov-badge-green",
+                                       "error": "ov-badge-red", "expired": "ov-badge-gray"}}),
                 unsafe_allow_html=True)
             st.markdown(
                 f'<div class="ov-row"><span class="ov-card-meta">Total amount</span>'
                 f'<span class="ov-sym">₹{_buys_display["amount"].sum():,.0f}</span></div>',
                 unsafe_allow_html=True)
-            place_gtt = st.checkbox("Also place a GTT stop-loss for each buy",
-                                    value=True, key="rebal_gtt")
-            confirm_buy = st.checkbox(
-                "I confirm I want to execute ALL proposed buys at market",
-                key="confirm_buy_all")
-            if st.button("Execute all buys", disabled=not confirm_buy or rebalance_running,
-                        use_container_width=True, key="lr_execute_buys"):
-                log, succeeded, failed = lr.execute_buys(result["buys"], place_gtt=place_gtt)
-                st.session_state["buy_exec_log"] = log
-                resolved = succeeded + list(failed)
-                if resolved:
-                    result["buys"] = result["buys"][
-                        ~result["buys"]["symbol"].isin(resolved)].reset_index(drop=True)
-                    result["open_slots"] = max(result.get("open_slots", 0) - len(succeeded), 0)
-                    st.session_state["rebalance_proposal"] = result
-                    state_db.mark_rebalance_buys_executed(result.get("run_id"), succeeded)
-                    state_db.mark_rebalance_buys_failed(result.get("run_id"), failed)
-                    state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
-                st.rerun()
+            if not _pending_buys.empty:
+                place_gtt = st.checkbox("Also place a GTT stop-loss for each buy",
+                                        value=True, key="rebal_gtt")
+                confirm_buy = st.checkbox(
+                    "I confirm I want to execute ALL proposed buys at market",
+                    key="confirm_buy_all")
+                if st.button("Execute all buys", disabled=not confirm_buy or rebalance_running,
+                            use_container_width=True, key="lr_execute_buys"):
+                    log, succeeded, failed = lr.execute_buys(_pending_buys, place_gtt=place_gtt)
+                    st.session_state["buy_exec_log"] = log
+                    resolved = succeeded + list(failed)
+                    if resolved:
+                        result["open_slots"] = max(result.get("open_slots", 0) - len(succeeded), 0)
+                        state_db.mark_rebalance_buys_executed(result.get("run_id"), succeeded)
+                        state_db.mark_rebalance_buys_failed(result.get("run_id"), failed)
+                        state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
+                        st.session_state["rebalance_proposal"] = _with_full_item_status(result)
+                    st.rerun()
+            else:
+                st.caption("All resolved — nothing left to execute here.")
         else:
             st.caption("No open slots, or no candidates today.")
 
     top_ups = result.get("top_ups", pd.DataFrame())
     stop_updates = result.get("stop_updates", pd.DataFrame())
+    _pending_topups = _pending(top_ups)
     col_topups, col_stops = st.columns(2)
     with col_topups:
         with st.container(border=True, key="ov-card-lr-topups"):
             st.markdown(
                 '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
                 '<span class="ov-dot" style="background:var(--ov-blue);">'
-                f'</span>Proposed top-ups <span class="ov-badge ov-badge-gray">{len(top_ups)}</span></p>',
+                f'</span>Proposed top-ups <span class="ov-badge ov-badge-gray">{len(_pending_topups)}</span></p>',
                 unsafe_allow_html=True)
             if st.session_state.get("topup_exec_log"):
-                st.success("Top-up(s) executed and removed from the list below.")
+                st.success("Top-up(s) executed — status below reflects the result.")
                 for line in st.session_state["topup_exec_log"]:
                     st.write(line)
                 del st.session_state["topup_exec_log"]
@@ -2804,33 +2861,36 @@ def page_live_rebalance():
                 _topups_display = top_ups.copy()
                 _topups_display["amount"] = _topups_display["extra_qty"] * _topups_display["price"]
                 _topups_cols = [c for c in
-                               ["symbol", "extra_qty", "price", "amount", "gtt_trigger_id"]
+                               ["symbol", "extra_qty", "price", "amount", "gtt_trigger_id", "status"]
                                if c in _topups_display.columns]
                 st.markdown(
                     _ov_table_html(
                         _topups_display, columns=_topups_cols, sym_cols=["symbol"],
                         num_fmt={"extra_qty": "{:.0f}", "price": "₹{:.2f}",
-                                "amount": "₹{:,.0f}"}),
+                                "amount": "₹{:,.0f}"},
+                        badges={"status": {"proposed": "ov-badge-amber", "executed": "ov-badge-green",
+                                           "error": "ov-badge-red", "expired": "ov-badge-gray"}}),
                     unsafe_allow_html=True)
                 st.markdown(
                     f'<div class="ov-row"><span class="ov-card-meta">Total amount</span>'
                     f'<span class="ov-sym">₹{_topups_display["amount"].sum():,.0f}</span></div>',
                     unsafe_allow_html=True)
-                confirm_topup = st.checkbox(
-                    "I confirm I want to execute ALL proposed top-ups at market",
-                    key="confirm_topup_all")
-                if st.button("Execute all top-ups", disabled=not confirm_topup or rebalance_running,
-                            use_container_width=True, key="lr_execute_topups"):
-                    log, succeeded, failed = lr.execute_top_ups(top_ups)
-                    st.session_state["topup_exec_log"] = log
-                    resolved = succeeded + list(failed)
-                    if resolved:
-                        result["top_ups"] = top_ups[
-                            ~top_ups["symbol"].isin(resolved)].reset_index(drop=True)
-                        st.session_state["rebalance_proposal"] = result
-                        state_db.mark_rebalance_top_ups_executed(result.get("run_id"), succeeded)
-                        state_db.mark_rebalance_top_ups_failed(result.get("run_id"), failed)
-                    st.rerun()
+                if not _pending_topups.empty:
+                    confirm_topup = st.checkbox(
+                        "I confirm I want to execute ALL proposed top-ups at market",
+                        key="confirm_topup_all")
+                    if st.button("Execute all top-ups", disabled=not confirm_topup or rebalance_running,
+                                use_container_width=True, key="lr_execute_topups"):
+                        log, succeeded, failed = lr.execute_top_ups(_pending_topups)
+                        st.session_state["topup_exec_log"] = log
+                        resolved = succeeded + list(failed)
+                        if resolved:
+                            state_db.mark_rebalance_top_ups_executed(result.get("run_id"), succeeded)
+                            state_db.mark_rebalance_top_ups_failed(result.get("run_id"), failed)
+                            st.session_state["rebalance_proposal"] = _with_full_item_status(result)
+                        st.rerun()
+                else:
+                    st.caption("All resolved — nothing left to execute here.")
             else:
                 st.caption("No under-target holdings, or no cash left over to top up with.")
 
@@ -2840,66 +2900,71 @@ def page_live_rebalance():
                 '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
                 '<span class="ov-dot" style="background:var(--ov-amber);">'
                 f'</span>Stop updates needing attention '
-                f'<span class="ov-badge ov-badge-gray">{len(stop_updates)}</span></p>',
+                f'<span class="ov-badge ov-badge-gray">{len(_pending(stop_updates))}</span></p>',
                 unsafe_allow_html=True)
             if st.session_state.get("stopupdate_exec_log"):
-                st.success("Stop update(s) applied and removed from the list below.")
+                st.success("Stop update(s) applied — status below reflects the result.")
                 for line in st.session_state["stopupdate_exec_log"]:
                     st.write(line)
                 del st.session_state["stopupdate_exec_log"]
+            _pending_stops = _pending(stop_updates)
             if not stop_updates.empty:
                 st.caption("Ratchets auto-apply; only ones that couldn't (no active "
                           "GTT / Kite error) land here.")
                 _stops_display = stop_updates.copy()
                 _stops_display["gtt_status"] = _stops_display["gtt_trigger_id"].apply(
                     lambda v: "none active" if pd.isna(v) else "active")
+                _stops_cols = [c for c in
+                              ["symbol", "current_stop", "recommended_stop", "gtt_status", "status"]
+                              if c in _stops_display.columns]
                 st.markdown(
                     _ov_table_html(
-                        _stops_display,
-                        columns=["symbol", "current_stop", "recommended_stop", "gtt_status"],
-                        sym_cols=["symbol"],
+                        _stops_display, columns=_stops_cols, sym_cols=["symbol"],
                         num_fmt={"current_stop": "₹{:.2f}", "recommended_stop": "₹{:.2f}"},
                         badges={"gtt_status": {"active": "ov-badge-green",
-                                               "none active": "ov-badge-red"}}),
+                                               "none active": "ov-badge-red"},
+                               "status": {"proposed": "ov-badge-amber", "executed": "ov-badge-green",
+                                          "error": "ov-badge-red", "expired": "ov-badge-gray"}}),
                     unsafe_allow_html=True)
-                confirm_stops = st.checkbox(
-                    "I confirm I want to raise ALL these GTT stop-losses",
-                    key="confirm_stop_updates")
-                if st.button("Apply stop updates", disabled=not confirm_stops or rebalance_running,
-                            use_container_width=True, key="lr_apply_stops"):
-                    log = []
-                    succeeded = []
-                    failed = {}
-                    for _, r in stop_updates.iterrows():
-                        if pd.isna(r["gtt_trigger_id"]):
-                            log.append(f"⚠️ {r['symbol']}: no active GTT to update — "
-                                      "place one manually first (Trade tab).")
-                            failed[r["symbol"]] = "No active GTT to update"
-                            continue
-                        try:
-                            ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
-                            kite_client.modify_gtt_trigger(
-                                int(r["gtt_trigger_id"]), r["symbol"], int(r["qty"]),
-                                r["recommended_stop"], ltp)
-                            # Only now does the recommended stop become the applied
-                            # (real, broker-side) stop -- see apply_stop_update()'s
-                            # docstring for why this must never happen earlier.
-                            state_db.apply_stop_update(r["symbol"])
-                            log.append(f"✅ {r['symbol']}: stop raised to "
-                                      f"₹{r['recommended_stop']:.2f}")
-                            succeeded.append(r["symbol"])
-                        except Exception as e:
-                            log.append(f"❌ {r['symbol']}: FAILED — {e}")
-                            failed[r["symbol"]] = str(e)
-                    st.session_state["stopupdate_exec_log"] = log
-                    resolved = succeeded + list(failed)
-                    if resolved:
-                        result["stop_updates"] = stop_updates[
-                            ~stop_updates["symbol"].isin(resolved)].reset_index(drop=True)
-                        st.session_state["rebalance_proposal"] = result
-                        state_db.mark_rebalance_stop_updates_executed(result.get("run_id"), succeeded)
-                        state_db.mark_rebalance_stop_updates_failed(result.get("run_id"), failed)
-                    st.rerun()
+                if not _pending_stops.empty:
+                    confirm_stops = st.checkbox(
+                        "I confirm I want to raise ALL these GTT stop-losses",
+                        key="confirm_stop_updates")
+                    if st.button("Apply stop updates", disabled=not confirm_stops or rebalance_running,
+                                use_container_width=True, key="lr_apply_stops"):
+                        log = []
+                        succeeded = []
+                        failed = {}
+                        for _, r in _pending_stops.iterrows():
+                            if pd.isna(r["gtt_trigger_id"]):
+                                log.append(f"⚠️ {r['symbol']}: no active GTT to update — "
+                                          "place one manually first (Trade tab).")
+                                failed[r["symbol"]] = "No active GTT to update"
+                                continue
+                            try:
+                                ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
+                                kite_client.modify_gtt_trigger(
+                                    int(r["gtt_trigger_id"]), r["symbol"], int(r["qty"]),
+                                    r["recommended_stop"], ltp)
+                                # Only now does the recommended stop become the applied
+                                # (real, broker-side) stop -- see apply_stop_update()'s
+                                # docstring for why this must never happen earlier.
+                                state_db.apply_stop_update(r["symbol"])
+                                log.append(f"✅ {r['symbol']}: stop raised to "
+                                          f"₹{r['recommended_stop']:.2f}")
+                                succeeded.append(r["symbol"])
+                            except Exception as e:
+                                log.append(f"❌ {r['symbol']}: FAILED — {e}")
+                                failed[r["symbol"]] = str(e)
+                        st.session_state["stopupdate_exec_log"] = log
+                        resolved = succeeded + list(failed)
+                        if resolved:
+                            state_db.mark_rebalance_stop_updates_executed(result.get("run_id"), succeeded)
+                            state_db.mark_rebalance_stop_updates_failed(result.get("run_id"), failed)
+                            st.session_state["rebalance_proposal"] = _with_full_item_status(result)
+                        st.rerun()
+                else:
+                    st.caption("All resolved — nothing left to apply here.")
             else:
                 st.caption("No trailing-stop increases needed attention today — "
                           "either nothing ratcheted, or it all auto-applied cleanly.")
