@@ -67,7 +67,20 @@ def send_webpush_all(subscriptions: list[dict], title: str, message: str,
             webpush(
                 subscription_info=sub, data=payload,
                 vapid_private_key=VAPID_PRIVATE_KEY,
-                vapid_claims={"sub": f"mailto:{VAPID_CLAIMS_EMAIL or 'admin@localhost'}"})
+                vapid_claims={"sub": f"mailto:{VAPID_CLAIMS_EMAIL or 'admin@localhost'}"},
+                # pywebpush defaults ttl=0, which tells the push service
+                # (FCM etc.) to drop the message outright if the device
+                # isn't reachable RIGHT NOW rather than queuing it for
+                # when it reconnects -- confirmed live 2026-08-05: the
+                # 07:00 token-expiry push sent successfully (no error
+                # here) but was never received because the phone's data
+                # was off at that exact moment, and turning data back on
+                # later didn't deliver it, since FCM had already discarded
+                # it. A device that's online when this is called still
+                # gets it immediately either way -- ttl only changes what
+                # happens in the offline case. 12h covers a full trading
+                # day (this fires at 07:00, well before market open).
+                ttl=12 * 3600)
         except WebPushException as e:
             status = getattr(e.response, "status_code", None)
             if status in (404, 410):
