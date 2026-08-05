@@ -2638,12 +2638,42 @@ def page_live_rebalance():
                   "it finishes, so you can't execute against this now-stale "
                   "proposal while a fresh one is being computed.")
 
+    def _latest_per_symbol(df: pd.DataFrame) -> pd.DataFrame:
+        """Collapses a day-aggregated sells/buys/top_ups/stop_updates table
+        (see _with_day_item_status -- can have one row per symbol PER RUN
+        today) down to one row per symbol: whichever run's row is most
+        recent. save_rebalance_run() already guarantees at most one
+        'proposed' row per symbol exists at a time (expires every prior
+        proposed row the moment a new scan runs), so this only ever
+        changes what's shown for a symbol whose most recent attempt
+        already resolved (executed/error/expired) -- never hides a
+        genuinely still-open proposal behind a stale one."""
+        if df.empty or "run_time" not in df.columns:
+            return df
+        return (df.sort_values("run_time")
+                 .groupby("symbol", as_index=False).last()
+                 .sort_values("run_time", ascending=False).reset_index(drop=True))
+
+    for _key in ("sells", "buys", "top_ups", "stop_updates"):
+        if _key in result:
+            result[_key] = _latest_per_symbol(result[_key])
+
     def _pending(df: pd.DataFrame) -> pd.DataFrame:
-        """The still-actionable subset of a sells/buys/top_ups/stop_updates
-        table -- these now carry every status (see _with_day_item_status),
-        so counts/badges/what-Execute-acts-on all need this rather than
-        the raw row count."""
+        """The still-actionable (auto-selected) subset of a sells/buys/
+        top_ups/stop_updates table -- these now carry every status (see
+        _with_day_item_status), so counts/badges/what's pre-selected for
+        Execute all need this rather than the raw row count. Only
+        'proposed' rows are pre-selected -- an 'error' row needs an
+        explicit manual pick (see _actionable below), never auto-retried."""
         return df[df["status"] == "proposed"] if "status" in df.columns else df
+
+    def _actionable(df: pd.DataFrame) -> pd.DataFrame:
+        """The full selectable set for a section's multiselect: 'proposed'
+        (normal, pre-selected) PLUS 'error' (opt-in manual retry only --
+        see _pending). 'executed'/'expired' rows are never selectable,
+        there's nothing left to do with them."""
+        return (df[df["status"].isin(["proposed", "error"])]
+               if "status" in df.columns else df)
 
     _real_max_positions = config.STRATEGY["max_positions"]
     _real_target = result.get("target_per_slot") or 0
@@ -2743,13 +2773,26 @@ def page_live_rebalance():
                     badges={"status": {"proposed": "ov-badge-amber", "executed": "ov-badge-green",
                                        "error": "ov-badge-red", "expired": "ov-badge-gray"}}),
                 unsafe_allow_html=True)
-            if not _pending_sells.empty:
+            _sells_actionable = _actionable(result["sells"])
+            if not _sells_actionable.empty:
+                _sells_status = _sells_actionable.set_index("symbol")["status"]
+                selected_sells = st.multiselect(
+                    "Select which to execute — error rows are offered for a "
+                    "manual retry but never auto-selected",
+                    options=_sells_actionable["symbol"].tolist(),
+                    default=_pending_sells["symbol"].tolist(),
+                    format_func=lambda s: f"{s} ({_sells_status.get(s)})",
+                    key="lr_sells_select")
+                st.caption(f"{len(selected_sells)} of {len(_sells_actionable)} selected")
                 confirm_sell = st.checkbox(
-                    "I confirm I want to execute ALL proposed sells at market",
+                    "I confirm I want to execute the SELECTED sells at market",
                     key="confirm_sell_all")
-                if st.button("Execute all sells", disabled=not confirm_sell or rebalance_running,
+                if st.button("Execute selected sells",
+                            disabled=not confirm_sell or not selected_sells or rebalance_running,
                             use_container_width=True, key="lr_execute_sells"):
-                    log, succeeded, failed = lr.execute_sells(_pending_sells)
+                    _to_execute = _sells_actionable[
+                        _sells_actionable["symbol"].isin(selected_sells)]
+                    log, succeeded, failed = lr.execute_sells(_to_execute)
                     st.session_state["sell_exec_log"] = log
                     resolved = succeeded + list(failed)
                     if resolved:
@@ -2813,15 +2856,28 @@ def page_live_rebalance():
                 f'<div class="ov-row"><span class="ov-card-meta">Total amount</span>'
                 f'<span class="ov-sym">₹{_buys_display["amount"].sum():,.0f}</span></div>',
                 unsafe_allow_html=True)
-            if not _pending_buys.empty:
+            _buys_actionable = _actionable(result["buys"])
+            if not _buys_actionable.empty:
+                _buys_status = _buys_actionable.set_index("symbol")["status"]
+                selected_buys = st.multiselect(
+                    "Select which to execute — error rows are offered for a "
+                    "manual retry but never auto-selected",
+                    options=_buys_actionable["symbol"].tolist(),
+                    default=_pending_buys["symbol"].tolist(),
+                    format_func=lambda s: f"{s} ({_buys_status.get(s)})",
+                    key="lr_buys_select")
+                st.caption(f"{len(selected_buys)} of {len(_buys_actionable)} selected")
                 place_gtt = st.checkbox("Also place a GTT stop-loss for each buy",
                                         value=True, key="rebal_gtt")
                 confirm_buy = st.checkbox(
-                    "I confirm I want to execute ALL proposed buys at market",
+                    "I confirm I want to execute the SELECTED buys at market",
                     key="confirm_buy_all")
-                if st.button("Execute all buys", disabled=not confirm_buy or rebalance_running,
+                if st.button("Execute selected buys",
+                            disabled=not confirm_buy or not selected_buys or rebalance_running,
                             use_container_width=True, key="lr_execute_buys"):
-                    log, succeeded, failed = lr.execute_buys(_pending_buys, place_gtt=place_gtt)
+                    _to_execute = _buys_actionable[
+                        _buys_actionable["symbol"].isin(selected_buys)]
+                    log, succeeded, failed = lr.execute_buys(_to_execute, place_gtt=place_gtt)
                     st.session_state["buy_exec_log"] = log
                     resolved = succeeded + list(failed)
                     if resolved:
@@ -2880,13 +2936,26 @@ def page_live_rebalance():
                     f'<div class="ov-row"><span class="ov-card-meta">Total amount</span>'
                     f'<span class="ov-sym">₹{_topups_display["amount"].sum():,.0f}</span></div>',
                     unsafe_allow_html=True)
-                if not _pending_topups.empty:
+                _topups_actionable = _actionable(top_ups)
+                if not _topups_actionable.empty:
+                    _topups_status = _topups_actionable.set_index("symbol")["status"]
+                    selected_topups = st.multiselect(
+                        "Select which to execute — error rows are offered for a "
+                        "manual retry but never auto-selected",
+                        options=_topups_actionable["symbol"].tolist(),
+                        default=_pending_topups["symbol"].tolist(),
+                        format_func=lambda s: f"{s} ({_topups_status.get(s)})",
+                        key="lr_topups_select")
+                    st.caption(f"{len(selected_topups)} of {len(_topups_actionable)} selected")
                     confirm_topup = st.checkbox(
-                        "I confirm I want to execute ALL proposed top-ups at market",
+                        "I confirm I want to execute the SELECTED top-ups at market",
                         key="confirm_topup_all")
-                    if st.button("Execute all top-ups", disabled=not confirm_topup or rebalance_running,
+                    if st.button("Execute selected top-ups",
+                                disabled=not confirm_topup or not selected_topups or rebalance_running,
                                 use_container_width=True, key="lr_execute_topups"):
-                        log, succeeded, failed = lr.execute_top_ups(_pending_topups)
+                        _to_execute = _topups_actionable[
+                            _topups_actionable["symbol"].isin(selected_topups)]
+                        log, succeeded, failed = lr.execute_top_ups(_to_execute)
                         st.session_state["topup_exec_log"] = log
                         resolved = succeeded + list(failed)
                         if resolved:
@@ -2935,16 +3004,29 @@ def page_live_rebalance():
                                "status": {"proposed": "ov-badge-amber", "executed": "ov-badge-green",
                                           "error": "ov-badge-red", "expired": "ov-badge-gray"}}),
                     unsafe_allow_html=True)
-                if not _pending_stops.empty:
+                _stops_actionable = _actionable(stop_updates)
+                if not _stops_actionable.empty:
+                    _stops_status = _stops_actionable.set_index("symbol")["status"]
+                    selected_stops = st.multiselect(
+                        "Select which to apply — error rows are offered for a "
+                        "manual retry but never auto-selected",
+                        options=_stops_actionable["symbol"].tolist(),
+                        default=_pending_stops["symbol"].tolist(),
+                        format_func=lambda s: f"{s} ({_stops_status.get(s)})",
+                        key="lr_stops_select")
+                    st.caption(f"{len(selected_stops)} of {len(_stops_actionable)} selected")
                     confirm_stops = st.checkbox(
-                        "I confirm I want to raise ALL these GTT stop-losses",
+                        "I confirm I want to raise the SELECTED GTT stop-losses",
                         key="confirm_stop_updates")
-                    if st.button("Apply stop updates", disabled=not confirm_stops or rebalance_running,
+                    if st.button("Apply selected stop updates",
+                                disabled=not confirm_stops or not selected_stops or rebalance_running,
                                 use_container_width=True, key="lr_apply_stops"):
+                        _to_apply = _stops_actionable[
+                            _stops_actionable["symbol"].isin(selected_stops)]
                         log = []
                         succeeded = []
                         failed = {}
-                        for _, r in _pending_stops.iterrows():
+                        for _, r in _to_apply.iterrows():
                             if pd.isna(r["gtt_trigger_id"]):
                                 log.append(f"⚠️ {r['symbol']}: no active GTT to update — "
                                           "place one manually first (Trade tab).")
