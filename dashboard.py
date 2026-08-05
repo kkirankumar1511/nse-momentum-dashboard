@@ -417,6 +417,15 @@ _OVERVIEW_CSS = """
    right regardless of the parent's flex-direction. */
 [data-testid="stColumn"]:has(.st-key-lr_run_scan_hdr) { display:flex !important; }
 .st-key-lr_run_scan_hdr { margin-left:auto !important; width:fit-content !important; }
+/* Auto-execute-mode header row: "Auto-execute ON" chip + "Run today's
+   scan" button, side by side (chip on the left) and right-aligned to the
+   page edge together -- same technique as .st-key-screen_run_row. The
+   button used to live on its own separate row below the chip, only ever
+   pushed as far right as its own [5,2] column. */
+.st-key-lr_autoexec_header_row {
+    display:flex !important; flex-direction:row !important;
+    align-items:center !important; justify-content:flex-end !important; gap:12px !important;
+}
 /* Segmented control's real root is [data-testid="stButtonGroup"] (found
    by reading Streamlit's own source -- button_group.py/ButtonGroup.*.js
    -- after several guesses at the wrong element failed). It has exactly
@@ -2570,13 +2579,22 @@ def page_live_rebalance():
             "override for whatever's left (e.g. a manual 'Run today's scan'). "
             "Turn this off in Admin → Strategy configuration to go back to "
             "manual-only.")
-        st.markdown(
-            '<div class="ov-header"><div><span class="ov-h1">📡 Live Rebalance</span> '
-            '<span class="ov-sub">· review, then execute</span></div>'
-            '<div class="ov-chips">'
-            f'<span class="ov-info-icon" title="{_auto_exec_tip}">ℹ️</span>'
-            '<span class="ov-chip ov-chip-amber">'
-            '⚠ Auto-execute ON</span></div></div>', unsafe_allow_html=True)
+        _hdr_l, _hdr_r = st.columns([5, 2])
+        with _hdr_l:
+            st.markdown(
+                '<div class="ov-header" style="margin-bottom:0;">'
+                '<div><span class="ov-h1">📡 Live Rebalance</span> '
+                '<span class="ov-sub">· review, then execute</span></div>'
+                '</div>', unsafe_allow_html=True)
+        with _hdr_r:
+            with st.container(key="lr_autoexec_header_row"):
+                st.markdown(
+                    f'<span class="ov-info-icon" title="{_auto_exec_tip}">ℹ️</span>'
+                    '<span class="ov-chip ov-chip-amber">⚠ Auto-execute ON</span>',
+                    unsafe_allow_html=True)
+                if st.button("Run today's scan", type="primary",
+                            disabled=rebalance_running, key="lr_run_scan_autoexec"):
+                    _run_scan_now()
     else:
         _hdr_l, _hdr_r = st.columns([5, 2])
         with _hdr_l:
@@ -2602,12 +2620,6 @@ def page_live_rebalance():
 
     if rebalance_running:
         st.info(f"⏳ Scan running since {rebalance_job['started_at']:%H:%M:%S} — safe to switch tabs.")
-    if auto_exec:
-        _, _scan_col = st.columns([5, 2])
-        with _scan_col:
-            if st.button("Run today's scan", type="primary",
-                        disabled=rebalance_running, key="lr_run_scan_autoexec"):
-                _run_scan_now()
 
     @st.fragment(run_every="1s" if rebalance_running else None)
     def _rebalance_job_status():
