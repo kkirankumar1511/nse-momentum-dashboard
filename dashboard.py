@@ -2640,7 +2640,7 @@ def page_live_rebalance():
     _rebalance_job_status()
 
     # Everything below this only ever shows the SINGLE latest run -- if a
-    # later manual re-scan superseded an earlier run today (e.g. the
+    # later manual re-scan superseded an earlier run the same day (e.g. the
     # scheduled auto-execute run, then a manual "Run today's scan" that
     # found nothing new), that earlier run's real outcome (what got
     # bought/sold/topped-up) drops out of view entirely down there. Pure
@@ -2648,17 +2648,30 @@ def page_live_rebalance():
     # Rebalance History page) -- no new writes, no change to what any
     # Execute button does. Independent of session_state/current proposal
     # so it still shows even before a scan's been run this session.
-    _today_activity = state_db.get_rebalance_history(
-        since=dt.date.today().isoformat(), limit=200)
-    if not _today_activity.empty:
+    #
+    # Filters to the MOST RECENT day that actually has activity, not a
+    # strict "since midnight today" -- fetched once with no date filter
+    # (most-recent-first, capped at 200 rows) so this keeps showing
+    # yesterday's full picture across a calendar rollover with no new run
+    # yet today, instead of silently going blank the moment the clock
+    # ticks past midnight (confirmed happening: checked this exact gap
+    # live against production the morning after a run).
+    _recent_activity = state_db.get_rebalance_history(limit=200)
+    if not _recent_activity.empty:
+        _latest_day = _recent_activity["run_time"].max()[:10]
+        _today_activity = _recent_activity[
+            _recent_activity["run_time"].str.startswith(_latest_day)]
+        _day_label = ("Today" if _latest_day == dt.date.today().isoformat()
+                      else _latest_day)
         _today_runs = _today_activity["run_id"].nunique()
         with st.expander(
-                f"📅 Today's activity — {len(_today_activity)} item(s) across "
+                f"📅 {_day_label}'s activity — {len(_today_activity)} item(s) across "
                 f"{_today_runs} run(s)", expanded=_today_runs > 1):
             st.caption(
-                "Every sell/buy/top-up/stop-update proposed today, across "
-                "EVERY scan run today (not just the one shown below, which is "
-                "always just the latest) -- see 📜 Rebalance History for older "
+                f"Every sell/buy/top-up/stop-update proposed on {_latest_day} "
+                "(the most recent day with any activity), across EVERY scan "
+                "run that day -- not just the one shown below, which is "
+                "always just the latest. See 📜 Rebalance History for older "
                 "days.")
             st.markdown(
                 _ov_table_html(
