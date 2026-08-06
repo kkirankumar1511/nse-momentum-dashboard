@@ -147,6 +147,17 @@ _STRATEGY_DEFAULTS = {
     "rsi_min": 45,
     "rsi_max": 80,
 
+    # Backtest-only (for now): decouples the RSI ceiling used to decide
+    # whether an ALREADY-HELD position should be sold from the entry-band
+    # check above. See the rsi_max comment just above -- this exact idea
+    # (widen the ceiling for held positions only, so overbought alone
+    # wouldn't trigger a sell) was already A/B tested once and made every
+    # metric worse, hence off by default. Re-exposed here, wired into the
+    # Backtest UI, for re-testing against today's data/universe rather
+    # than trusting that one past result forever.
+    "rsi_exit_gate_enabled": False,
+    "rsi_exit_max": 80,
+
     # Risk management
     "atr_period": 14,
     "atr_stop_multiple": 2.5,          # initial stop = entry - 2.5*ATR

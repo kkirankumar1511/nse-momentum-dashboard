@@ -197,7 +197,8 @@ def capital_position_size(total_equity: float, remaining_cash: float, price: flo
 
 
 def sell_check(sym: str, ranked: pd.DataFrame, candidates: pd.DataFrame,
-              keep_zone: set, max_positions: int) -> str | None:
+              keep_zone: set, max_positions: int,
+              cfg: dict = config.STRATEGY) -> str | None:
     """Returns the reason `sym` should be sold at rebalance, or None to
     keep holding it. Pulled out as one shared function 2026-08-04 --
     backtest.py's daily loop and live_rebalance.py's propose_rebalance()
@@ -214,6 +215,11 @@ def sell_check(sym: str, ranked: pd.DataFrame, candidates: pd.DataFrame,
     candidates: ranked[ranked["all_gates"]] -- gate-passers only, still
     sorted by score descending (score() itself sorts).
     keep_zone: set(candidates.head(max_positions * 2).index).
+    cfg: only consulted for the optional rsi_exit_gate_enabled/
+    rsi_exit_max check below -- every other rule here reads gate columns
+    apply_gates() already baked into `ranked`, not cfg directly. Defaults
+    to config.STRATEGY (live) so existing callers that don't pass cfg see
+    byte-identical behavior (the gate defaults off).
     """
     r = ranked.loc[sym] if sym in ranked.index else None
     if r is None:
@@ -221,6 +227,22 @@ def sell_check(sym: str, ranked: pd.DataFrame, candidates: pd.DataFrame,
     if not bool(r.get("above_ema200", False)):
         return "closed below 200 EMA"
     if sym not in keep_zone:
+        # BACKTEST-ONLY (for now), off by default -- see config.py's
+        # rsi_exit_gate_enabled comment: this was already tried once and
+        # discarded, re-exposed here for re-testing from the Backtest UI.
+        # A held position whose ONLY failing gate is the entry-band RSI
+        # ceiling stays held as long as RSI is still under the separate,
+        # wider rsi_exit_max, instead of being force-sold here just for
+        # running hot. Only fires when sym isn't a candidate at all (i.e.
+        # failed some gate); a candidate merely ranked below the keep
+        # zone still exits normally below, unaffected by this.
+        if cfg.get("rsi_exit_gate_enabled", False) and sym not in candidates.index:
+            non_rsi_gates_ok = bool(
+                r.get("trend_ok", True) and r.get("near_high_ok", True)
+                and r.get("quality_ok", True) and r.get("price_ok", True))
+            if non_rsi_gates_ok and float(r.get("rsi", 0)) <= cfg.get(
+                    "rsi_exit_max", cfg["rsi_max"]):
+                return None
         keep_zone_size = max_positions * 2
         if sym in candidates.index:
             rank = candidates.index.get_loc(sym) + 1

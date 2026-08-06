@@ -238,7 +238,7 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     if is_rebalance_day:
         for sym, row in held.iterrows():
             reason = screener.sell_check(sym, ranked, candidates, keep_zone,
-                                        cfg["max_positions"])
+                                        cfg["max_positions"], cfg)
             if reason:
                 sells.append({"symbol": sym, "qty": int(row["quantity"]),
                              "avg_price": float(row["average_price"]), "reason": reason})

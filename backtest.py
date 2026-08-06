@@ -508,7 +508,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                     if px is None:
                         continue
                     if screener.sell_check(sym, ranked, candidates, keep_zone,
-                                          cfg["max_positions"]):
+                                          cfg["max_positions"], cfg):
                         close_position(sym, float(px), date, "rebalance")
 
                 # Replace the watchlist wholesale -- next rebalance is the

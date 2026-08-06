@@ -3597,7 +3597,14 @@ def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
         progress_cb=lambda s, f: report(s, 0.4 + f * 0.6))
     run_time = dt.datetime.now()
     os.makedirs("cache", exist_ok=True)
-    result = {"result": res, "bench": bench_bt, "run_time": run_time}
+    run_meta = {
+        "range_mode": range_mode, "years": years,
+        "start_date": start_date, "end_date": end_date,
+        "bt_capital": bt_capital, "rebalance_cadence": rebalance_cadence_v,
+        "use_fundamentals": use_fundamentals,
+    }
+    result = {"result": res, "bench": bench_bt, "run_time": run_time,
+              "cfg": run_cfg, "run_meta": run_meta}
     pd.to_pickle(result, BACKTEST_CACHE)
     return result
 
@@ -3643,6 +3650,8 @@ def page_backtest():
         st.session_state["bt_bench"] = _cached_bt["bench"]
         st.session_state["bt_run_time"] = _cached_bt["run_time"]
         st.session_state["bt_is_cached"] = True
+        st.session_state["bt_cfg"] = _cached_bt.get("cfg")
+        st.session_state["bt_run_meta"] = _cached_bt.get("run_meta")
 
     _bt_run_time_hdr = st.session_state.get("bt_run_time")
     if _bt_run_time_hdr is not None:
@@ -3794,6 +3803,25 @@ def page_backtest():
             history_days_v = st.number_input(
                 "Candle history fetched (days)", min_value=300, max_value=3000,
                 value=int(config.STRATEGY["history_days"]), step=100)
+        ti9, ti10 = st.columns([1, 1])
+        with ti9:
+            use_rsi_exit_gate = st.checkbox(
+                "Separate exit RSI ceiling", key="bt_use_rsi_exit_gate",
+                value=bool(config.STRATEGY.get("rsi_exit_gate_enabled", False)),
+                help="OFF by default and NOT the live behavior. When on, a "
+                     "held position whose only failing gate is the entry-band "
+                     "RSI max above stays held (instead of being force-sold) "
+                     "as long as RSI is still under the separate ceiling to "
+                     "the right — lets a hot winner keep running instead of "
+                     "selling the moment it crosses the entry ceiling. Note: "
+                     "this exact idea was already A/B tested once and made "
+                     "every metric worse — re-testing here against current "
+                     "data, not assumed to flip that result.")
+        with ti10:
+            rsi_exit_max_v = st.number_input(
+                "Exit RSI ceiling", min_value=0.0, max_value=100.0,
+                value=float(config.STRATEGY.get("rsi_exit_max", config.STRATEGY["rsi_max"])),
+                step=1.0, format="%.2f", disabled=not use_rsi_exit_gate)
 
         _ov_muted("Scanner param")
         sc1, sc2, sc3 = st.columns(3)
@@ -3916,6 +3944,8 @@ def page_backtest():
         run_cfg["mom_lookback_days_short"] = int(mom_lookback_short_v)
         run_cfg["mom_lookback_days_long"] = int(mom_lookback_long_v)
         run_cfg["skip_recent_days"] = int(skip_recent_days_v)
+        run_cfg["rsi_exit_gate_enabled"] = use_rsi_exit_gate
+        run_cfg["rsi_exit_max"] = float(rsi_exit_max_v)
         run_cfg["near_high_threshold"] = float(near_high_threshold_v) / 100
         run_cfg["ema_fast"] = int(ema_fast_v)
         run_cfg["ema_slow"] = int(ema_slow_v)
@@ -3956,6 +3986,8 @@ def page_backtest():
             st.session_state["bt_bench"] = result["bench"]
             st.session_state["bt_run_time"] = result["run_time"]
             st.session_state["bt_is_cached"] = False
+            st.session_state["bt_cfg"] = result.get("cfg")
+            st.session_state["bt_run_meta"] = result.get("run_meta")
         clear_background_job("backtest_run")
         st.rerun()
 
@@ -3970,6 +4002,54 @@ def page_backtest():
     bench_bt = st.session_state["bt_bench"]
 
     nifty = bench_bt["close"].reindex(eq.index).ffill()
+
+    _bt_cfg = st.session_state.get("bt_cfg")
+    _bt_meta = st.session_state.get("bt_run_meta") or {}
+    with st.expander("⚙️ Parameters used for this run", expanded=False):
+        if not _bt_cfg:
+            st.caption("This result was cached before parameter tracking was "
+                       "added — re-run the backtest to record its config.")
+        else:
+            if _bt_meta.get("range_mode") == "Custom dates":
+                _range_txt = (f"{_bt_meta.get('start_date')} → "
+                              f"{_bt_meta.get('end_date')}")
+            else:
+                _range_txt = f"{_bt_meta.get('years')} years trailing"
+            p1, p2, p3, p4 = st.columns(4)
+            p1.metric("Date range", _range_txt)
+            p2.metric("Starting capital", f"₹{_bt_meta.get('bt_capital', 0):,.0f}")
+            p3.metric("Max positions", _bt_cfg.get("max_positions"))
+            p4.metric("Rebalance cadence", _bt_cfg.get("rebalance_cadence"))
+
+            st.caption("Trade management")
+            t1, t2, t3, t4 = st.columns(4)
+            t1.metric("Initial stop (× ATR)", _bt_cfg.get("atr_stop_multiple"))
+            _trail = "ON" if _bt_cfg.get("trailing_stop_enabled") else "OFF"
+            t2.metric("Trailing stop", f"{_trail} ({_bt_cfg.get('trailing_atr_multiple')}×)")
+            t3.metric("Risk per trade (%)", _bt_cfg.get("risk_per_trade_pct"))
+            t4.metric("History fetched (days)", _bt_cfg.get("history_days"))
+
+            st.caption("Technical indicator")
+            i1, i2, i3, i4 = st.columns(4)
+            i1.metric("RSI range", f"{_bt_cfg.get('rsi_min')}–{_bt_cfg.get('rsi_max')}")
+            i2.metric("EMA fast/slow", f"{_bt_cfg.get('ema_fast')}/{_bt_cfg.get('ema_slow')}")
+            i3.metric("Momentum lookback", f"{_bt_cfg.get('mom_lookback_days_short')}/"
+                     f"{_bt_cfg.get('mom_lookback_days_long')}d")
+            i4.metric("Skip most recent (days)", _bt_cfg.get("skip_recent_days"))
+            _rsi_exit = "ON" if _bt_cfg.get("rsi_exit_gate_enabled") else "OFF"
+            st.metric("Exit RSI ceiling", f"{_rsi_exit} ({_bt_cfg.get('rsi_exit_max')})")
+
+            st.caption("Scanner param")
+            s1, s2, s3, s4 = st.columns(4)
+            _ew = "ON" if _bt_cfg.get("advanced_equal_weight_sizing") else "OFF"
+            s1.metric("Equal-weight allocator", f"{_ew} (tol {_bt_cfg.get('equal_weight_tolerance_pct')})")
+            _fg = "ON" if _bt_cfg.get("fundamental_gate_enabled") else "OFF"
+            s2.metric("Fundamental gate", _fg)
+            s3.metric("Fundamental bonus weight", _bt_cfg.get("fundamental_bonus_weight"))
+            s4.metric("Min fundamental score", _bt_cfg.get("min_fundamental_score"))
+            s5, s6 = st.columns(2)
+            s5.metric("52w-high proximity (%)", f"{_bt_cfg.get('near_high_threshold', 0) * 100:.0f}")
+            s6.metric("Sector bonus weight", _bt_cfg.get("sector_bonus_weight"))
 
     with st.container(border=True, key="ov-card-bt-equity"):
         eq_fig = go.Figure()
