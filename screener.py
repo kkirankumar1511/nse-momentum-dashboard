@@ -234,7 +234,9 @@ def sell_check(sym: str, ranked: pd.DataFrame, candidates: pd.DataFrame,
 def allocate_equal_weight_buys(ranked_syms: list[str], prices: dict[str, float],
                                held: dict[str, tuple[int, float]], cash_pool: float,
                                total_equity: float, max_positions: int,
-                               tolerance_pct: float = 0.10) -> dict:
+                               tolerance_pct: float = 0.10,
+                               stops: dict[str, float] | None = None,
+                               risk_per_trade_pct: float | None = None) -> dict:
     """EXPERIMENTAL, backtest-only for now -- a from-scratch replacement for
     capital_position_size()'s one-symbol-at-a-time sizing, which greedily
     skips an unaffordable top-ranked candidate and substitutes whatever
@@ -266,6 +268,22 @@ def allocate_equal_weight_buys(ranked_syms: list[str], prices: dict[str, float],
     held: {symbol: (qty, current_price)} for currently-held positions --
     only ones also present in ranked_syms are eligible for topping up (a
     held stock that's fallen out of the ranked candidates isn't).
+
+    stops/risk_per_trade_pct: EXPERIMENTAL, both None by default (no-op,
+    byte-identical to current behavior) -- when both are given, additionally
+    caps each NEW buy's dollar risk (qty * (price - stop)) at
+    risk_per_trade_pct% of total_equity, on top of the equal-weight capital
+    target above. Closes a real gap in pure equal-weight sizing: two stocks
+    at the same capital weight can carry very different dollar risk
+    depending on how far each one's ATR-based stop sits from entry -- a
+    volatile stock (wide stop distance) gets a smaller position than
+    equal-weight alone would give it. Never reduces a candidate below 1
+    share -- same "never skip a higher-ranked candidate, minimum
+    indivisible unit instead" philosophy as the "exceeds equal-weight
+    target" branch below. Only applies to NEW buys, not top-ups (the
+    top-up loop has no stop input to check against and no reason string to
+    annotate) -- deliberately scoped down for a first pass rather than
+    reworking that loop too.
 
     Returns {"new_buys": {symbol: (qty, reason_or_None)},
     "top_ups": {symbol: extra_qty}, "stopped_at": symbol_or_None,
@@ -313,6 +331,16 @@ def allocate_equal_weight_buys(ranked_syms: list[str], prices: dict[str, float],
         elif qty * price < min_alloc:
             reason = (f"partial position -- {alloc:,.0f} available (after reserving "
                      f"for other slots) vs {target:,.0f} equal-weight target")
+        if stops is not None and risk_per_trade_pct and qty > 0:
+            stop = stops.get(sym)
+            if stop is not None and stop < price:
+                risk_cap_qty = int((total_equity * risk_per_trade_pct / 100)
+                                   / (price - stop))
+                if 0 < risk_cap_qty < qty:
+                    qty = risk_cap_qty
+                    risk_note = (f"risk-capped at {risk_per_trade_pct:.1f}% of equity "
+                                f"given this stock's stop distance")
+                    reason = f"{reason} -- {risk_note}" if reason else risk_note
         new_buys[sym] = (qty, reason)
         remaining_pool -= qty * price
 

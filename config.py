@@ -153,6 +153,21 @@ _STRATEGY_DEFAULTS = {
     "risk_per_trade_pct": 0.5,         # % of capital risked per position
     "max_positions": 10,
 
+    # EXPERIMENTAL, off by default -- layers a per-trade dollar-risk CAP
+    # on top of allocate_equal_weight_buys()'s equal-weight capital sizing
+    # (live_rebalance.py's actual live sizing when advanced_equal_weight_
+    # sizing is on, which it is by default). Equal weight alone sizes every
+    # position to the same CAPITAL, not the same RISK -- two stocks at the
+    # same ~10% capital weight can carry very different $ risk depending on
+    # how far each one's ATR-based stop sits from entry. When this is True,
+    # a candidate whose (qty * (price - stop)) at the equal-weight target
+    # would exceed risk_per_trade_pct% of total_equity gets sized down to
+    # fit that risk budget instead -- never below 1 share. False reproduces
+    # today's pure equal-weight sizing exactly -- needs an A/B backtest
+    # before flipping on live, same pattern as every other experimental
+    # sizing/scoring knob in this file.
+    "per_trade_risk_cap_enabled": False,
+
     # Trailing stop (chandelier-style): ratchets the stop up to
     # highest_close_since_entry - trailing_atr_multiple*ATR as a position
     # gains, never back down. A real 5-year sweep found this forms an

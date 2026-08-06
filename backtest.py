@@ -528,10 +528,15 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             equity_now = cash + sum(
                 p.qty * (_price_asof(s, date) or 0.0)
                 for s, p in positions.items())
+            stops = {sym: float(watchlist[sym]["suggested_stop"])
+                    for sym in allocator_syms if sym in watchlist}
             alloc = screener.allocate_equal_weight_buys(
                 allocator_syms, prices, held_info, cash_pool=cash,
                 total_equity=equity_now, max_positions=cfg["max_positions"],
-                tolerance_pct=cfg.get("equal_weight_tolerance_pct", 0.10))
+                tolerance_pct=cfg.get("equal_weight_tolerance_pct", 0.10),
+                stops=stops if cfg.get("per_trade_risk_cap_enabled") else None,
+                risk_per_trade_pct=cfg.get("risk_per_trade_pct") if cfg.get(
+                    "per_trade_risk_cap_enabled") else None)
             for sym, (qty, _reason) in alloc["new_buys"].items():
                 if len(positions) >= cfg["max_positions"]:
                     break

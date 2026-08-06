@@ -289,10 +289,14 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
         prices = {sym: float(candidates.loc[sym, "price"]) for sym in allocator_syms}
         held_info = {sym: (int(held.loc[sym, "quantity"]), prices[sym])
                     for sym in held_still_candidates}
+        stops = {sym: float(candidates.loc[sym, "suggested_stop"]) for sym in allocator_syms}
         alloc = screener.allocate_equal_weight_buys(
             allocator_syms, prices, held_info, cash_pool=cash_pool,
             total_equity=total_equity, max_positions=cfg["max_positions"],
-            tolerance_pct=cfg.get("equal_weight_tolerance_pct", 0.20))
+            tolerance_pct=cfg.get("equal_weight_tolerance_pct", 0.20),
+            stops=stops if cfg.get("per_trade_risk_cap_enabled") else None,
+            risk_per_trade_pct=cfg.get("risk_per_trade_pct") if cfg.get(
+                "per_trade_risk_cap_enabled") else None)
 
         for sym, (qty, size_reason) in alloc["new_buys"].items():
             row = candidates.loc[sym]
