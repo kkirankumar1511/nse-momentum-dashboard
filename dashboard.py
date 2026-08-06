@@ -3847,13 +3847,16 @@ def page_backtest():
             min_fundamental_score_v = st.number_input(
                 "Min fundamental score", min_value=0.0, max_value=100.0,
                 value=float(config.STRATEGY["min_fundamental_score"]), step=1.0,
-                disabled=not use_fundamentals,
                 help="NOT independently A/B-tuned -- config.py calls 50 (the "
                      "live default) 'a rough average-or-better bar, tune to "
                      "taste.' Only the gate's on/off status and the bonus "
                      "weight above have documented A/B history; this threshold "
                      "itself has never been swept, so treat any result here as "
-                     "a first look, not a verified finding.")
+                     "a first look, not a verified finding. Stays editable "
+                     "regardless of the gate checkbox above -- unlike the bonus "
+                     "weight, this is just a plain threshold value with no "
+                     "other side effect when the gate is off, so there's no "
+                     "reason to grey it out.")
         with sc5:
             near_high_threshold_v = st.number_input(
                 "52-week-high proximity (%)", min_value=50.0, max_value=100.0,
