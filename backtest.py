@@ -58,8 +58,14 @@ CACHE_DIR = "cache"
 # ---------------------------------------------------------------------------
 
 def load_candles_cached(symbols: list[str], days: int,
-                        end_date: dt.date | None = None) -> tuple[dict, pd.DataFrame]:
+                        end_date: dt.date | None = None,
+                        progress_cb=None) -> tuple[dict, pd.DataFrame]:
     """Fetch from Kite, caching each symbol as CSV (refreshed once per day).
+
+    progress_cb(stage: str, frac: float), if given, is called once per
+    symbol -- lets a caller (e.g. dashboard.py's background-job wrapper)
+    show real progress through this step instead of an indeterminate
+    spinner. Reserves the last 0-5% of frac for the benchmark fetch below.
 
     The cache-hit check only verifies the file was written today — it says
     nothing about whether the cached data's date range actually covers what
@@ -95,7 +101,10 @@ def load_candles_cached(symbols: list[str], days: int,
         return frame
 
     out = {}
-    for sym in symbols:
+    n = len(symbols)
+    for i, sym in enumerate(symbols):
+        if progress_cb:
+            progress_cb(f"Fetching {sym} ({i + 1}/{n})...", (i + 1) / n * 0.95)
         path = os.path.join(CACHE_DIR, f"{sym}.csv")
         df = None
         if os.path.exists(path):
@@ -130,6 +139,8 @@ def load_candles_cached(symbols: list[str], days: int,
         if end_ts is not None and not sym_df.empty:
             sym_df = sym_df[sym_df.index <= end_ts]
         out[sym] = sym_df
+    if progress_cb:
+        progress_cb("Fetching NIFTY benchmark...", 0.97)
     bpath = os.path.join(CACHE_DIR, "_NIFTY.csv")
     bench = None
     cached_bench = None
@@ -161,6 +172,8 @@ def load_candles_cached(symbols: list[str], days: int,
     bench = bench[bench.index >= cutoff]
     if end_ts is not None and not bench.empty:
         bench = bench[bench.index <= end_ts]
+    if progress_cb:
+        progress_cb("Candles loaded", 1.0)
     return out, bench
 
 
@@ -295,7 +308,8 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                  verbose: bool = False,
                  fundamentals_history: dict | None = None,
                  sector_candles: dict | None = None,
-                 sector_membership: dict | None = None) -> dict:
+                 sector_membership: dict | None = None,
+                 progress_cb=None) -> dict:
     """Monthly-rebalanced long-only backtest.
 
     cost_bps defaults to 0 -- Zerodha charges no brokerage on equity
@@ -441,7 +455,15 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         if verbose:
             print(f"{date.date()} TOPUP {sym:8s} +{extra_qty} @ {price:.1f} (new qty {new_qty})")
 
-    for date in dates:
+    n_dates = len(dates)
+    for i, date in enumerate(dates):
+        # Throttled to ~100 updates over the whole run rather than every
+        # single day -- calling into Streamlit's session state from here
+        # on every trading day (thousands of them for a 5yr run) would add
+        # measurable overhead for no visible benefit between updates that
+        # close together anyway.
+        if progress_cb and (i % max(1, n_dates // 100) == 0 or i == n_dates - 1):
+            progress_cb(f"Simulating {date.date()}...", (i + 1) / n_dates)
         # 1) stop checks on today's bar
         for sym in list(positions):
             df = candles[sym]

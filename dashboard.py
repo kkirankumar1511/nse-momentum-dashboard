@@ -3563,7 +3563,49 @@ def page_positions_trade():
 # Page: Backtest
 # ---------------------------------------------------------------------------
 
+def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
+                      run_cfg, bt_capital, rebalance_cadence_v, progress_cb=None):
+    """Runs in a background thread via start_background_job -- everything
+    the old synchronous button handler did (load candles, load fundamentals
+    history, run the backtest, cache the result), just with progress
+    reporting threaded through both slow steps instead of an indeterminate
+    spinner. Candle loading gets 0-40% of the bar, the simulation itself
+    gets the remaining 40-100% -- a rough split, not measured, but close
+    enough that the bar never looks stuck for long."""
+    def report(stage, frac):
+        if progress_cb:
+            progress_cb(stage, frac)
+
+    if range_mode == "Custom dates":
+        days = (dt.date.today() - start_date).days + 400
+        candles_bt, bench_bt = bt.load_candles_cached(
+            config.UNIVERSE, days, end_date=end_date,
+            progress_cb=lambda s, f: report(s, f * 0.4))
+    else:
+        days = int(years * 365) + 400
+        candles_bt, bench_bt = bt.load_candles_cached(
+            config.UNIVERSE, days, progress_cb=lambda s, f: report(s, f * 0.4))
+
+    fundamentals_history = None
+    if use_fundamentals and os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
+        fundamentals_history = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)["history"]
+
+    res = bt.run_backtest(
+        candles_bt, bench_bt, run_cfg, initial_capital=bt_capital,
+        rebalance="D" if rebalance_cadence_v == "daily" else "MS",
+        fundamentals_history=fundamentals_history,
+        progress_cb=lambda s, f: report(s, 0.4 + f * 0.6))
+    run_time = dt.datetime.now()
+    os.makedirs("cache", exist_ok=True)
+    result = {"result": res, "bench": bench_bt, "run_time": run_time}
+    pd.to_pickle(result, BACKTEST_CACHE)
+    return result
+
+
 def page_backtest():
+    backtest_job = get_background_job("backtest_run")
+    backtest_running = backtest_job is not None and not backtest_job["done"]
+
     _backtest_tip = html_lib.escape(
         "Replays the exact screener logic point-in-time with monthly "
         "rebalancing (any slot freed by a stop gets redeployed immediately, "
@@ -3589,9 +3631,11 @@ def page_backtest():
     with _bt_hdr_r:
         _bt_hdr_r1, _bt_hdr_r2 = st.columns(2)
         _build_fh_clicked = _bt_hdr_r1.button(
-            "Build/Refresh fundamentals history", key="bt_build_fh_hdr")
+            "Build/Refresh fundamentals history", key="bt_build_fh_hdr",
+            disabled=backtest_running)
         _run_backtest_clicked = _bt_hdr_r2.button(
-            "Run backtest", type="primary", key="bt_run_hdr")
+            "Run backtest", type="primary", key="bt_run_hdr",
+            disabled=backtest_running)
 
     if "bt_result" not in st.session_state and os.path.exists(BACKTEST_CACHE):
         _cached_bt = pd.read_pickle(BACKTEST_CACHE)
@@ -3847,17 +3891,6 @@ def page_backtest():
         st.error("Start date must be before end date.")
 
     if _run_backtest_clicked and not run_disabled:
-        with st.spinner("Loading candles (cached daily, first run is slow)..."):
-            if range_mode == "Custom dates":
-                days = (dt.date.today() - start_date).days + 400
-                candles_bt, bench_bt = bt.load_candles_cached(
-                    config.UNIVERSE, days, end_date=end_date)
-            else:
-                days = int(years * 365) + 400
-                candles_bt, bench_bt = bt.load_candles_cached(config.UNIVERSE, days)
-        fundamentals_history = None
-        if use_fundamentals and os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
-            fundamentals_history = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)["history"]
         # Always built fresh from the live config + every control above, so
         # the backtest that actually runs can never silently diverge from
         # what's shown on screen (previously run_cfg stayed None -- falling
@@ -3888,19 +3921,42 @@ def page_backtest():
         run_cfg["sector_bonus_weight"] = float(sector_bonus_weight_v)
         run_cfg["history_days"] = int(history_days_v)
         run_cfg["rebalance_cadence"] = rebalance_cadence_v
-        with st.spinner("Simulating..."):
-            res = bt.run_backtest(candles_bt, bench_bt, run_cfg,
-                                  initial_capital=bt_capital,
-                                  rebalance="D" if rebalance_cadence_v == "daily" else "MS",
-                                  fundamentals_history=fundamentals_history)
-            run_time = dt.datetime.now()
-            st.session_state["bt_result"] = res
-            st.session_state["bt_bench"] = bench_bt
-            st.session_state["bt_run_time"] = run_time
+        start_background_job(
+            "backtest_run", _run_backtest_job,
+            range_mode, years, start_date, end_date, use_fundamentals,
+            run_cfg, bt_capital, rebalance_cadence_v,
+            job_type="backtest_run",
+            summarize_fn=lambda r: (
+                f"CAGR {r['result']['metrics'].get('CAGR %', '?')}%, "
+                f"Sharpe {r['result']['metrics'].get('Sharpe', '?')}"))
+        st.rerun()
+
+    if backtest_running:
+        st.info(f"⏳ Backtest running since {backtest_job['started_at']:%H:%M:%S} "
+                "— safe to switch tabs or close the browser, it keeps running "
+                "server-side; come back to this page any time to see progress.")
+
+    @st.fragment(run_every="1s" if backtest_running else None)
+    def _backtest_job_status():
+        job = get_background_job("backtest_run")
+        if job is None:
+            return
+        if not job["done"]:
+            frac, stage = job["progress"]
+            st.progress(frac, text=f"{stage} — started {job['started_at']:%H:%M:%S}")
+            return
+        if job["error"]:
+            st.error(f"Backtest failed: {job['error']}")
+        else:
+            result = job["result"]
+            st.session_state["bt_result"] = result["result"]
+            st.session_state["bt_bench"] = result["bench"]
+            st.session_state["bt_run_time"] = result["run_time"]
             st.session_state["bt_is_cached"] = False
-            os.makedirs("cache", exist_ok=True)
-            pd.to_pickle({"result": res, "bench": bench_bt, "run_time": run_time},
-                        BACKTEST_CACHE)
+        clear_background_job("backtest_run")
+        st.rerun()
+
+    _backtest_job_status()
 
     if "bt_result" not in st.session_state:
         st.info("Click **Run backtest** to simulate on real Kite data.")
@@ -4312,13 +4368,14 @@ def page_fundamentals():
 # Page: Job Log
 # ---------------------------------------------------------------------------
 
-JOB_TYPES = ["rebalance_scan", "gap_check", "fundamentals_refresh", "screen_run"]
+JOB_TYPES = ["rebalance_scan", "gap_check", "fundamentals_refresh", "screen_run",
+            "backtest_run"]
 
 # Mirrors deploy/vps/systemd/*.timer's OnCalendar schedules -- kept in sync
 # by hand, not read from systemd itself (this dashboard process has no
 # visibility into the VPS's timer state). weekdays: 0=Mon..6=Sun.
-# screen_run has no entry -- it's the Screener page's manual "Run screen"
-# button only, never scheduled.
+# screen_run/backtest_run have no entry -- both are manual-only buttons
+# (Screener's "Run screen", Backtest's "Run backtest"), never scheduled.
 _JOB_SCHEDULES = {
     "rebalance_scan": ([0, 1, 2, 3, 4], 14, 45),
     "gap_check": ([0, 1, 2, 3, 4], 9, 16),
