@@ -144,8 +144,41 @@ def relative_strength(close: pd.Series, bench_close: pd.Series,
     return stock_ret - bench_ret
 
 
+def precompute_daily_series(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """Precomputes every date-indexed daily EWM series compute_snapshot
+    needs (ema_fast, ema_slow, ema50_rising, macd_bullish, atr, rsi) ONCE
+    over the full `df`, for a caller (backtest.run_backtest) to look up
+    by date instead of recomputing from scratch inside a growing
+    df.loc[:date] slice on every single rebalance day -- profiled as the
+    dominant cost of a daily-cadence backtest (~87% of total runtime).
+
+    Safe because every one of these is a CAUSAL ewm(adjust=False): the
+    value at position i depends only on rows [0..i], never anything
+    after, so precomputing over the whole series and looking a date up
+    afterward is mathematically identical to recomputing over
+    series.iloc[:i+1] each time -- a byte-identical optimization, not an
+    approximation. Deliberately excludes the weekly/monthly resampled
+    indicators: those are NOT safe to precompute this way (the
+    "currently forming" week/month bucket would silently pull in future
+    days if resampled from the full series once) -- they stay computed
+    per-call in compute_snapshot, gated off by default."""
+    close = df["close"]
+    ema_f = ema(close, cfg["ema_fast"])
+    ema_s = ema(close, cfg["ema_slow"])
+    _, _, hist = macd(close)
+    return pd.DataFrame({
+        "ema_fast": ema_f,
+        "ema_slow": ema_s,
+        "ema50_rising": ema_f > ema_f.shift(5),
+        "macd_bullish": hist > 0,
+        "atr": atr(df, cfg["atr_period"]),
+        "rsi": rsi(close, cfg["rsi_period"]),
+    }, index=df.index)
+
+
 def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
-                     long_close: pd.Series | None = None) -> dict:
+                     long_close: pd.Series | None = None,
+                     precomputed_row: pd.Series | None = None) -> dict:
     """All technical metrics for one symbol from its daily candles.
 
     long_close: optional, deep (many-year) daily close history for the
@@ -157,16 +190,37 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
     (default, and always the case for live callers today) falls back to
     `close` (this run's own window), same as before this param existed --
     those two indicators will then likely read NaN (fail-closed) unless
-    `df` itself happens to be that deep."""
+    `df` itself happens to be that deep.
+
+    precomputed_row: optional, one row (as of the date this snapshot
+    represents) from precompute_daily_series() -- from
+    backtest.run_backtest() via screener.build_technical_table(). None
+    (default, and always the case for live callers today) recomputes
+    ema/atr/rsi/macd from `df` directly, exactly as before this param
+    existed -- correct either way, this only changes how fast."""
     if df.empty or len(df) < cfg["ema_slow"]:
         return {}
 
     close, volume = df["close"], df["volume"]
-    ema_f = ema(close, cfg["ema_fast"])
-    ema_s = ema(close, cfg["ema_slow"])
-    macd_line, signal_line, hist = macd(close)
-    atr_now = float(atr(df, cfg["atr_period"]).iloc[-1])
     price = float(close.iloc[-1])
+
+    if precomputed_row is not None:
+        ema_fast_v = float(precomputed_row["ema_fast"])
+        ema_slow_v = float(precomputed_row["ema_slow"])
+        ema50_rising_v = bool(precomputed_row["ema50_rising"])
+        macd_bullish_v = bool(precomputed_row["macd_bullish"])
+        atr_now = float(precomputed_row["atr"])
+        rsi_now = float(precomputed_row["rsi"])
+    else:
+        ema_f = ema(close, cfg["ema_fast"])
+        ema_s = ema(close, cfg["ema_slow"])
+        _, _, hist = macd(close)
+        ema_fast_v = float(ema_f.iloc[-1])
+        ema_slow_v = float(ema_s.iloc[-1])
+        ema50_rising_v = float(ema_f.iloc[-1]) > float(ema_f.iloc[-6])
+        macd_bullish_v = float(hist.iloc[-1]) > 0
+        atr_now = float(atr(df, cfg["atr_period"]).iloc[-1])
+        rsi_now = float(rsi(close, cfg["rsi_period"]).iloc[-1])
 
     # Profiled: these 4 resample-based indicators alone were ~45% of a
     # real backtest's total runtime, computed unconditionally on every
@@ -194,15 +248,15 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
         "rs_6m": relative_strength(close, bench["close"],
                                    cfg["mom_lookback_days_long"]),
         "pct_52w_high": pct_of_52w_high(close),
-        "rsi": float(rsi(close, cfg["rsi_period"]).iloc[-1]),
+        "rsi": rsi_now,
         "weekly_rsi": weekly_rsi_val,
         "monthly_rsi": monthly_rsi_val,
         "weekly_above_ema": weekly_trend_ok,
         "monthly_above_ema": monthly_trend_ok,
-        "above_ema50": price > float(ema_f.iloc[-1]),
-        "above_ema200": price > float(ema_s.iloc[-1]),
-        "ema50_rising": float(ema_f.iloc[-1]) > float(ema_f.iloc[-6]),
-        "macd_bullish": float(hist.iloc[-1]) > 0,
+        "above_ema50": price > ema_fast_v,
+        "above_ema200": price > ema_slow_v,
+        "ema50_rising": ema50_rising_v,
+        "macd_bullish": macd_bullish_v,
         "vol_expansion": volume_expansion(volume),
         "avg_volume_3m": float(volume.tail(cfg["mom_lookback_days_short"]).mean()),
         "atr": atr_now,

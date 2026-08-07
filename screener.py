@@ -35,18 +35,29 @@ def _zscore(s: pd.Series) -> pd.Series:
 
 def build_technical_table(candles: dict[str, pd.DataFrame],
                           bench: pd.DataFrame,
-                          long_candles: dict[str, pd.DataFrame] | None = None) -> pd.DataFrame:
+                          long_candles: dict[str, pd.DataFrame] | None = None,
+                          precomputed: dict[str, pd.Series] | None = None) -> pd.DataFrame:
     """long_candles: optional, from backtest.load_long_history_cached() --
     deep per-symbol history for indicators.compute_snapshot's weekly/
     monthly confirmation-gate lookbacks. None (default, and always the
     case for live callers today) means those fall back to `candles`
-    itself, same as before this existed."""
+    itself, same as before this existed.
+
+    precomputed: optional, one row per symbol (as of the date this call
+    represents) from backtest.run_backtest()'s precomputed daily-EWM
+    series -- from indicators.precompute_daily_series() via
+    rank_universe_asof(). None (default, and always the case for live
+    callers today) falls back to indicators.compute_snapshot()
+    recomputing ema/atr/rsi/macd from `df` directly, exactly as before
+    this param existed -- correct either way, this only changes speed."""
     cfg = config.STRATEGY
     rows = {}
     for sym, df in candles.items():
         long_df = long_candles.get(sym) if long_candles else None
         long_close = long_df["close"] if long_df is not None and not long_df.empty else None
-        snap = indicators.compute_snapshot(df, bench, cfg, long_close=long_close)
+        precomputed_row = precomputed.get(sym) if precomputed else None
+        snap = indicators.compute_snapshot(df, bench, cfg, long_close=long_close,
+                                          precomputed_row=precomputed_row)
         if snap:
             rows[sym] = snap
     return pd.DataFrame(rows).T

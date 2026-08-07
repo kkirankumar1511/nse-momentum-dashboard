@@ -347,7 +347,8 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
                        score_cache: dict | None = None,
                        sector_candles: dict | None = None,
                        sector_membership: dict | None = None,
-                       long_candles: dict | None = None) -> pd.DataFrame:
+                       long_candles: dict | None = None,
+                       precomputed: dict | None = None) -> pd.DataFrame:
     """Point-in-time ranking: identical pipeline to the live screener, fed
     only data up to `date`. Fundamental gate is off by default (fundamentals_
     history=None reproduces that exactly); pass a fundamentals_history dict
@@ -365,7 +366,15 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
     gate's 200-bar EMA lookbacks, independent of however short `candles`
     is for this particular run. None (default) means weekly/monthly
     indicators fall back to whatever's in `candles` itself (see
-    indicators.compute_snapshot), same as before this existed."""
+    indicators.compute_snapshot), same as before this existed.
+
+    precomputed: optional, {symbol: DataFrame} from run_backtest()'s
+    one-time indicators.precompute_daily_series() call -- avoids
+    recomputing ema/atr/rsi/macd from scratch inside `sliced` on every
+    single call to this function (i.e. every rebalance day). None
+    (default, and always the case for live callers today) means
+    compute_snapshot recomputes them directly, exactly as before this
+    param existed -- correct either way, this only changes speed."""
     sliced = {s: df.loc[:date] for s, df in candles.items()
               if not df.empty and date in df.index}
     bench_slice = bench.loc[:date]
@@ -373,7 +382,12 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
     if long_candles is not None:
         long_sliced = {s: df.loc[:date] for s, df in long_candles.items()
                        if not df.empty}
-    tech = screener.build_technical_table(sliced, bench_slice, long_candles=long_sliced)
+    precomputed_rows = None
+    if precomputed is not None:
+        precomputed_rows = {s: precomputed[s].loc[date] for s in sliced
+                            if s in precomputed and date in precomputed[s].index}
+    tech = screener.build_technical_table(sliced, bench_slice, long_candles=long_sliced,
+                                          precomputed=precomputed_rows)
     if tech.empty:
         return tech
     fundamentals = None
@@ -471,6 +485,21 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     # process (Streamlit reruns, multiple CLI invocations) never share stale
     # state -- see fundamentals_agent.score_asof for the memoization key.
     score_cache: dict = {}
+
+    # One-time, O(symbols x history) precompute of the causal daily EWM
+    # indicators (ema/atr/rsi/macd) -- see indicators.precompute_daily_
+    # series's docstring for why this is safe (not an approximation).
+    # Replaces recomputing them from scratch inside a growing
+    # df.loc[:date] slice on every single rebalance day below, which
+    # profiled as ~87% of a daily-cadence backtest's total runtime.
+    n_syms = len(candles)
+    precomputed: dict = {}
+    for i, (sym, df) in enumerate(candles.items()):
+        if progress_cb and (i % max(1, n_syms // 20) == 0 or i == n_syms - 1):
+            progress_cb(f"Precomputing indicators ({i + 1}/{n_syms})...",
+                       (i + 1) / n_syms * 0.1)
+        if not df.empty and len(df) >= cfg["ema_slow"]:
+            precomputed[sym] = indicators.precompute_daily_series(df, cfg)
 
     dates = bench.index.sort_values()
     dates = dates[warmup_days:]
@@ -576,7 +605,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         # measurable overhead for no visible benefit between updates that
         # close together anyway.
         if progress_cb and (i % max(1, n_dates // 100) == 0 or i == n_dates - 1):
-            progress_cb(f"Simulating {date.date()}...", (i + 1) / n_dates)
+            progress_cb(f"Simulating {date.date()}...", 0.1 + (i + 1) / n_dates * 0.9)
         # 1) stop checks on today's bar
         for sym in list(positions):
             df = candles[sym]
@@ -612,7 +641,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             ranked = rank_universe_asof(candles, bench, date, cfg,
                                        fundamentals_history, score_cache,
                                        sector_candles, sector_membership,
-                                       long_candles)
+                                       long_candles, precomputed)
             if not ranked.empty:
                 candidates = ranked[ranked["all_gates"]]
                 keep_zone = set(candidates.head(cfg["max_positions"] * 2).index)
