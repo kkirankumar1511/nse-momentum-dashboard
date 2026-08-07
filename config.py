@@ -160,10 +160,12 @@ _STRATEGY_DEFAULTS = {
 
     # Backtest-only (for now): extra higher-timeframe confirmation gate --
     # weekly AND monthly RSI (same period as rsi_period above) must both
-    # be above their own floor for a stock to qualify. Off by default,
+    # be above their own floor, AND weekly/monthly price must each be
+    # above their own 200-period EMA (falls back to a 50-period EMA when
+    # there isn't enough resampled history for 200 yet). Off by default,
     # untested -- add to the Backtest UI first and A/B before considering
     # for live.
-    "weekly_monthly_rsi_gate_enabled": False,
+    "weekly_monthly_gate_enabled": False,
     "weekly_rsi_min": 60,
     "monthly_rsi_min": 60,
 

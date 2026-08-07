@@ -43,6 +43,36 @@ def monthly_rsi(close: pd.Series, period: int = 14) -> float:
     return float(rsi(monthly, period).iloc[-1])
 
 
+def _higher_tf_trend_ok(resampled_close: pd.Series, period_primary: int = 200,
+                        period_fallback: int = 50) -> float:
+    """True if the latest (possibly still-forming) bar closed above its own
+    EMA(period_primary); falls back to EMA(period_fallback) when there
+    isn't enough resampled history for the primary period yet (e.g. early
+    in a backtest -- a stock with 3 years of daily data has ~150-160
+    weekly bars, short of 200). NaN (not even the fallback period's worth
+    of history) rather than a default True/False -- same fail-closed
+    convention as weekly_rsi/monthly_rsi above."""
+    if len(resampled_close) >= period_primary:
+        period = period_primary
+    elif len(resampled_close) >= period_fallback:
+        period = period_fallback
+    else:
+        return np.nan
+    return bool(resampled_close.iloc[-1] > ema(resampled_close, period).iloc[-1])
+
+
+def weekly_above_ema(close: pd.Series, period_primary: int = 200,
+                     period_fallback: int = 50) -> float:
+    weekly = close.resample("W-FRI").last().dropna()
+    return _higher_tf_trend_ok(weekly, period_primary, period_fallback)
+
+
+def monthly_above_ema(close: pd.Series, period_primary: int = 200,
+                      period_fallback: int = 50) -> float:
+    monthly = close.resample("ME").last().dropna()
+    return _higher_tf_trend_ok(monthly, period_primary, period_fallback)
+
+
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high, low, close = df["high"], df["low"], df["close"]
     prev_close = close.shift(1)
@@ -119,6 +149,8 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict) -> dict:
         "rsi": float(rsi(close, cfg["rsi_period"]).iloc[-1]),
         "weekly_rsi": weekly_rsi(close, cfg["rsi_period"]),
         "monthly_rsi": monthly_rsi(close, cfg["rsi_period"]),
+        "weekly_above_ema": weekly_above_ema(close),
+        "monthly_above_ema": monthly_above_ema(close),
         "above_ema50": price > float(ema_f.iloc[-1]),
         "above_ema200": price > float(ema_s.iloc[-1]),
         "ema50_rising": float(ema_f.iloc[-1]) > float(ema_f.iloc[-6]),

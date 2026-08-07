@@ -200,7 +200,7 @@ def build_pdf(res: dict, bench: pd.DataFrame, cfg: dict, run_meta: dict,
     story.append(Spacer(1, 6))
     story.append(Paragraph("Technical indicator", ss["Meta"]))
     rsi_exit = "ON" if cfg.get("rsi_exit_gate_enabled") else "OFF"
-    wm_rsi = "ON" if cfg.get("weekly_monthly_rsi_gate_enabled") else "OFF"
+    wm_rsi = "ON" if cfg.get("weekly_monthly_gate_enabled") else "OFF"
     story.append(_kv_table([
         ("RSI range", f"{cfg.get('rsi_min')}-{cfg.get('rsi_max')}"),
         ("EMA fast/slow", f"{cfg.get('ema_fast')}/{cfg.get('ema_slow')}"),
@@ -208,8 +208,9 @@ def build_pdf(res: dict, bench: pd.DataFrame, cfg: dict, run_meta: dict,
         f"{cfg.get('mom_lookback_days_short')}/{cfg.get('mom_lookback_days_long')}d"),
         ("Skip most recent (days)", str(cfg.get("skip_recent_days"))),
         ("Exit RSI ceiling", f"{rsi_exit} ({cfg.get('rsi_exit_max')})"),
-        ("Weekly/monthly RSI gate",
-        f"{wm_rsi} (W>={cfg.get('weekly_rsi_min')}, M>={cfg.get('monthly_rsi_min')})"),
+        ("Weekly/monthly confirmation gate",
+        f"{wm_rsi} (RSI W>={cfg.get('weekly_rsi_min')}/M>={cfg.get('monthly_rsi_min')}, "
+        f"+price>200EMA)"),
     ]))
     story.append(Spacer(1, 6))
     story.append(Paragraph("Scanner param", ss["Meta"]))
