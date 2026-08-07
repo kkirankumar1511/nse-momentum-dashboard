@@ -73,6 +73,27 @@ def monthly_above_ema(close: pd.Series, period_primary: int = 200,
     return _higher_tf_trend_ok(monthly, period_primary, period_fallback)
 
 
+def weekly_snapshot(close: pd.Series, rsi_period: int = 14,
+                    ema_primary: int = 200, ema_fallback: int = 50) -> tuple[float, float]:
+    """RSI + above-EMA trend in one pass off a single weekly resample --
+    compute_snapshot's hot path used to call weekly_rsi() and
+    weekly_above_ema() separately, each resampling `close` to weekly on
+    its own (profiled: resample() dominates each function's cost, so
+    that was ~2x the resampling work needed). Returns (rsi, trend_ok),
+    each independently NaN per its own insufficient-history rule."""
+    weekly = close.resample("W-FRI").last().dropna()
+    rsi_val = float(rsi(weekly, rsi_period).iloc[-1]) if len(weekly) >= rsi_period + 1 else np.nan
+    return rsi_val, _higher_tf_trend_ok(weekly, ema_primary, ema_fallback)
+
+
+def monthly_snapshot(close: pd.Series, rsi_period: int = 14,
+                     ema_primary: int = 200, ema_fallback: int = 50) -> tuple[float, float]:
+    """Same as weekly_snapshot() but off a single monthly resample."""
+    monthly = close.resample("ME").last().dropna()
+    rsi_val = float(rsi(monthly, rsi_period).iloc[-1]) if len(monthly) >= rsi_period + 1 else np.nan
+    return rsi_val, _higher_tf_trend_ok(monthly, ema_primary, ema_fallback)
+
+
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high, low, close = df["high"], df["low"], df["close"]
     prev_close = close.shift(1)
@@ -141,12 +162,26 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
         return {}
 
     close, volume = df["close"], df["volume"]
-    wk_close = long_close if long_close is not None else close
     ema_f = ema(close, cfg["ema_fast"])
     ema_s = ema(close, cfg["ema_slow"])
     macd_line, signal_line, hist = macd(close)
     atr_now = float(atr(df, cfg["atr_period"]).iloc[-1])
     price = float(close.iloc[-1])
+
+    # Profiled: these 4 resample-based indicators alone were ~45% of a
+    # real backtest's total runtime, computed unconditionally on every
+    # symbol on every rebalance day even when weekly_monthly_gate_enabled
+    # is off (the default) -- pure waste for any run not using that gate.
+    # weekly_snapshot/monthly_snapshot also halve the resample cost when
+    # it IS on, by sharing one resample per timeframe instead of the
+    # naive 2 (rsi + above_ema each resampling independently).
+    if cfg.get("weekly_monthly_gate_enabled", False):
+        wk_close = long_close if long_close is not None else close
+        weekly_rsi_val, weekly_trend_ok = weekly_snapshot(wk_close, cfg["rsi_period"])
+        monthly_rsi_val, monthly_trend_ok = monthly_snapshot(wk_close, cfg["rsi_period"])
+    else:
+        weekly_rsi_val = monthly_rsi_val = np.nan
+        weekly_trend_ok = monthly_trend_ok = np.nan
 
     return {
         "price": price,
@@ -160,10 +195,10 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
                                    cfg["mom_lookback_days_long"]),
         "pct_52w_high": pct_of_52w_high(close),
         "rsi": float(rsi(close, cfg["rsi_period"]).iloc[-1]),
-        "weekly_rsi": weekly_rsi(wk_close, cfg["rsi_period"]),
-        "monthly_rsi": monthly_rsi(wk_close, cfg["rsi_period"]),
-        "weekly_above_ema": weekly_above_ema(wk_close),
-        "monthly_above_ema": monthly_above_ema(wk_close),
+        "weekly_rsi": weekly_rsi_val,
+        "monthly_rsi": monthly_rsi_val,
+        "weekly_above_ema": weekly_trend_ok,
+        "monthly_above_ema": monthly_trend_ok,
         "above_ema50": price > float(ema_f.iloc[-1]),
         "above_ema200": price > float(ema_s.iloc[-1]),
         "ema50_rising": float(ema_f.iloc[-1]) > float(ema_f.iloc[-6]),
