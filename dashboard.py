@@ -35,6 +35,7 @@ import streamlit as st
 from kiteconnect.exceptions import TokenException
 
 import backtest as bt
+import backtest_report
 import config
 import fundamentals_agent as fa
 import indicators
@@ -4078,6 +4079,25 @@ def page_backtest():
             s5, s6 = st.columns(2)
             s5.metric("52w-high proximity (%)", f"{_bt_cfg.get('near_high_threshold', 0) * 100:.0f}")
             s6.metric("Sector bonus weight", _bt_cfg.get("sector_bonus_weight"))
+
+    with st.container(border=True, key="ov-card-bt-pdf"):
+        pdf_col1, pdf_col2 = st.columns([3, 2])
+        with pdf_col1:
+            st.markdown("**📄 PDF report** — config used, summary metrics, "
+                       "equity/drawdown charts, year-by-year table, and the "
+                       "full trade list for this result, all in one file.")
+        with pdf_col2:
+            if st.button("Generate PDF report", key="bt_gen_pdf", width="stretch"):
+                with st.spinner("Building PDF..."):
+                    st.session_state["bt_pdf_bytes"] = backtest_report.build_pdf(
+                        res, bench_bt, _bt_cfg or {}, _bt_meta or {}, _bt_run_time_hdr)
+                    st.session_state["bt_pdf_run_time"] = _bt_run_time_hdr
+            if (st.session_state.get("bt_pdf_run_time") == _bt_run_time_hdr
+                    and "bt_pdf_bytes" in st.session_state):
+                st.download_button(
+                    "⬇️ Download PDF", st.session_state["bt_pdf_bytes"],
+                    f"backtest_report_{_bt_run_time_hdr:%Y%m%d_%H%M}.pdf",
+                    mime="application/pdf", key="bt_dl_pdf", width="stretch")
 
     with st.container(border=True, key="ov-card-bt-equity"):
         eq_fig = go.Figure()
