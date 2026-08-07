@@ -3582,10 +3582,17 @@ def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
         candles_bt, bench_bt = bt.load_candles_cached(
             config.UNIVERSE, days, end_date=end_date,
             progress_cb=lambda s, f: report(s, f * 0.4))
+        sim_start_date = start_date
     else:
         days = int(years * 365) + 400
         candles_bt, bench_bt = bt.load_candles_cached(
             config.UNIVERSE, days, progress_cb=lambda s, f: report(s, f * 0.4))
+        # Same reasoning as the Custom-dates branch's sim_start_date: the
+        # warmup-days skip alone only approximately lands `years` back
+        # from today (it depends on exactly how much candle history was
+        # fetched), so without this a "5 years" run could actually
+        # simulate/trade a bit outside that window.
+        sim_start_date = dt.date.today() - dt.timedelta(days=int(years * 365))
 
     fundamentals_history = None
     if use_fundamentals and os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
@@ -3619,7 +3626,7 @@ def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
         rebalance="D" if rebalance_cadence_v == "daily" else "MS",
         fundamentals_history=fundamentals_history,
         sector_candles=sector_candles, sector_membership=sector_membership,
-        long_candles=long_candles,
+        long_candles=long_candles, start_date=sim_start_date,
         progress_cb=lambda s, f: report(s, 0.4 + f * 0.6))
     run_time = dt.datetime.now()
     os.makedirs("cache", exist_ok=True)

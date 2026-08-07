@@ -401,8 +401,18 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                  sector_candles: dict | None = None,
                  sector_membership: dict | None = None,
                  long_candles: dict | None = None,
+                 start_date: dt.date | None = None,
                  progress_cb=None) -> dict:
     """Monthly-rebalanced long-only backtest.
+
+    start_date: clamps the actual simulated/traded date range to >= this
+    date, on top of (not instead of) the warmup_days skip below -- the
+    warmup skip alone only approximately lands near a caller's intended
+    start (it depends on exactly how much candle history was fetched),
+    so a caller asking for e.g. "2025-01-01 to 2025-06-30" could
+    otherwise see real trades dated weeks before 2025-01-01. None
+    (default) reproduces the original behavior exactly -- warmup_days
+    alone decides where the simulation starts, as before this existed.
 
     cost_bps defaults to 0 -- Zerodha charges no brokerage on equity
     delivery (CNC). Statutory costs (STT, stamp duty, exchange/SEBI
@@ -464,6 +474,8 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
 
     dates = bench.index.sort_values()
     dates = dates[warmup_days:]
+    if start_date is not None:
+        dates = dates[dates >= pd.Timestamp(start_date)]
     if rebalance == "D":
         rb_dates = set(dates)
     else:
@@ -825,6 +837,7 @@ def main():
     args = ap.parse_args()
 
     cfg = dict(config.STRATEGY)
+    sim_start_date = None
 
     if args.synthetic:
         candles, bench = make_synthetic_universe()
@@ -834,13 +847,16 @@ def main():
               if args.end_date else dt.date.today())
         days = (dt.date.today() - start).days + 400  # extra for indicator warmup
         candles, bench = load_candles_cached(config.UNIVERSE, days, end_date=end)
+        sim_start_date = start
     else:
         days = int(args.years * 365) + 400  # extra for indicator warmup
         candles, bench = load_candles_cached(config.UNIVERSE, days)
+        sim_start_date = dt.date.today() - dt.timedelta(days=int(args.years * 365))
 
     res = run_backtest(candles, bench, cfg,
                        initial_capital=args.capital,
-                       cost_bps=args.cost_bps, verbose=args.verbose)
+                       cost_bps=args.cost_bps, verbose=args.verbose,
+                       start_date=sim_start_date)
 
     print("\n=== Metrics ===")
     for k, v in res["metrics"].items():
