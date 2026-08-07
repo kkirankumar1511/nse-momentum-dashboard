@@ -23,6 +23,26 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
+def weekly_rsi(close: pd.Series, period: int = 14) -> float:
+    """RSI(period) on weekly closes (W-FRI anchored, trading-week end) --
+    the last (possibly still-forming) week's value, the same 'currently
+    developing candle updates daily' convention charting platforms use
+    for weekly/monthly indicators. NaN until there's at least period+1
+    weekly closes of history."""
+    weekly = close.resample("W-FRI").last().dropna()
+    if len(weekly) < period + 1:
+        return np.nan
+    return float(rsi(weekly, period).iloc[-1])
+
+
+def monthly_rsi(close: pd.Series, period: int = 14) -> float:
+    """Same as weekly_rsi() but resampled to calendar month-end closes."""
+    monthly = close.resample("ME").last().dropna()
+    if len(monthly) < period + 1:
+        return np.nan
+    return float(rsi(monthly, period).iloc[-1])
+
+
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high, low, close = df["high"], df["low"], df["close"]
     prev_close = close.shift(1)
@@ -97,6 +117,8 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict) -> dict:
                                    cfg["mom_lookback_days_long"]),
         "pct_52w_high": pct_of_52w_high(close),
         "rsi": float(rsi(close, cfg["rsi_period"]).iloc[-1]),
+        "weekly_rsi": weekly_rsi(close, cfg["rsi_period"]),
+        "monthly_rsi": monthly_rsi(close, cfg["rsi_period"]),
         "above_ema50": price > float(ema_f.iloc[-1]),
         "above_ema200": price > float(ema_s.iloc[-1]),
         "ema50_rising": float(ema_f.iloc[-1]) > float(ema_f.iloc[-6]),

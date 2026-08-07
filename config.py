@@ -158,6 +158,15 @@ _STRATEGY_DEFAULTS = {
     "rsi_exit_gate_enabled": False,
     "rsi_exit_max": 80,
 
+    # Backtest-only (for now): extra higher-timeframe confirmation gate --
+    # weekly AND monthly RSI (same period as rsi_period above) must both
+    # be above their own floor for a stock to qualify. Off by default,
+    # untested -- add to the Backtest UI first and A/B before considering
+    # for live.
+    "weekly_monthly_rsi_gate_enabled": False,
+    "weekly_rsi_min": 60,
+    "monthly_rsi_min": 60,
+
     # Risk management
     "atr_period": 14,
     "atr_stop_multiple": 2.5,          # initial stop = entry - 2.5*ATR

@@ -3822,6 +3822,28 @@ def page_backtest():
                 "Exit RSI ceiling", min_value=0.0, max_value=100.0,
                 value=float(config.STRATEGY.get("rsi_exit_max", config.STRATEGY["rsi_max"])),
                 step=1.0, format="%.2f", disabled=not use_rsi_exit_gate)
+        ti11, ti12, ti13 = st.columns([1, 1, 1])
+        with ti11:
+            use_wm_rsi_gate = st.checkbox(
+                "Weekly/monthly RSI gate", key="bt_use_wm_rsi_gate",
+                value=bool(config.STRATEGY.get("weekly_monthly_rsi_gate_enabled", False)),
+                help="OFF by default and NOT the live behavior. Extra entry "
+                     "gate on top of the daily RSI band above: requires the "
+                     "stock's weekly AND monthly RSI (same period as the "
+                     "daily one) to both be above their own floor -- higher-"
+                     "timeframe confirmation that the trend isn't just a "
+                     "short-term daily blip. Untested — verify from here "
+                     "before considering for live.")
+        with ti12:
+            weekly_rsi_min_v = st.number_input(
+                "Weekly RSI min", min_value=0.0, max_value=100.0,
+                value=float(config.STRATEGY.get("weekly_rsi_min", 60.0)),
+                step=1.0, format="%.2f", disabled=not use_wm_rsi_gate)
+        with ti13:
+            monthly_rsi_min_v = st.number_input(
+                "Monthly RSI min", min_value=0.0, max_value=100.0,
+                value=float(config.STRATEGY.get("monthly_rsi_min", 60.0)),
+                step=1.0, format="%.2f", disabled=not use_wm_rsi_gate)
 
         _ov_muted("Scanner param")
         sc1, sc2, sc3 = st.columns(3)
@@ -3946,6 +3968,9 @@ def page_backtest():
         run_cfg["skip_recent_days"] = int(skip_recent_days_v)
         run_cfg["rsi_exit_gate_enabled"] = use_rsi_exit_gate
         run_cfg["rsi_exit_max"] = float(rsi_exit_max_v)
+        run_cfg["weekly_monthly_rsi_gate_enabled"] = use_wm_rsi_gate
+        run_cfg["weekly_rsi_min"] = float(weekly_rsi_min_v)
+        run_cfg["monthly_rsi_min"] = float(monthly_rsi_min_v)
         run_cfg["near_high_threshold"] = float(near_high_threshold_v) / 100
         run_cfg["ema_fast"] = int(ema_fast_v)
         run_cfg["ema_slow"] = int(ema_slow_v)
@@ -4038,6 +4063,9 @@ def page_backtest():
             i4.metric("Skip most recent (days)", _bt_cfg.get("skip_recent_days"))
             _rsi_exit = "ON" if _bt_cfg.get("rsi_exit_gate_enabled") else "OFF"
             st.metric("Exit RSI ceiling", f"{_rsi_exit} ({_bt_cfg.get('rsi_exit_max')})")
+            _wm_rsi = "ON" if _bt_cfg.get("weekly_monthly_rsi_gate_enabled") else "OFF"
+            st.metric("Weekly/monthly RSI gate", f"{_wm_rsi} "
+                     f"(W≥{_bt_cfg.get('weekly_rsi_min')}, M≥{_bt_cfg.get('monthly_rsi_min')})")
 
             st.caption("Scanner param")
             s1, s2, s3, s4 = st.columns(4)
