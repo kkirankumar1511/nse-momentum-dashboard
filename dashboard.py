@@ -3591,10 +3591,22 @@ def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
     if use_fundamentals and os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
         fundamentals_history = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)["history"]
 
+    # Only fetched when the sector bonus is actually on (~21 index candle
+    # fetches, ~15-30s) -- bt.run_backtest() treats both None (the
+    # zero-weight case) as byte-identical to never having this feature at
+    # all, so there's no reason to pay for the fetch when the weight is 0.
+    sector_candles = None
+    sector_membership = None
+    if run_cfg.get("sector_bonus_weight", 0.0) > 0:
+        report("Fetching sector index data...", 0.42)
+        sector_membership = su.get_sector_membership(verbose=False)
+        sector_candles = su.fetch_sector_index_candles(days=days)
+
     res = bt.run_backtest(
         candles_bt, bench_bt, run_cfg, initial_capital=bt_capital,
         rebalance="D" if rebalance_cadence_v == "daily" else "MS",
         fundamentals_history=fundamentals_history,
+        sector_candles=sector_candles, sector_membership=sector_membership,
         progress_cb=lambda s, f: report(s, 0.4 + f * 0.6))
     run_time = dt.datetime.now()
     os.makedirs("cache", exist_ok=True)
