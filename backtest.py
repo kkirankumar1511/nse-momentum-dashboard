@@ -184,6 +184,7 @@ def _stamp(path: str) -> str:
 
 
 def load_long_history_cached(symbols: list[str], min_days: int = 6100,
+                             end_date: dt.date | None = None,
                              progress_cb=None) -> dict[str, pd.DataFrame]:
     """Deep daily history per symbol (~min_days=6100 -> ~16.7 years),
     cached separately from load_candles_cached()'s cache/{SYM}.csv --
@@ -200,14 +201,23 @@ def load_long_history_cached(symbols: list[str], min_days: int = 6100,
     load_candles_cached(); this cache is never trimmed by a run's own
     `days`, so it only grows.
 
-    Once seeded, a stale cache fetches ONLY the days missing since its own
-    last cached date and appends them (not a full min_days re-fetch) --
-    the whole point of a separate cache is to make this cheap on every
-    subsequent day."""
+    end_date: the backtest run's own end date (None -> today, matching
+    "Trailing years" mode which always runs through today). The cache is
+    guaranteed fresh through at least this date -- explicit, not just
+    incidental from always fetching to today -- and a custom `end_date`
+    well in the past skips the fetch entirely once the cache already
+    reaches it, even if real "today" has since moved on further.
+
+    Once seeded (which does fetch through today -- Kite's API has no
+    "as of a past date" fetch, and the extra rows are harmless, just
+    sliced off by the caller's own point-in-time `.loc[:date]`), a stale
+    cache fetches ONLY the days missing up to end_date and appends them
+    (not a full min_days re-fetch) -- the whole point of a separate cache
+    is to make this cheap on every subsequent day."""
     import time
     import kite_client
     os.makedirs(LONG_CACHE_DIR, exist_ok=True)
-    today = dt.date.today()
+    target = end_date or dt.date.today()
     out = {}
     n = len(symbols)
     for i, sym in enumerate(symbols):
@@ -218,11 +228,14 @@ def load_long_history_cached(symbols: list[str], min_days: int = 6100,
         if os.path.exists(path):
             cached = _tz_naive(pd.read_csv(path, index_col=0, parse_dates=True))
         if cached is not None and not cached.empty:
-            gap_days = (today - cached.index.max().date()).days
+            gap_days = (target - cached.index.max().date()).days
             if gap_days <= 0:
                 out[sym] = cached
                 continue
             try:
+                # Kite always fetches through real today regardless of
+                # `days`, so this naturally reaches target (target <=
+                # today always, since a run's end_date can't be future).
                 delta = _tz_naive(kite_client.fetch_daily_candles(sym, gap_days + 5))
                 delta = delta[delta.index > cached.index.max()]
                 combined = cached if delta.empty else pd.concat([cached, delta]).sort_index()

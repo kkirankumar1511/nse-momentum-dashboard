@@ -3611,7 +3611,7 @@ def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
     long_candles = None
     if run_cfg.get("weekly_monthly_gate_enabled", False):
         long_candles = bt.load_long_history_cached(
-            config.UNIVERSE,
+            config.UNIVERSE, end_date=end_date,
             progress_cb=lambda s, f: report(s, 0.44 + f * 0.05))
 
     res = bt.run_backtest(
