@@ -123,12 +123,25 @@ def relative_strength(close: pd.Series, bench_close: pd.Series,
     return stock_ret - bench_ret
 
 
-def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict) -> dict:
-    """All technical metrics for one symbol from its daily candles."""
+def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
+                     long_close: pd.Series | None = None) -> dict:
+    """All technical metrics for one symbol from its daily candles.
+
+    long_close: optional, deep (many-year) daily close history for the
+    same symbol -- from backtest.load_long_history_cached() via
+    screener.build_technical_table(). Used only for the weekly/monthly
+    confirmation gate's RSI/EMA, which need far more history than a
+    single backtest run's own `df` window usually has (a 200-bar monthly
+    EMA needs ~16.7 years; even the 50-bar fallback needs ~4.2). None
+    (default, and always the case for live callers today) falls back to
+    `close` (this run's own window), same as before this param existed --
+    those two indicators will then likely read NaN (fail-closed) unless
+    `df` itself happens to be that deep."""
     if df.empty or len(df) < cfg["ema_slow"]:
         return {}
 
     close, volume = df["close"], df["volume"]
+    wk_close = long_close if long_close is not None else close
     ema_f = ema(close, cfg["ema_fast"])
     ema_s = ema(close, cfg["ema_slow"])
     macd_line, signal_line, hist = macd(close)
@@ -147,10 +160,10 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict) -> dict:
                                    cfg["mom_lookback_days_long"]),
         "pct_52w_high": pct_of_52w_high(close),
         "rsi": float(rsi(close, cfg["rsi_period"]).iloc[-1]),
-        "weekly_rsi": weekly_rsi(close, cfg["rsi_period"]),
-        "monthly_rsi": monthly_rsi(close, cfg["rsi_period"]),
-        "weekly_above_ema": weekly_above_ema(close),
-        "monthly_above_ema": monthly_above_ema(close),
+        "weekly_rsi": weekly_rsi(wk_close, cfg["rsi_period"]),
+        "monthly_rsi": monthly_rsi(wk_close, cfg["rsi_period"]),
+        "weekly_above_ema": weekly_above_ema(wk_close),
+        "monthly_above_ema": monthly_above_ema(wk_close),
         "above_ema50": price > float(ema_f.iloc[-1]),
         "above_ema200": price > float(ema_s.iloc[-1]),
         "ema50_rising": float(ema_f.iloc[-1]) > float(ema_f.iloc[-6]),

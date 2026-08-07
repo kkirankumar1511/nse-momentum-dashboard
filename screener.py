@@ -34,11 +34,19 @@ def _zscore(s: pd.Series) -> pd.Series:
 
 
 def build_technical_table(candles: dict[str, pd.DataFrame],
-                          bench: pd.DataFrame) -> pd.DataFrame:
+                          bench: pd.DataFrame,
+                          long_candles: dict[str, pd.DataFrame] | None = None) -> pd.DataFrame:
+    """long_candles: optional, from backtest.load_long_history_cached() --
+    deep per-symbol history for indicators.compute_snapshot's weekly/
+    monthly confirmation-gate lookbacks. None (default, and always the
+    case for live callers today) means those fall back to `candles`
+    itself, same as before this existed."""
     cfg = config.STRATEGY
     rows = {}
     for sym, df in candles.items():
-        snap = indicators.compute_snapshot(df, bench, cfg)
+        long_df = long_candles.get(sym) if long_candles else None
+        long_close = long_df["close"] if long_df is not None and not long_df.empty else None
+        snap = indicators.compute_snapshot(df, bench, cfg, long_close=long_close)
         if snap:
             rows[sym] = snap
     return pd.DataFrame(rows).T

@@ -3602,11 +3602,24 @@ def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
         sector_membership = su.get_sector_membership(verbose=False)
         sector_candles = su.fetch_sector_index_candles(days=days)
 
+    # Only fetched when the weekly/monthly confirmation gate is on -- its
+    # 200-bar (50-bar fallback) weekly/monthly EMA lookbacks need ~16.7
+    # (~4.2) years of history, far more than this run's own candles_bt
+    # window usually has. Cached separately and incrementally (see
+    # bt.load_long_history_cached's docstring) so this is only slow the
+    # very first time, not on every run.
+    long_candles = None
+    if run_cfg.get("weekly_monthly_gate_enabled", False):
+        long_candles = bt.load_long_history_cached(
+            config.UNIVERSE,
+            progress_cb=lambda s, f: report(s, 0.44 + f * 0.05))
+
     res = bt.run_backtest(
         candles_bt, bench_bt, run_cfg, initial_capital=bt_capital,
         rebalance="D" if rebalance_cadence_v == "daily" else "MS",
         fundamentals_history=fundamentals_history,
         sector_candles=sector_candles, sector_membership=sector_membership,
+        long_candles=long_candles,
         progress_cb=lambda s, f: report(s, 0.4 + f * 0.6))
     run_time = dt.datetime.now()
     os.makedirs("cache", exist_ok=True)
@@ -3863,7 +3876,10 @@ def page_backtest():
         st.caption("Weekly/monthly confirmation gate also requires weekly and "
                   "monthly close above their own 200-EMA (50-EMA fallback if "
                   "not enough history) when checked above — not a separate "
-                  "toggle, always applied together with the RSI floors.")
+                  "toggle, always applied together with the RSI floors. Needs "
+                  "deep (~16-year) history per symbol, fetched and cached "
+                  "separately the first time this is checked (slow, one-time) "
+                  "and updated incrementally after that (fast).")
 
         _ov_muted("Scanner param")
         sc1, sc2, sc3 = st.columns(3)

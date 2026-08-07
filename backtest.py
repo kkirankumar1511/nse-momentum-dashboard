@@ -51,6 +51,19 @@ import screener
 import sector_universe
 
 CACHE_DIR = "cache"
+LONG_CACHE_DIR = os.path.join(CACHE_DIR, "long")
+
+
+def _tz_naive(frame: pd.DataFrame) -> pd.DataFrame:
+    """Kite's timestamps are tz-aware (IST); everything this module compares
+    them against (cutoff dates, other cached frames) is tz-naive, so every
+    fetch path needs this same normalization -- shared here rather than
+    reimplemented per-function (load_candles_cached and
+    load_long_history_cached both need it)."""
+    if not frame.empty and frame.index.tz is not None:
+        frame = frame.copy()
+        frame.index = frame.index.tz_localize(None)
+    return frame
 
 
 # ---------------------------------------------------------------------------
@@ -87,18 +100,7 @@ def load_candles_cached(symbols: list[str], days: int,
     today = dt.date.today().isoformat()
     cutoff = pd.Timestamp(dt.date.today() - dt.timedelta(days=days))
     end_ts = pd.Timestamp(end_date) if end_date else None
-
-    def _naive(frame: pd.DataFrame) -> pd.DataFrame:
-        # Kite's timestamps are tz-aware (IST); cutoff above is naive.
-        # Comparing tz-aware vs tz-naive raises TypeError, and which side
-        # ends up tz-aware depends on whether a row came from a fresh Kite
-        # fetch or a re-parsed CSV — normalizing to naive right after load
-        # sidesteps that mismatch everywhere instead of patching every
-        # comparison site individually.
-        if not frame.empty and frame.index.tz is not None:
-            frame = frame.copy()
-            frame.index = frame.index.tz_localize(None)
-        return frame
+    _naive = _tz_naive
 
     out = {}
     n = len(symbols)
@@ -179,6 +181,70 @@ def load_candles_cached(symbols: list[str], days: int,
 
 def _stamp(path: str) -> str:
     return dt.date.fromtimestamp(os.path.getmtime(path)).isoformat()
+
+
+def load_long_history_cached(symbols: list[str], min_days: int = 6100,
+                             progress_cb=None) -> dict[str, pd.DataFrame]:
+    """Deep daily history per symbol (~min_days=6100 -> ~16.7 years),
+    cached separately from load_candles_cached()'s cache/{SYM}.csv --
+    that cache is sized to whatever a single run's `days` window needs and
+    gets FULLY re-fetched (all `days` worth) the moment it's a day stale,
+    which is fine for a normal few-year backtest window but far too slow
+    to do daily for 200+ symbols at 16-year depth.
+
+    Only for the weekly/monthly confirmation gate (screener.apply_gates'
+    weekly_monthly_gate_enabled), which needs deep history for its 200-bar
+    weekly/monthly EMA lookbacks independent of whatever date range a
+    given backtest run asked for -- see indicators._higher_tf_trend_ok.
+    Every other backtest feature keeps using the run-scoped
+    load_candles_cached(); this cache is never trimmed by a run's own
+    `days`, so it only grows.
+
+    Once seeded, a stale cache fetches ONLY the days missing since its own
+    last cached date and appends them (not a full min_days re-fetch) --
+    the whole point of a separate cache is to make this cheap on every
+    subsequent day."""
+    import time
+    import kite_client
+    os.makedirs(LONG_CACHE_DIR, exist_ok=True)
+    today = dt.date.today()
+    out = {}
+    n = len(symbols)
+    for i, sym in enumerate(symbols):
+        if progress_cb:
+            progress_cb(f"Long history {sym} ({i + 1}/{n})...", (i + 1) / n)
+        path = os.path.join(LONG_CACHE_DIR, f"{sym}.csv")
+        cached = None
+        if os.path.exists(path):
+            cached = _tz_naive(pd.read_csv(path, index_col=0, parse_dates=True))
+        if cached is not None and not cached.empty:
+            gap_days = (today - cached.index.max().date()).days
+            if gap_days <= 0:
+                out[sym] = cached
+                continue
+            try:
+                delta = _tz_naive(kite_client.fetch_daily_candles(sym, gap_days + 5))
+                delta = delta[delta.index > cached.index.max()]
+                combined = cached if delta.empty else pd.concat([cached, delta]).sort_index()
+                combined.to_csv(path)
+                out[sym] = combined
+            except Exception as e:
+                print(f"[warn] {sym}: long-history incremental fetch failed "
+                     f"({e}); using stale cache ({gap_days}d behind)")
+                out[sym] = cached
+        else:
+            try:
+                full = _tz_naive(kite_client.fetch_daily_candles(sym, min_days))
+                if not full.empty:
+                    full.to_csv(path)
+                out[sym] = full
+            except Exception as e:
+                print(f"[warn] {sym}: long-history seed fetch failed ({e}); skipping")
+                out[sym] = pd.DataFrame()
+        time.sleep(0.35)
+    if progress_cb:
+        progress_cb("Long history loaded", 1.0)
+    return out
 
 
 def make_synthetic_universe(n_symbols: int = 30, n_days: int = 900,
@@ -267,7 +333,8 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
                        fundamentals_history: dict | None = None,
                        score_cache: dict | None = None,
                        sector_candles: dict | None = None,
-                       sector_membership: dict | None = None) -> pd.DataFrame:
+                       sector_membership: dict | None = None,
+                       long_candles: dict | None = None) -> pd.DataFrame:
     """Point-in-time ranking: identical pipeline to the live screener, fed
     only data up to `date`. Fundamental gate is off by default (fundamentals_
     history=None reproduces that exactly); pass a fundamentals_history dict
@@ -278,11 +345,22 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
     fetch_sector_index_candles()/get_sector_membership() -- both None
     (default) means no "sector_rs" column ever gets attached, so
     screener.score()'s sector-bonus guard never fires (byte-identical to
-    before this feature existed)."""
+    before this feature existed).
+
+    long_candles: optional, from load_long_history_cached() -- deep
+    (~16-year) per-symbol history for the weekly/monthly confirmation
+    gate's 200-bar EMA lookbacks, independent of however short `candles`
+    is for this particular run. None (default) means weekly/monthly
+    indicators fall back to whatever's in `candles` itself (see
+    indicators.compute_snapshot), same as before this existed."""
     sliced = {s: df.loc[:date] for s, df in candles.items()
               if not df.empty and date in df.index}
     bench_slice = bench.loc[:date]
-    tech = screener.build_technical_table(sliced, bench_slice)
+    long_sliced = None
+    if long_candles is not None:
+        long_sliced = {s: df.loc[:date] for s, df in long_candles.items()
+                       if not df.empty}
+    tech = screener.build_technical_table(sliced, bench_slice, long_candles=long_sliced)
     if tech.empty:
         return tech
     fundamentals = None
@@ -309,6 +387,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                  fundamentals_history: dict | None = None,
                  sector_candles: dict | None = None,
                  sector_membership: dict | None = None,
+                 long_candles: dict | None = None,
                  progress_cb=None) -> dict:
     """Monthly-rebalanced long-only backtest.
 
@@ -328,6 +407,15 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     sector relative-strength score bonus (config.STRATEGY["sector_bonus_
     weight"], 0 by default). Both None (default) reproduces the original
     behavior exactly.
+
+    long_candles: optional, from load_long_history_cached() -- deep
+    (~16-year) per-symbol history feeding the weekly/monthly confirmation
+    gate's 200-bar EMA lookbacks (config.STRATEGY["weekly_monthly_gate_
+    enabled"], off by default), independent of however short `candles`
+    is for this run. None (default) reproduces the original behavior --
+    weekly/monthly indicators fall back to whatever's in `candles`, which
+    is often too short for the 200-bar (or even 50-bar) lookback to ever
+    resolve, silently failing that gate closed for the whole run.
 
     trailing stop: config.STRATEGY["trailing_stop_enabled"] (False by
     default) ratchets each position's stop up to highest_close_since_entry
@@ -498,7 +586,8 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         if date in rb_dates:
             ranked = rank_universe_asof(candles, bench, date, cfg,
                                        fundamentals_history, score_cache,
-                                       sector_candles, sector_membership)
+                                       sector_candles, sector_membership,
+                                       long_candles)
             if not ranked.empty:
                 candidates = ranked[ranked["all_gates"]]
                 keep_zone = set(candidates.head(cfg["max_positions"] * 2).index)
