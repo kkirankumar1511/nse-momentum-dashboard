@@ -400,19 +400,32 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
         tech["sector_rs"] = [
             sector_universe.stock_sector_rs(sym, sector_membership, sector_rank)
             for sym in tech.index]
-        # BACKTEST-ONLY (for now), off by default -- top_sector is always
-        # attached whenever sector data is given (cheap, and needed by the
-        # per-sector position cap in run_backtest()'s buy-fill step even
-        # for HELD symbols that may not pass all_gates this month); the
-        # gate itself (restricting entries to the top-N currently
-        # strongest sectors) only fires when explicitly enabled.
+        # BACKTEST-ONLY (for now), off by default -- top_sector/sector_group
+        # are always attached whenever sector data is given (cheap, and
+        # needed by the per-sector position cap in run_backtest()'s
+        # buy-fill step even for HELD symbols that may not pass all_gates
+        # this month); the gate itself (restricting entries to the top-N
+        # currently strongest GROUPS) only fires when explicitly enabled.
+        #
+        # sector_group (not the raw top_sector) is what the gate/cap
+        # actually use -- several tracked indices are overlapping cuts of
+        # the same real industry (e.g. 4 healthcare-flavored ones), so
+        # capping by raw index name still let a real test portfolio end up
+        # 100% one industry (see sector_universe.SECTOR_INDUSTRY_GROUPS).
+        # Grouping the RS ranking itself (not just relabeling each stock's
+        # raw winner) so "top N sectors" means top N GROUPS, each
+        # represented by its own strongest member index.
         tech["top_sector"] = [
             sector_universe.stock_top_sector(sym, sector_membership, sector_rank)
             for sym in tech.index]
+        tech["sector_group"] = tech["top_sector"].apply(
+            lambda s: sector_universe.industry_group(s) if s else s)
         if cfg.get("sector_diversification_enabled", False):
             top_n = cfg.get("top_n_sectors", 3)
-            top_sector_names = set(sector_rank.sort_values(ascending=False).head(top_n).index)
-            tech["sector_diversify_ok"] = tech["top_sector"].isin(top_sector_names)
+            group_rank = sector_rank.groupby(
+                sector_rank.index.to_series().apply(sector_universe.industry_group)).max()
+            top_group_names = set(group_rank.sort_values(ascending=False).head(top_n).index)
+            tech["sector_diversify_ok"] = tech["sector_group"].isin(top_group_names)
     gated = screener.apply_gates(tech, fundamentals=fundamentals, cfg=cfg)
     return screener.score(gated, cfg)
 
@@ -420,29 +433,34 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
 def _apply_sector_cap(ordered_syms: list[str], positions: dict, ranked: pd.DataFrame,
                       cfg: dict) -> list[str]:
     """Filters an already score-sorted list of NEW-entry candidates,
-    dropping any symbol whose top_sector (see rank_universe_asof) is
-    already at cfg['max_positions_per_sector'] -- counting currently held
-    positions plus higher-ranked symbols earlier in this same list as they
-    get greedily reserved, so the cap is enforced across the whole day's
-    fill, not just per-candidate in isolation. Never touches already-HELD
-    positions (a full sector doesn't force an exit, only blocks new
-    entries) -- callers pass held positions separately for top-ups.
-    No-op (returns the input unchanged) when the feature is off or
-    top_sector data isn't available, e.g. no sector data was fetched this
-    run."""
+    dropping any symbol whose sector_group (see rank_universe_asof -- the
+    industry-grouped counterpart to the raw top_sector, e.g. "Healthcare"
+    covers 4 overlapping raw sector indices) is already at
+    cfg['max_positions_per_sector'] -- counting currently held positions
+    plus higher-ranked symbols earlier in this same list as they get
+    greedily reserved, so the cap is enforced across the whole day's fill,
+    not just per-candidate in isolation. Grouping (not the raw index name)
+    is what makes this actually prevent single-industry concentration --
+    capping by raw name alone still let a real test portfolio end up 100%
+    healthcare-themed, since each of the 4 healthcare-flavored indices got
+    its own independent allowance. Never touches already-HELD positions (a
+    full sector doesn't force an exit, only blocks new entries) -- callers
+    pass held positions separately for top-ups. No-op (returns the input
+    unchanged) when the feature is off or sector_group data isn't
+    available, e.g. no sector data was fetched this run."""
     if not cfg.get("sector_diversification_enabled", False) or ranked.empty \
-            or "top_sector" not in ranked.columns:
+            or "sector_group" not in ranked.columns:
         return ordered_syms
     max_per_sector = cfg.get("max_positions_per_sector", 3)
     sector_counts: dict[str, int] = {}
     for sym in positions:
         if sym in ranked.index:
-            sec = ranked.loc[sym, "top_sector"]
+            sec = ranked.loc[sym, "sector_group"]
             if sec:
                 sector_counts[sec] = sector_counts.get(sec, 0) + 1
     kept = []
     for sym in ordered_syms:
-        sec = ranked.loc[sym, "top_sector"] if sym in ranked.index else None
+        sec = ranked.loc[sym, "sector_group"] if sym in ranked.index else None
         if sec and sector_counts.get(sec, 0) >= max_per_sector:
             continue
         kept.append(sym)

@@ -55,6 +55,52 @@ API_SECTOR_NAMES = [
     "NIFTY MS FIN SERV", "NIFTY MS IT TELCM",
 ]
 
+# Groups the ~35 tracked sector index names (API_SECTOR_NAMES + whatever
+# sector_map_manual.json references) by broader real-world industry.
+# Several tracked indices are overlapping cuts of the SAME underlying
+# industry -- confirmed on real data 2026-08-08: NIFTY MIDSML HLTH, NIFTY500
+# HEALTH, NIFTY PHARMA, NIFTY HEALTHCARE were simultaneously 4 of the
+# strongest sectors, and a per-raw-index-name diversification cap still let
+# a test portfolio end up 100% healthcare-themed since each variant got its
+# own independent cap. Capping/gating by industry_group() below instead of
+# the raw index name fixes that. Curated by hand -- this is a
+# classification judgment call, not derivable from the index data itself.
+# Anything not listed here (e.g. NIFTY PSE, which spans banks/energy/
+# industrials, or NIFTY TOTAL MKT, a broad-market cut rather than a real
+# industry) deliberately stays ungrouped -- industry_group()'s fallback to
+# the raw name handles it correctly rather than forcing a bad classification.
+SECTOR_INDUSTRY_GROUPS: dict[str, str] = {
+    "NIFTY BANK": "Financials", "NIFTY FIN SERVICE": "Financials",
+    "NIFTY FINSRV25 50": "Financials", "NIFTY PSU BANK": "Financials",
+    "NIFTY PVT BANK": "Financials", "NIFTY FINSEREXBNK": "Financials",
+    "NIFTY MS FIN SERV": "Financials", "NIFTY CAPITAL MKT": "Financials",
+
+    "NIFTY PHARMA": "Healthcare", "NIFTY HEALTHCARE": "Healthcare",
+    "NIFTY MIDSML HLTH": "Healthcare", "NIFTY500 HEALTH": "Healthcare",
+
+    "NIFTY IT": "Technology", "NIFTY MS IT TELCM": "Technology",
+    "NIFTY IND DIGITAL": "Technology",
+
+    "NIFTY FMCG": "Consumer", "NIFTY CONSR DURBL": "Consumer",
+    "NIFTY CONSUMPTION": "Consumer", "NIFTY RURAL": "Consumer",
+
+    "NIFTY METAL": "Metals", "NIFTY COMMODITIES": "Metals",
+
+    "NIFTY OIL AND GAS": "Energy", "NIFTY ENERGY": "Energy",
+
+    "NIFTY INFRA": "Industrials", "NIFTY INDIA MFG": "Industrials",
+    "NIFTY TRANS LOGIS": "Industrials",
+}
+
+
+def industry_group(sector_name: str) -> str:
+    """Maps a raw tracked sector index name to its broader industry group
+    (SECTOR_INDUSTRY_GROUPS) -- falls back to the raw name itself for
+    anything not in the mapping, so an unclassified or newly-added sector
+    name (e.g. via sector_map_manual.json) never breaks this, it's just
+    ungrouped (its own singleton group) until classified."""
+    return SECTOR_INDUSTRY_GROUPS.get(sector_name, sector_name)
+
 
 def _load_manual_map() -> dict[str, str]:
     if os.path.exists(MANUAL_MAP_PATH):
