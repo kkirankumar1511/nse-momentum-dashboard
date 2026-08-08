@@ -422,8 +422,27 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
             lambda s: sector_universe.industry_group(s) if s else s)
         if cfg.get("sector_diversification_enabled", False):
             top_n = cfg.get("top_n_sectors", 3)
-            group_rank = sector_rank.groupby(
-                sector_rank.index.to_series().apply(sector_universe.industry_group)).max()
+            # BACKTEST-ONLY (for now), off by default -- an alternative to
+            # ranking sectors on raw RS alone. Composite of RS + 52-week-
+            # high proximity + breadth (see sector_universe.
+            # sector_composite_score's docstring for the research behind
+            # each component). Breadth needs each stock's OWN pre-sector
+            # gate status, so this calls apply_gates() once here (before
+            # sector_diversify_ok exists in `tech`, so it's genuinely
+            # "gates other than the sector filter," not circular) purely
+            # to get that -- a second, real apply_gates() call still runs
+            # below with sector_diversify_ok attached for the actual
+            # result.
+            if cfg.get("sector_composite_score_enabled", False):
+                pre_gates = screener.apply_gates(tech, fundamentals=fundamentals, cfg=cfg)
+                breadth = sector_universe.sector_breadth(sector_membership, pre_gates["all_gates"])
+                composite = sector_universe.sector_composite_score(
+                    sector_rank, sector_candles, date, breadth)
+                group_rank = composite.groupby(
+                    composite.index.to_series().apply(sector_universe.industry_group)).max()
+            else:
+                group_rank = sector_rank.groupby(
+                    sector_rank.index.to_series().apply(sector_universe.industry_group)).max()
             top_group_names = set(group_rank.sort_values(ascending=False).head(top_n).index)
             tech["sector_diversify_ok"] = tech["sector_group"].isin(top_group_names)
     gated = screener.apply_gates(tech, fundamentals=fundamentals, cfg=cfg)

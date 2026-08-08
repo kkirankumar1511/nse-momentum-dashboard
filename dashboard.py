@@ -3996,6 +3996,22 @@ def page_backtest():
                 "Max positions / sector", min_value=1, max_value=10,
                 value=int(config.STRATEGY.get("max_positions_per_sector", 3)), step=1,
                 disabled=not use_sector_diversification)
+        use_sector_composite = st.checkbox(
+            "Use composite sector score (RS + 52w-high + breadth) instead of RS alone",
+            key="bt_use_sector_composite",
+            value=bool(config.STRATEGY.get("sector_composite_score_enabled", False)),
+            disabled=not use_sector_diversification,
+            help="Only affects which sectors count as 'top N' above -- OFF "
+                 "ranks sectors on relative strength alone (the original "
+                 "behavior); ON blends in two more signals, each research-"
+                 "backed: the sector index's own 52-week-high proximity "
+                 "(George & Hwang 2004 -- predicts continuation better than "
+                 "past returns alone) and breadth, i.e. what % of the "
+                 "sector's own stocks are themselves passing the technical "
+                 "gates (IBD/O'Neil 'Group Relative Strength' methodology -- "
+                 "a sector whose RS is carried by one or two outliers is a "
+                 "weaker signal than one with broad participation). "
+                 "Untested — A/B against RS-alone from here first.")
 
         st.caption("No per-trade cost is modeled — Zerodha charges no brokerage "
                   "on equity delivery (CNC). Statutory costs (STT, stamp duty, "
@@ -4056,6 +4072,7 @@ def page_backtest():
         run_cfg["sector_diversification_enabled"] = use_sector_diversification
         run_cfg["top_n_sectors"] = int(top_n_sectors_v)
         run_cfg["max_positions_per_sector"] = int(max_positions_per_sector_v)
+        run_cfg["sector_composite_score_enabled"] = use_sector_composite
         run_cfg["history_days"] = int(history_days_v)
         run_cfg["rebalance_cadence"] = rebalance_cadence_v
         start_background_job(
@@ -4159,8 +4176,9 @@ def page_backtest():
             s5.metric("52w-high proximity (%)", f"{_bt_cfg.get('near_high_threshold', 0) * 100:.0f}")
             s6.metric("Sector bonus weight", _bt_cfg.get("sector_bonus_weight"))
             _sd = "ON" if _bt_cfg.get("sector_diversification_enabled") else "OFF"
+            _sc = "composite" if _bt_cfg.get("sector_composite_score_enabled") else "RS-only"
             s7.metric("Sector diversification", f"{_sd} (top {_bt_cfg.get('top_n_sectors')}, "
-                     f"max {_bt_cfg.get('max_positions_per_sector')}/sector)")
+                     f"max {_bt_cfg.get('max_positions_per_sector')}/sector, {_sc})")
 
     with st.container(border=True, key="ov-card-bt-pdf"):
         pdf_col1, pdf_col2 = st.columns([3, 2])

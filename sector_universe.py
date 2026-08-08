@@ -276,6 +276,76 @@ def stock_top_sector(symbol: str, membership: dict[str, list[str]],
     return max(ranked_secs, key=lambda kv: kv[1])[0] if ranked_secs else None
 
 
+def sector_breadth(membership: dict[str, list[str]], gate_status: pd.Series) -> pd.Series:
+    """% of each raw sector index's own tracked members that pass
+    `gate_status` (a bool Series indexed by symbol -- pass the caller's
+    PRE-sector-filter gate result, e.g. apply_gates()'s all_gates computed
+    before sector_diversify_ok is attached, so this doesn't circularly
+    depend on the sector selection it's meant to help make). Practitioner
+    rationale (IBD/O'Neil "Group Relative Strength" methodology): a
+    sector's RS number can be carried by one or two outlier stocks --
+    broad participation is a stronger, more repeatable signal that the
+    NEXT pick from that sector is also likely to work. Sectors with no
+    tracked members in gate_status are omitted."""
+    sector_members: dict[str, list[str]] = {}
+    for sym, secs in membership.items():
+        if sym not in gate_status.index:
+            continue
+        for s in secs:
+            sector_members.setdefault(s, []).append(sym)
+    return pd.Series(
+        {sec: gate_status.loc[members].mean() for sec, members in sector_members.items()},
+        dtype=float)
+
+
+def sector_composite_score(sector_rank: pd.Series, sector_candles: dict[str, pd.DataFrame],
+                           date, breadth: pd.Series, rs_weight: float = 0.5,
+                           high_weight: float = 0.25, breadth_weight: float = 0.25) -> pd.Series:
+    """Composite sector-quality score blending three research-backed
+    signals, each cross-sectionally z-scored across the tracked sector
+    universe before combining (same standardization screener.score()
+    already uses for stock-level factors) -- an alternative to ranking
+    sectors on sector_rank (raw RS) alone:
+
+    - RS (sector_rank): medium-term relative strength vs NIFTY. Moskowitz
+      & Grinblatt (1999) "Do Industries Explain Momentum?" found industry
+      momentum is a primary driver of individual stock momentum, often
+      MORE robust than stock-level momentum directly.
+    - 52-week-high proximity of the sector index itself. George & Hwang
+      (2004) "The 52-Week High and Momentum Investing" found nearness to
+      the 52-week high predicts continuation BETTER than past returns
+      alone (an anchoring/underreaction effect) -- an independent signal
+      RS can miss (e.g. a sector sitting at its high whose 6-month return
+      hasn't caught up yet).
+    - Breadth (see sector_breadth()): practitioner-established (IBD/
+      O'Neil) evidence that broad participation beats a narrow, outlier-
+      driven RS number.
+
+    Returns a Series indexed by raw sector name, NaN-dropped -- a sector
+    missing any one component (e.g. no candle data for 52w-high) is
+    excluded entirely rather than scored on partial data."""
+    pct52 = {}
+    for name, df in sector_candles.items():
+        d = df.loc[:date] if not df.empty else df
+        if not d.empty:
+            v = indicators.pct_of_52w_high(d["close"])
+            if pd.notna(v):
+                pct52[name] = v
+    pct52_s = pd.Series(pct52, dtype=float)
+
+    idx = sector_rank.index
+
+    def z(s: pd.Series) -> pd.Series:
+        s = s.reindex(idx)
+        std = s.std(ddof=0)
+        return (s - s.mean()) / std if std else s * 0
+
+    score = (rs_weight * z(sector_rank)
+            + high_weight * z(pct52_s)
+            + breadth_weight * z(breadth))
+    return score.dropna()
+
+
 if __name__ == "__main__":
     m = get_sector_membership(force_refresh=True)
     print(f"\n{len(sector_names())} sector indices tracked: {sector_names()}")

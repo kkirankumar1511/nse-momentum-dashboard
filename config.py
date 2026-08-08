@@ -250,6 +250,20 @@ _STRATEGY_DEFAULTS = {
     "top_n_sectors": 3,
     "max_positions_per_sector": 3,
 
+    # Alternative to ranking sectors on raw relative-strength alone --
+    # blends RS with the sector index's own 52-week-high proximity and
+    # breadth (% of the sector's own stocks passing the technical gates)
+    # into one composite score. Backed by real literature, see
+    # sector_universe.sector_composite_score()'s docstring: Moskowitz &
+    # Grinblatt (1999) for industry momentum, George & Hwang (2004) for
+    # 52-week-high proximity as an independent predictive signal, IBD/
+    # O'Neil "Group Relative Strength" for breadth. Off by default --
+    # only has any effect when sector_diversification_enabled is also on
+    # (it changes which sectors count as "top N"). Untested -- verify
+    # from the Backtest UI, A/B against the plain-RS version, before
+    # considering for live.
+    "sector_composite_score_enabled": False,
+
     "history_days": 1200,              # calendar days of candles to fetch
 
     # Equal-weight capital allocation (screener.capital_position_size) vs.

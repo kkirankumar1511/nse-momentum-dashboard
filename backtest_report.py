@@ -217,6 +217,7 @@ def build_pdf(res: dict, bench: pd.DataFrame, cfg: dict, run_meta: dict,
     ew = "ON" if cfg.get("advanced_equal_weight_sizing") else "OFF"
     fg = "ON" if cfg.get("fundamental_gate_enabled") else "OFF"
     sd = "ON" if cfg.get("sector_diversification_enabled") else "OFF"
+    sc = "composite" if cfg.get("sector_composite_score_enabled") else "RS-only"
     story.append(_kv_table([
         ("Equal-weight allocator", f"{ew} (tol {cfg.get('equal_weight_tolerance_pct')})"),
         ("Fundamental gate", fg),
@@ -225,7 +226,7 @@ def build_pdf(res: dict, bench: pd.DataFrame, cfg: dict, run_meta: dict,
         ("52w-high proximity (%)", f"{cfg.get('near_high_threshold', 0) * 100:.0f}"),
         ("Sector bonus weight", str(cfg.get("sector_bonus_weight"))),
         ("Sector diversification", f"{sd} (top {cfg.get('top_n_sectors')}, "
-        f"max {cfg.get('max_positions_per_sector')}/sector)"),
+        f"max {cfg.get('max_positions_per_sector')}/sector, {sc})"),
     ]))
 
     # ---- Summary metrics ----
