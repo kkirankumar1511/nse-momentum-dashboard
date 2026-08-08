@@ -176,6 +176,14 @@ def apply_gates(tech: pd.DataFrame,
 
     t["all_gates"] = (t["trend_ok"] & t["near_high_ok"] & t["rsi_ok"]
                       & t["quality_ok"] & t["price_ok"] & t["weekly_monthly_gate_ok"])
+    # BACKTEST-ONLY (for now), off by default -- restricts entries to
+    # stocks whose best sector is currently among the top-N strongest
+    # (cfg["top_n_sectors"]). Only attached by rank_universe_asof() when
+    # both sector data AND sector_diversification_enabled are given, so
+    # this AND is a no-op (column absent) for every other caller,
+    # including live's run_screen() and any run without sector data.
+    if "sector_diversify_ok" in t.columns:
+        t["all_gates"] = t["all_gates"] & t["sector_diversify_ok"]
     return t
 
 

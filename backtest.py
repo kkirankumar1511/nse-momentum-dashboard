@@ -400,8 +400,55 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
         tech["sector_rs"] = [
             sector_universe.stock_sector_rs(sym, sector_membership, sector_rank)
             for sym in tech.index]
+        # BACKTEST-ONLY (for now), off by default -- top_sector is always
+        # attached whenever sector data is given (cheap, and needed by the
+        # per-sector position cap in run_backtest()'s buy-fill step even
+        # for HELD symbols that may not pass all_gates this month); the
+        # gate itself (restricting entries to the top-N currently
+        # strongest sectors) only fires when explicitly enabled.
+        tech["top_sector"] = [
+            sector_universe.stock_top_sector(sym, sector_membership, sector_rank)
+            for sym in tech.index]
+        if cfg.get("sector_diversification_enabled", False):
+            top_n = cfg.get("top_n_sectors", 3)
+            top_sector_names = set(sector_rank.sort_values(ascending=False).head(top_n).index)
+            tech["sector_diversify_ok"] = tech["top_sector"].isin(top_sector_names)
     gated = screener.apply_gates(tech, fundamentals=fundamentals, cfg=cfg)
     return screener.score(gated, cfg)
+
+
+def _apply_sector_cap(ordered_syms: list[str], positions: dict, ranked: pd.DataFrame,
+                      cfg: dict) -> list[str]:
+    """Filters an already score-sorted list of NEW-entry candidates,
+    dropping any symbol whose top_sector (see rank_universe_asof) is
+    already at cfg['max_positions_per_sector'] -- counting currently held
+    positions plus higher-ranked symbols earlier in this same list as they
+    get greedily reserved, so the cap is enforced across the whole day's
+    fill, not just per-candidate in isolation. Never touches already-HELD
+    positions (a full sector doesn't force an exit, only blocks new
+    entries) -- callers pass held positions separately for top-ups.
+    No-op (returns the input unchanged) when the feature is off or
+    top_sector data isn't available, e.g. no sector data was fetched this
+    run."""
+    if not cfg.get("sector_diversification_enabled", False) or ranked.empty \
+            or "top_sector" not in ranked.columns:
+        return ordered_syms
+    max_per_sector = cfg.get("max_positions_per_sector", 3)
+    sector_counts: dict[str, int] = {}
+    for sym in positions:
+        if sym in ranked.index:
+            sec = ranked.loc[sym, "top_sector"]
+            if sec:
+                sector_counts[sec] = sector_counts.get(sec, 0) + 1
+    kept = []
+    for sym in ordered_syms:
+        sec = ranked.loc[sym, "top_sector"] if sym in ranked.index else None
+        if sec and sector_counts.get(sec, 0) >= max_per_sector:
+            continue
+        kept.append(sym)
+        if sec:
+            sector_counts[sec] = sector_counts.get(sec, 0) + 1
+    return kept
 
 
 def run_backtest(candles: dict, bench: pd.DataFrame,
@@ -674,6 +721,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             ordered_syms = [sym for sym, _ in sorted(
                 watchlist.items(), key=lambda kv: kv[1].get("score", 0), reverse=True)
                 if date in candles[sym].index]
+            ordered_syms = _apply_sector_cap(ordered_syms, positions, ranked, cfg)
             # Held positions that are STILL legitimately good candidates
             # this month (not being sold) -- eligible for the allocator's
             # top-up mechanic. Held symbols are never in `watchlist`
@@ -712,6 +760,9 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             # Highest-score candidates get first pick of the limited slots.
             ordered = sorted(watchlist.items(),
                             key=lambda kv: kv[1].get("score", 0), reverse=True)
+            capped_syms = set(_apply_sector_cap(
+                [s for s, _ in ordered], positions, ranked, cfg))
+            ordered = [(s, r) for s, r in ordered if s in capped_syms]
             for sym, row in ordered:
                 if len(positions) >= cfg["max_positions"]:
                     break

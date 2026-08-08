@@ -236,6 +236,20 @@ _STRATEGY_DEFAULTS = {
     "sector_bonus_weight": 0.0,
     "sector_rs_lookback_days": 126,    # matches mom_lookback_days_long
 
+    # Sector diversification (backtest-only for now, off by default): the
+    # sector bonus above is a pure ranking TILT -- it can still leave a
+    # portfolio stacked into one hot sector if that sector's stocks simply
+    # score highest (real example: 8 of 10 top candidates were all Pharma
+    # on one real scan). This is a hard constraint instead -- restricts
+    # entries to stocks whose best-matching sector is currently among the
+    # top_n_sectors strongest, AND caps how many open positions any single
+    # sector can hold at once (max_positions_per_sector), enforced at buy
+    # time in run_backtest()'s allocation step. Untested -- verify from
+    # the Backtest UI before considering for live.
+    "sector_diversification_enabled": False,
+    "top_n_sectors": 3,
+    "max_positions_per_sector": 3,
+
     "history_days": 1200,              # calendar days of candles to fetch
 
     # Equal-weight capital allocation (screener.capital_position_size) vs.

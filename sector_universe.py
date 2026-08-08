@@ -218,6 +218,18 @@ def stock_sector_rs(symbol: str, membership: dict[str, list[str]],
     return max(vals) if vals else None
 
 
+def stock_top_sector(symbol: str, membership: dict[str, list[str]],
+                     sector_rank: pd.Series) -> str | None:
+    """The NAME of the sector basket that produced stock_sector_rs()'s max
+    -- not the value itself. Used by the sector-diversification gate/cap
+    (backtest.py) to check whether a stock's best sector is currently
+    among the top-N overall, and to count per-sector position occupancy.
+    None under the same conditions stock_sector_rs() returns None."""
+    secs = membership.get(symbol, [])
+    ranked_secs = [(s, sector_rank[s]) for s in secs if s in sector_rank.index]
+    return max(ranked_secs, key=lambda kv: kv[1])[0] if ranked_secs else None
+
+
 if __name__ == "__main__":
     m = get_sector_membership(force_refresh=True)
     print(f"\n{len(sector_names())} sector indices tracked: {sector_names()}")
