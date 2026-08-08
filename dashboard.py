@@ -3973,18 +3973,19 @@ def page_backtest():
                 help="OFF by default and NOT the live behavior. Unlike the bonus "
                      "above (a ranking tilt that can still leave a portfolio "
                      "stacked into one hot sector), this is a hard constraint: "
-                     "a stock only qualifies if its best-matching sector is "
-                     "currently among the top N strongest (right), AND no "
-                     "single sector can hold more than the position cap "
-                     "(right) at once -- enforced at buy time, never forces an "
-                     "exit. Caveat confirmed on real data: NSE tracks several "
-                     "overlapping sector indices for the same broad industry "
-                     "(e.g. 4 different healthcare-flavored ones) -- each gets "
-                     "its own independent cap, so this can't fully prevent a "
-                     "portfolio that's mostly one real-world industry if "
-                     "several of the top-N sector names happen to all be that "
-                     "industry, as they are right now. Untested — verify from "
-                     "here before considering for live.")
+                     "a stock only qualifies if its best-matching sector GROUP "
+                     "is currently among the top N strongest (right), AND no "
+                     "single group can hold more than the position cap (right) "
+                     "at once -- enforced at buy time, never forces an exit. "
+                     "Grouped, not raw index names: NSE tracks several "
+                     "overlapping sector indices for the same real industry "
+                     "(e.g. 4 different healthcare-flavored ones) -- capping "
+                     "by raw name alone let a real test portfolio end up 100% "
+                     "one industry since each variant got its own independent "
+                     "allowance, so this groups them first (see "
+                     "sector_universe.SECTOR_INDUSTRY_GROUPS) and caps the "
+                     "group instead. Untested — verify from here before "
+                     "considering for live.")
         with sc8:
             top_n_sectors_v = st.number_input(
                 "Top N sectors", min_value=1, max_value=10,
