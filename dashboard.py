@@ -3598,13 +3598,15 @@ def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
     if use_fundamentals and os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
         fundamentals_history = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)["history"]
 
-    # Only fetched when the sector bonus is actually on (~21 index candle
-    # fetches, ~15-30s) -- bt.run_backtest() treats both None (the
-    # zero-weight case) as byte-identical to never having this feature at
-    # all, so there's no reason to pay for the fetch when the weight is 0.
+    # Only fetched when the sector bonus OR the sector diversification cap
+    # is actually on (~21 index candle fetches, ~15-30s) -- bt.run_backtest()
+    # treats both None (both features off) as byte-identical to never
+    # having sector data at all, so there's no reason to pay for the fetch
+    # otherwise.
     sector_candles = None
     sector_membership = None
-    if run_cfg.get("sector_bonus_weight", 0.0) > 0:
+    if (run_cfg.get("sector_bonus_weight", 0.0) > 0
+            or run_cfg.get("sector_diversification_enabled", False)):
         report("Fetching sector index data...", 0.42)
         sector_membership = su.get_sector_membership(verbose=False)
         sector_candles = su.fetch_sector_index_candles(days=days)
@@ -3963,6 +3965,36 @@ def page_backtest():
                      "allocator specifically: loses on CAGR and Sharpe at every "
                      "weight, and drawdown gets worse too, so there's no "
                      "risk/reward trade-off to make here.")
+        sc7, sc8, sc9 = st.columns([1, 1, 1])
+        with sc7:
+            use_sector_diversification = st.checkbox(
+                "Sector diversification cap", key="bt_use_sector_diversification",
+                value=bool(config.STRATEGY.get("sector_diversification_enabled", False)),
+                help="OFF by default and NOT the live behavior. Unlike the bonus "
+                     "above (a ranking tilt that can still leave a portfolio "
+                     "stacked into one hot sector), this is a hard constraint: "
+                     "a stock only qualifies if its best-matching sector is "
+                     "currently among the top N strongest (right), AND no "
+                     "single sector can hold more than the position cap "
+                     "(right) at once -- enforced at buy time, never forces an "
+                     "exit. Caveat confirmed on real data: NSE tracks several "
+                     "overlapping sector indices for the same broad industry "
+                     "(e.g. 4 different healthcare-flavored ones) -- each gets "
+                     "its own independent cap, so this can't fully prevent a "
+                     "portfolio that's mostly one real-world industry if "
+                     "several of the top-N sector names happen to all be that "
+                     "industry, as they are right now. Untested — verify from "
+                     "here before considering for live.")
+        with sc8:
+            top_n_sectors_v = st.number_input(
+                "Top N sectors", min_value=1, max_value=10,
+                value=int(config.STRATEGY.get("top_n_sectors", 3)), step=1,
+                disabled=not use_sector_diversification)
+        with sc9:
+            max_positions_per_sector_v = st.number_input(
+                "Max positions / sector", min_value=1, max_value=10,
+                value=int(config.STRATEGY.get("max_positions_per_sector", 3)), step=1,
+                disabled=not use_sector_diversification)
 
         st.caption("No per-trade cost is modeled — Zerodha charges no brokerage "
                   "on equity delivery (CNC). Statutory costs (STT, stamp duty, "
@@ -4020,6 +4052,9 @@ def page_backtest():
         run_cfg["atr_stop_multiple"] = float(atr_stop_multiple_v)
         run_cfg["risk_per_trade_pct"] = float(risk_per_trade_pct_v)
         run_cfg["sector_bonus_weight"] = float(sector_bonus_weight_v)
+        run_cfg["sector_diversification_enabled"] = use_sector_diversification
+        run_cfg["top_n_sectors"] = int(top_n_sectors_v)
+        run_cfg["max_positions_per_sector"] = int(max_positions_per_sector_v)
         run_cfg["history_days"] = int(history_days_v)
         run_cfg["rebalance_cadence"] = rebalance_cadence_v
         start_background_job(
@@ -4119,9 +4154,12 @@ def page_backtest():
             s2.metric("Fundamental gate", _fg)
             s3.metric("Fundamental bonus weight", _bt_cfg.get("fundamental_bonus_weight"))
             s4.metric("Min fundamental score", _bt_cfg.get("min_fundamental_score"))
-            s5, s6 = st.columns(2)
+            s5, s6, s7 = st.columns(3)
             s5.metric("52w-high proximity (%)", f"{_bt_cfg.get('near_high_threshold', 0) * 100:.0f}")
             s6.metric("Sector bonus weight", _bt_cfg.get("sector_bonus_weight"))
+            _sd = "ON" if _bt_cfg.get("sector_diversification_enabled") else "OFF"
+            s7.metric("Sector diversification", f"{_sd} (top {_bt_cfg.get('top_n_sectors')}, "
+                     f"max {_bt_cfg.get('max_positions_per_sector')}/sector)")
 
     with st.container(border=True, key="ov-card-bt-pdf"):
         pdf_col1, pdf_col2 = st.columns([3, 2])
