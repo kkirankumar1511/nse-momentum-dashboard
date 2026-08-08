@@ -3857,38 +3857,32 @@ def page_backtest():
                 "Exit RSI ceiling", min_value=0.0, max_value=100.0,
                 value=float(config.STRATEGY.get("rsi_exit_max", config.STRATEGY["rsi_max"])),
                 step=1.0, format="%.2f", disabled=not use_rsi_exit_gate)
-        ti11, ti12, ti13 = st.columns([1, 1, 1])
+        ti11, _ti12 = st.columns([1, 2])
         with ti11:
             use_wm_rsi_gate = st.checkbox(
-                "Weekly/monthly confirmation gate", key="bt_use_wm_rsi_gate",
+                "Weekly/monthly EMA trend gate", key="bt_use_wm_rsi_gate",
                 value=bool(config.STRATEGY.get("weekly_monthly_gate_enabled", False)),
                 help="OFF by default and NOT the live behavior. Extra entry "
-                     "gate on top of the daily RSI band above -- ALL four must "
-                     "hold: weekly RSI and monthly RSI (same period as the "
-                     "daily one) both above their own floor to the right, AND "
-                     "weekly close above its own 200-EMA, AND monthly close "
-                     "above its own 200-EMA (each falls back to a 50-EMA when "
-                     "there isn't enough resampled history for 200 yet). "
-                     "Higher-timeframe confirmation that the trend isn't just "
-                     "a short-term daily blip. Untested — verify from here "
-                     "before considering for live.")
-        with ti12:
-            weekly_rsi_min_v = st.number_input(
-                "Weekly RSI min", min_value=0.0, max_value=100.0,
-                value=float(config.STRATEGY.get("weekly_rsi_min", 60.0)),
-                step=1.0, format="%.2f", disabled=not use_wm_rsi_gate)
-        with ti13:
-            monthly_rsi_min_v = st.number_input(
-                "Monthly RSI min", min_value=0.0, max_value=100.0,
-                value=float(config.STRATEGY.get("monthly_rsi_min", 60.0)),
-                step=1.0, format="%.2f", disabled=not use_wm_rsi_gate)
-        st.caption("Weekly/monthly confirmation gate also requires weekly and "
-                  "monthly close above their own 200-EMA (50-EMA fallback if "
-                  "not enough history) when checked above — not a separate "
-                  "toggle, always applied together with the RSI floors. Needs "
-                  "deep (~16-year) history per symbol, fetched and cached "
-                  "separately the first time this is checked (slow, one-time) "
-                  "and updated incrementally after that (fast).")
+                     "gate on top of the daily checks above: weekly close "
+                     "must be above its own 200-EMA, AND monthly close above "
+                     "its own 200-EMA (each falls back to a 50-EMA when there "
+                     "isn't enough resampled history for 200 yet). Higher-"
+                     "timeframe confirmation that the trend isn't just a "
+                     "short-term daily blip. Simplified to EMA-only (no "
+                     "weekly/monthly RSI requirement) after real-run data "
+                     "showed the RSI leg added excessive rebalance-exit "
+                     "churn -- a held position only needed one of the (then "
+                     "four) stacked conditions to wobble near its threshold "
+                     "to get force-sold. Needs deep (~16-year) history per "
+                     "symbol, fetched and cached separately the first time "
+                     "this is checked (slow, one-time) and updated "
+                     "incrementally after that (fast) -- but the gate itself "
+                     "stays meaningfully slower than everything else on this "
+                     "page even after that, since it re-resamples that deep "
+                     "history from scratch every rebalance day (unlike the "
+                     "daily indicators, this can't be safely precomputed "
+                     "without risking lookahead). Untested — verify from "
+                     "here before considering for live.")
 
         _ov_muted("Scanner param")
         sc1, sc2, sc3 = st.columns(3)
@@ -4061,8 +4055,6 @@ def page_backtest():
         run_cfg["rsi_exit_gate_enabled"] = use_rsi_exit_gate
         run_cfg["rsi_exit_max"] = float(rsi_exit_max_v)
         run_cfg["weekly_monthly_gate_enabled"] = use_wm_rsi_gate
-        run_cfg["weekly_rsi_min"] = float(weekly_rsi_min_v)
-        run_cfg["monthly_rsi_min"] = float(monthly_rsi_min_v)
         run_cfg["near_high_threshold"] = float(near_high_threshold_v) / 100
         run_cfg["ema_fast"] = int(ema_fast_v)
         run_cfg["ema_slow"] = int(ema_slow_v)
@@ -4160,9 +4152,7 @@ def page_backtest():
             _rsi_exit = "ON" if _bt_cfg.get("rsi_exit_gate_enabled") else "OFF"
             st.metric("Exit RSI ceiling", f"{_rsi_exit} ({_bt_cfg.get('rsi_exit_max')})")
             _wm_rsi = "ON" if _bt_cfg.get("weekly_monthly_gate_enabled") else "OFF"
-            st.metric("Weekly/monthly confirmation gate", f"{_wm_rsi} "
-                     f"(RSI W≥{_bt_cfg.get('weekly_rsi_min')}/M≥{_bt_cfg.get('monthly_rsi_min')}"
-                     f", +price>200EMA)")
+            st.metric("Weekly/monthly EMA trend gate", f"{_wm_rsi} (price>200EMA on both)")
 
             st.caption("Scanner param")
             s1, s2, s3, s4 = st.columns(4)

@@ -159,15 +159,15 @@ _STRATEGY_DEFAULTS = {
     "rsi_exit_max": 80,
 
     # Backtest-only (for now): extra higher-timeframe confirmation gate --
-    # weekly AND monthly RSI (same period as rsi_period above) must both
-    # be above their own floor, AND weekly/monthly price must each be
-    # above their own 200-period EMA (falls back to a 50-period EMA when
-    # there isn't enough resampled history for 200 yet). Off by default,
-    # untested -- add to the Backtest UI first and A/B before considering
-    # for live.
+    # weekly AND monthly price must each be above their own 200-period
+    # EMA (falls back to a 50-period EMA when there isn't enough
+    # resampled history for 200 yet). Originally also required weekly/
+    # monthly RSI above a floor, dropped after real-run data showed that
+    # (4 stacked conditions total) caused excessive rebalance-exit churn
+    # -- a held position only needed one condition to wobble near its
+    # threshold to get force-sold. Off by default, untested -- add to
+    # the Backtest UI first and A/B before considering for live.
     "weekly_monthly_gate_enabled": False,
-    "weekly_rsi_min": 60,
-    "monthly_rsi_min": 60,
 
     # Risk management
     "atr_period": 14,

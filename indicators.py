@@ -250,19 +250,25 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
         atr_now = float(atr(df, cfg["atr_period"]).iloc[-1])
         rsi_now = float(rsi(close, cfg["rsi_period"]).iloc[-1])
 
-    # Profiled: these 4 resample-based indicators alone were ~45% of a
-    # real backtest's total runtime, computed unconditionally on every
-    # symbol on every rebalance day even when weekly_monthly_gate_enabled
-    # is off (the default) -- pure waste for any run not using that gate.
-    # weekly_snapshot/monthly_snapshot also halve the resample cost when
-    # it IS on, by sharing one resample per timeframe instead of the
-    # naive 2 (rsi + above_ema each resampling independently).
+    # Profiled: computed unconditionally on every symbol on every
+    # rebalance day even when weekly_monthly_gate_enabled is off (the
+    # default) was ~45% of a real backtest's total runtime -- pure waste
+    # for any run not using this gate. Simplified to EMA-trend only (no
+    # RSI) at the user's request, after real-run data showed the RSI leg
+    # (4 stacked conditions total: weekly/monthly RSI + weekly/monthly
+    # EMA) caused excessive rebalance-exit churn -- a held position only
+    # needed ONE of those 4 to wobble near its threshold to get force-
+    # sold, even with nothing fundamentally wrong. Two conditions instead
+    # of four is a real, meaningful reduction in how often that happens.
+    # Note: this does NOT meaningfully speed the gate up -- the resample()
+    # call, not the rsi() math on top of it, is the expensive part, and
+    # weekly_above_ema/monthly_above_ema still need their own resample.
+    weekly_rsi_val = monthly_rsi_val = np.nan
     if cfg.get("weekly_monthly_gate_enabled", False):
         wk_close = long_close if long_close is not None else close
-        weekly_rsi_val, weekly_trend_ok = weekly_snapshot(wk_close, cfg["rsi_period"])
-        monthly_rsi_val, monthly_trend_ok = monthly_snapshot(wk_close, cfg["rsi_period"])
+        weekly_trend_ok = weekly_above_ema(wk_close)
+        monthly_trend_ok = monthly_above_ema(wk_close)
     else:
-        weekly_rsi_val = monthly_rsi_val = np.nan
         weekly_trend_ok = monthly_trend_ok = np.nan
 
     return {

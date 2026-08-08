@@ -208,9 +208,7 @@ def build_pdf(res: dict, bench: pd.DataFrame, cfg: dict, run_meta: dict,
         f"{cfg.get('mom_lookback_days_short')}/{cfg.get('mom_lookback_days_long')}d"),
         ("Skip most recent (days)", str(cfg.get("skip_recent_days"))),
         ("Exit RSI ceiling", f"{rsi_exit} ({cfg.get('rsi_exit_max')})"),
-        ("Weekly/monthly confirmation gate",
-        f"{wm_rsi} (RSI W>={cfg.get('weekly_rsi_min')}/M>={cfg.get('monthly_rsi_min')}, "
-        f"+price>200EMA)"),
+        ("Weekly/monthly EMA trend gate", f"{wm_rsi} (price>200EMA on both)"),
     ]))
     story.append(Spacer(1, 6))
     story.append(Paragraph("Scanner param", ss["Meta"]))

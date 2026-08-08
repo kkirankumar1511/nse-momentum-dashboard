@@ -119,21 +119,22 @@ def apply_gates(tech: pd.DataFrame,
     t["rsi_ok"] = t["rsi"].between(cfg["rsi_min"], cfg["rsi_max"])
 
     # BACKTEST-ONLY (for now), off by default -- requires the higher-
-    # timeframe trend to also be strong, not just the daily RSI: weekly
-    # AND monthly RSI (same period as the daily one) must both be above
-    # their own floor, AND weekly/monthly price must each be above their
-    # own 200-period EMA (falls back to a 50-period EMA when there isn't
-    # enough resampled history for 200 yet -- see indicators.
-    # _higher_tf_trend_ok). NaN (not enough weekly/monthly history at
-    # all, e.g. early in a backtest) fails this gate rather than passing
-    # it -- deliberately fail-closed, unlike the fundamental gate's
-    # fail-open default, since "can't confirm the higher-timeframe trend"
-    # is a reason to skip a technical entry, not ignore the check.
+    # timeframe trend to also be strong, not just the daily one: weekly
+    # AND monthly price must each be above their own 200-period EMA
+    # (falls back to a 50-period EMA when there isn't enough resampled
+    # history for 200 yet -- see indicators._higher_tf_trend_ok).
+    # Simplified to EMA-only at the user's request -- originally also
+    # required weekly/monthly RSI above a floor (4 conditions total), but
+    # real-run data showed that caused excessive rebalance-exit churn: a
+    # held position only needed ONE of the 4 to wobble near its threshold
+    # to get force-sold. NaN (not enough weekly/monthly history at all,
+    # e.g. early in a backtest) fails this gate rather than passing it --
+    # deliberately fail-closed, unlike the fundamental gate's fail-open
+    # default, since "can't confirm the higher-timeframe trend" is a
+    # reason to skip a technical entry, not ignore the check.
     if cfg.get("weekly_monthly_gate_enabled", False):
         t["weekly_monthly_gate_ok"] = (
-            (t["weekly_rsi"] >= cfg.get("weekly_rsi_min", 60))
-            & (t["monthly_rsi"] >= cfg.get("monthly_rsi_min", 60))
-            & (t["weekly_above_ema"].fillna(False).astype(bool))
+            (t["weekly_above_ema"].fillna(False).astype(bool))
             & (t["monthly_above_ema"].fillna(False).astype(bool)))
     else:
         t["weekly_monthly_gate_ok"] = True
