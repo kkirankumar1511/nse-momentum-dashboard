@@ -12,13 +12,19 @@ used everywhere else in this app. Sector strength is computed with the
 same indicators.relative_strength() formula already used for every stock's
 rs_3m/rs_6m vs NIFTY, just applied to sector indices instead.
 
-Important: NSE's sectoral indices are NOT a clean partition -- a symbol
-can legitimately belong to multiple overlapping baskets (broad umbrella
-indices, cap-segment cuts, and strict sub-sectors all coexist; e.g. SBIN
-sits in NIFTY BANK, NIFTY FIN SERVICE, NIFTY FINSRV25 50, and NIFTY PSU
-BANK simultaneously). stock_sector_rs() resolves this by taking the MAX
-relative strength across every basket a stock belongs to, rather than
-picking one arbitrarily.
+Sector CLASSIFICATION (which index is a stock's "sector") comes from NSE's
+own ground-truth index-constituent data (resolve_sector_profiles()), not a
+heatmap scrape or a hand-curated guess: for each stock, take its
+highest-weightage membership in a real "SECTORAL INDICES"-category index
+(NSE's allIndices endpoint's own category label), falling back to its
+highest-weightage "THEMATIC INDICES" membership only if it has none --
+e.g. WIPRO is a member of both NIFTY IT (sectoral) and NIFTY IND DIGITAL
+(thematic), and resolves to NIFTY IT. A stock still only ever gets ONE
+ground-truth sector this way, unlike NSE's sectoral indices themselves,
+which are NOT a clean partition of the market (e.g. SBIN sits in NIFTY
+BANK, NIFTY FIN SERVICE, NIFTY FINSRV25 50, and NIFTY PSU BANK
+simultaneously -- resolve_sector_profiles() picks the one it's most
+heavily weighted in).
 """
 
 from __future__ import annotations
@@ -26,7 +32,6 @@ from __future__ import annotations
 import json
 import os
 import time
-import urllib.parse
 
 import pandas as pd
 
@@ -34,29 +39,35 @@ import indicators
 import kite_client
 import nse_api
 
-CACHE_PATH = os.path.join("cache", "sector_membership.json")
 CACHE_MAX_AGE_DAYS = 7
-MANUAL_MAP_PATH = "sector_map_manual.json"  # checked into git, not cache/ --
-    # curated reference data, not regenerable from a live API the way
-    # cache/ contents are.
+ALL_INDICES_URL = "https://www.nseindia.com/api/allIndices"
+INDEX_TRACKER_URL = "https://www.nseindia.com/api/NextApi/apiClient/indexTrackerApi"
+INDEX_CATALOG_CACHE_PATH = os.path.join("cache", "nse_index_catalog.json")
+INDEX_CONSTITUENTS_CACHE_PATH = os.path.join("cache", "nse_index_constituents.json")
 
-HEATMAP_SYMBOLS_URL = "https://www.nseindia.com/api/heatmap-symbols"
+# NIFTY BANK / NIFTY FIN SERVICE are real sector indices, but NSE files
+# them under allIndices' "INDICES ELIGIBLE IN DERIVATIVES" key instead of
+# "SECTORAL INDICES" -- added explicitly so they aren't silently dropped.
+_EXTRA_SECTORAL_INDICES = ["NIFTY BANK", "NIFTY FIN SERVICE"]
 
-# The 21 usable names from NSE's live "Sectoral Indices" heatmap category,
-# verified live to have real Kite INDICES-segment instruments (2026-07-19).
-# NIFTY CEMENT / NIFTY REITS REALTY excluded -- confirmed no Kite instrument
-# exists for either, so no historical candles are obtainable for them.
-API_SECTOR_NAMES = [
-    "NIFTY AUTO", "NIFTY BANK", "NIFTY FIN SERVICE", "NIFTY FINSRV25 50",
-    "NIFTY FMCG", "NIFTY IT", "NIFTY MEDIA", "NIFTY METAL", "NIFTY PHARMA",
-    "NIFTY PSU BANK", "NIFTY REALTY", "NIFTY PVT BANK", "NIFTY HEALTHCARE",
-    "NIFTY CONSR DURBL", "NIFTY OIL AND GAS", "NIFTY MIDSML HLTH",
-    "NIFTY CHEMICALS", "NIFTY500 HEALTH", "NIFTY FINSEREXBNK",
-    "NIFTY MS FIN SERV", "NIFTY MS IT TELCM",
-]
+# THEMATIC-category indices that are ownership/liquidity/compliance/
+# recency SCREENS, not real industries -- would otherwise win a stock's
+# sector fallback purely on weightage (e.g. BEL -> "NIFTY CPSE"
+# [government-owned] instead of "NIFTY IND DEFENCE" [its real industry],
+# or SUZLON -> "NIFTY MID LIQ 15" [a liquidity bucket] instead of "NIFTY
+# ENERGY"). Identified by building and hand-inspecting a 208-symbol F&O
+# sector-resolution CSV, 2026-08-08 -- every other THEMATIC index left
+# unexcluded is a genuine sub-industry (NIFTY IND DEFENCE, NIFTY ENERGY,
+# NIFTY INTERNET, NIFTY IND TOURISM, etc).
+_NON_INDUSTRY_THEMES = {
+    "NIFTY MNC", "NIFTY CPSE", "NIFTY PSE", "NIFTY TATA 25 CAP",
+    "NIFTYCONGLOMERATE", "NIFTY100 LIQ 15", "NIFTY MID LIQ 15",
+    "NIFTY CORP MAATR", "NIFTY SHARIAH 25", "NIFTY50 SHARIAH",
+    "NIFTY500 SHARIAH", "NIFTY100 ESG", "NIFTY100 ENH ESG",
+    "NIFTY100ESGSECLDR", "NIFTY IPO", "NIFTY SME EMERGE",
+}
 
-# Groups the ~35 tracked sector index names (API_SECTOR_NAMES + whatever
-# sector_map_manual.json references) by broader real-world industry.
+# Groups tracked sector index names by broader real-world industry.
 # Several tracked indices are overlapping cuts of the SAME underlying
 # industry -- confirmed on real data 2026-08-08: NIFTY MIDSML HLTH, NIFTY500
 # HEALTH, NIFTY PHARMA, NIFTY HEALTHCARE were simultaneously 4 of the
@@ -65,10 +76,9 @@ API_SECTOR_NAMES = [
 # own independent cap. Capping/gating by industry_group() below instead of
 # the raw index name fixes that. Curated by hand -- this is a
 # classification judgment call, not derivable from the index data itself.
-# Anything not listed here (e.g. NIFTY PSE, which spans banks/energy/
-# industrials, or NIFTY TOTAL MKT, a broad-market cut rather than a real
-# industry) deliberately stays ungrouped -- industry_group()'s fallback to
-# the raw name handles it correctly rather than forcing a bad classification.
+# Anything not listed here deliberately stays ungrouped -- industry_group()'s
+# fallback to the raw name handles it correctly rather than forcing a bad
+# classification onto a sector with no obvious near-duplicate sibling.
 SECTOR_INDUSTRY_GROUPS: dict[str, str] = {
     "NIFTY BANK": "Financials", "NIFTY FIN SERVICE": "Financials",
     "NIFTY FINSRV25 50": "Financials", "NIFTY PSU BANK": "Financials",
@@ -79,141 +89,212 @@ SECTOR_INDUSTRY_GROUPS: dict[str, str] = {
     "NIFTY MIDSML HLTH": "Healthcare", "NIFTY500 HEALTH": "Healthcare",
 
     "NIFTY IT": "Technology", "NIFTY MS IT TELCM": "Technology",
-    "NIFTY IND DIGITAL": "Technology",
+    "NIFTY IND DIGITAL": "Technology", "NIFTY INTERNET": "Technology",
 
     "NIFTY FMCG": "Consumer", "NIFTY CONSR DURBL": "Consumer",
     "NIFTY CONSUMPTION": "Consumer", "NIFTY RURAL": "Consumer",
+    "NIFTY IND TOURISM": "Consumer", "NIFTY NONCYC CONS": "Consumer",
+    "NIFTY MS IND CONS": "Consumer",
 
-    "NIFTY METAL": "Metals", "NIFTY COMMODITIES": "Metals",
+    "NIFTY METAL": "Materials", "NIFTY COMMODITIES": "Materials",
+    "NIFTY CHEMICALS": "Materials", "NIFTY CEMENT": "Materials",
 
     "NIFTY OIL AND GAS": "Energy", "NIFTY ENERGY": "Energy",
 
     "NIFTY INFRA": "Industrials", "NIFTY INDIA MFG": "Industrials",
-    "NIFTY TRANS LOGIS": "Industrials",
+    "NIFTY TRANS LOGIS": "Industrials", "NIFTY IND DEFENCE": "Industrials",
+    "NIFTY MULTI MFG": "Industrials", "NIFTY MULTI INFRA": "Industrials",
+    "NIFTY RAILWAYSPSU": "Industrials",
 }
 
 
 def industry_group(sector_name: str) -> str:
     """Maps a raw tracked sector index name to its broader industry group
     (SECTOR_INDUSTRY_GROUPS) -- falls back to the raw name itself for
-    anything not in the mapping, so an unclassified or newly-added sector
-    name (e.g. via sector_map_manual.json) never breaks this, it's just
-    ungrouped (its own singleton group) until classified."""
+    anything not in the mapping, so an unclassified sector name never
+    breaks this, it's just ungrouped (its own singleton group) until
+    classified."""
     return SECTOR_INDUSTRY_GROUPS.get(sector_name, sector_name)
 
 
-def _load_manual_map() -> dict[str, str]:
-    if os.path.exists(MANUAL_MAP_PATH):
-        with open(MANUAL_MAP_PATH) as f:
-            return json.load(f)
-    return {}
+def fetch_index_catalog(force_refresh: bool = False, verbose: bool = True) -> dict[str, str]:
+    """index name -> NSE's own category ('SECTORAL INDICES'/'THEMATIC
+    INDICES'), from NSE's allIndices endpoint -- the authoritative source
+    for which index names are real sector/sub-industry groupings, as
+    opposed to the strategy, broad-market, and fixed-income indices also
+    returned by the same endpoint. This naming convention (indexSymbol)
+    matches indexTrackerApi's own (getConstituents/getAllIndicesSymbols)
+    exactly -- verified live, 2026-08-08 -- unlike GetQuoteApi's indexList
+    field, which uses a different, fuller naming for some indices (e.g.
+    "NIFTY INDIA DEFENCE" there vs "NIFTY IND DEFENCE" here).
 
+    NIFTY BANK / NIFTY FIN SERVICE are added explicitly (see
+    _EXTRA_SECTORAL_INDICES) -- real sector indices, but NSE files them
+    under allIndices' "INDICES ELIGIBLE IN DERIVATIVES" key instead.
 
-def sector_names() -> list[str]:
-    """Union of the API category and whatever the manual file references --
-    updating the manual JSON later (as new listings get classified)
-    automatically pulls in Kite candles for any new sector name it
-    references, with no code change needed here."""
-    manual = _load_manual_map()
-    return sorted(set(API_SECTOR_NAMES) | set(manual.values()))
-
-
-def _fetch_api_membership(verbose: bool) -> dict[str, list[str]]:
-    """Raises if every sector request fails (mirrors fno_universe.py's
-    fetch_fno_symbols_live -- total failure is the caller's problem to
-    fall back on, a handful of individual sector failures is not."""
-    s = nse_api.session()
-    membership: dict[str, list[str]] = {}
-    ok_sectors = 0
-    for sec in API_SECTOR_NAMES:
-        url = f"{HEATMAP_SYMBOLS_URL}?type=Sectoral%20Indices&indices={urllib.parse.quote(sec)}"
-        r = s.get(url, timeout=15)
-        if r.status_code != 200:
-            if verbose:
-                print(f"[sector_universe] {sec}: heatmap-symbols failed "
-                     f"({r.status_code})")
-            continue
-        ok_sectors += 1
-        for row in r.json():
-            sym = row.get("symbol")
-            if sym:
-                membership.setdefault(sym, []).append(sec)
-        time.sleep(0.3)
-    if ok_sectors == 0:
-        raise RuntimeError("all sector heatmap-symbols requests failed")
-    return membership
-
-
-def get_sector_membership(force_refresh: bool = False,
-                          verbose: bool = True) -> dict[str, list[str]]:
-    """symbol -> list of sector index names it belongs to. NOT a single
-    sector -- see module docstring on why this can't be a clean partition.
-
-    Two sources, merged: NSE's live "Sectoral Indices" heatmap category
-    (cached CACHE_MAX_AGE_DAYS, ~148 F&O symbols, some in 2+ sectors), plus
-    sector_map_manual.json (~50 more symbols the API's category doesn't
-    classify -- newer/thematic listings covering PSU, defence, energy,
-    infra, etc). The manual file only ever ADDS symbols the API left
-    uncovered, never overrides an API-derived entry.
-    """
-    age_days = ((time.time() - os.path.getmtime(CACHE_PATH)) / 86400
-               if os.path.exists(CACHE_PATH) else 1e9)
+    Cached CACHE_MAX_AGE_DAYS -- index composition/categorization changes
+    rarely."""
+    age_days = ((time.time() - os.path.getmtime(INDEX_CATALOG_CACHE_PATH)) / 86400
+               if os.path.exists(INDEX_CATALOG_CACHE_PATH) else 1e9)
     if not force_refresh and age_days < CACHE_MAX_AGE_DAYS:
-        with open(CACHE_PATH) as f:
-            api_membership = json.load(f)
-    else:
+        with open(INDEX_CATALOG_CACHE_PATH) as f:
+            return json.load(f)
+
+    s = nse_api.session()
+    r = s.get(ALL_INDICES_URL, timeout=15)
+    r.raise_for_status()
+    catalog = {row["indexSymbol"]: row["key"] for row in r.json()["data"]
+              if row["key"] in ("SECTORAL INDICES", "THEMATIC INDICES")}
+    for name in _EXTRA_SECTORAL_INDICES:
+        catalog[name] = "SECTORAL INDICES"
+
+    os.makedirs(os.path.dirname(INDEX_CATALOG_CACHE_PATH), exist_ok=True)
+    with open(INDEX_CATALOG_CACHE_PATH, "w") as f:
+        json.dump(catalog, f, indent=1)
+    if verbose:
+        n_sectoral = sum(1 for k in catalog.values() if k == "SECTORAL INDICES")
+        print(f"[sector_universe] index catalog: {n_sectoral} sectoral + "
+             f"{len(catalog) - n_sectoral} thematic indices")
+    return catalog
+
+
+def fetch_index_constituents(force_refresh: bool = False, verbose: bool = True) -> dict[str, dict]:
+    """index name -> {symbol: weightage}, via NSE's getConstituents, for
+    every index in fetch_index_catalog(). Real, NSE-published index
+    weights -- the same basis a passive index fund would size positions
+    on -- rather than an equal-weight guess at each stock's importance to
+    its sector.
+
+    Cached CACHE_MAX_AGE_DAYS. On a partial failure, keeps whatever
+    constituents were already cached for indices that fail this round."""
+    catalog = fetch_index_catalog(force_refresh=force_refresh, verbose=verbose)
+    cached: dict[str, dict] = {}
+    if os.path.exists(INDEX_CONSTITUENTS_CACHE_PATH):
+        with open(INDEX_CONSTITUENTS_CACHE_PATH) as f:
+            cached = json.load(f)
+        age_days = (time.time() - os.path.getmtime(INDEX_CONSTITUENTS_CACHE_PATH)) / 86400
+        if not force_refresh and age_days < CACHE_MAX_AGE_DAYS \
+                and all(name in cached for name in catalog):
+            return cached
+
+    s = nse_api.session()
+    constituents = dict(cached)
+    ok = 0
+    for name in catalog:
         try:
-            api_membership = _fetch_api_membership(verbose)
-            os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
-            with open(CACHE_PATH, "w") as f:
-                json.dump(api_membership, f, indent=1)
+            r = s.get(INDEX_TRACKER_URL, params={
+                "functionName": "getConstituents", "index": name,
+                "noofrecords": 0}, timeout=15)
+            rows = r.json().get("data", [])
+            constituents[name] = {row["cmSymbol"]: row.get("weightage")
+                                  for row in rows if row.get("cmSymbol")}
+            ok += 1
         except Exception as e:
             if verbose:
-                print(f"[sector_universe] live fetch failed ({e})")
-            if os.path.exists(CACHE_PATH):
-                with open(CACHE_PATH) as f:
-                    api_membership = json.load(f)
-                if verbose:
-                    print(f"[sector_universe] using stale cache "
-                         f"({age_days:.0f}d old)")
-            else:
-                api_membership = {}
+                print(f"[sector_universe] {name}: constituents fetch failed ({e})")
+        time.sleep(0.3)
 
-    manual = _load_manual_map()
-    membership = {sym: list(secs) for sym, secs in api_membership.items()}
-    manual_added = 0
-    for sym, sec in manual.items():
-        if sym not in membership:
-            membership[sym] = [sec]
-            manual_added += 1
-
+    os.makedirs(os.path.dirname(INDEX_CONSTITUENTS_CACHE_PATH), exist_ok=True)
+    with open(INDEX_CONSTITUENTS_CACHE_PATH, "w") as f:
+        json.dump(constituents, f, indent=1)
     if verbose:
-        overlap = sum(1 for secs in membership.values() if len(secs) > 1)
-        print(f"[sector_universe] membership: {len(api_membership)} via API "
-             f"({overlap} in 2+ sectors), {manual_added} via manual "
-             f"supplement, {len(membership)} total")
+        print(f"[sector_universe] index constituents: {ok}/{len(catalog)} "
+             f"fetched fresh, {len(constituents)} total cached")
+    return constituents
 
-    return membership
+
+def resolve_sector_profiles(symbols: list[str], force_refresh: bool = False,
+                            verbose: bool = True) -> dict[str, dict]:
+    """Each symbol's ground-truth PRIMARY sector: highest-weightage
+    SECTORAL-category membership, falling back to highest-weightage
+    THEMATIC-category membership (excluding _NON_INDUSTRY_THEMES) only if
+    it has no sectoral one. Broader (sectoral) sector first, sub-sector as
+    fallback, weightage breaks ties -- e.g. WIPRO -> NIFTY IT (sectoral,
+    weightage 5.14) over NIFTY IND DIGITAL (thematic, weightage 2.74),
+    even though it's a member of both.
+
+    Returns {symbol: {"primary_sector":..., "primary_category":...,
+    "primary_weightage":..., "sectoral": [(name,cat,w),...],
+    "thematic": [(name,cat,w),...]}}. A symbol with no tracked-index
+    membership at all gets primary_sector=None (~2% of F&O stocks in
+    practice -- thin/very-recent listings)."""
+    catalog = fetch_index_catalog(force_refresh=force_refresh, verbose=verbose)
+    constituents = fetch_index_constituents(force_refresh=force_refresh, verbose=verbose)
+
+    sym_memberships: dict[str, list[tuple]] = {}
+    for name, mem in constituents.items():
+        cat = catalog.get(name)
+        for sym, w in mem.items():
+            sym_memberships.setdefault(sym, []).append((name, cat, w))
+
+    profiles = {}
+    for sym in symbols:
+        mems = sym_memberships.get(sym, [])
+        sectoral = sorted((m for m in mems if m[1] == "SECTORAL INDICES"),
+                          key=lambda m: -(m[2] or 0))
+        thematic = sorted((m for m in mems if m[1] == "THEMATIC INDICES"
+                           and m[0] not in _NON_INDUSTRY_THEMES),
+                          key=lambda m: -(m[2] or 0))
+        if sectoral:
+            name, cat, w = sectoral[0]
+        elif thematic:
+            name, cat, w = thematic[0]
+        else:
+            name, cat, w = None, None, None
+        profiles[sym] = {
+            "primary_sector": name, "primary_category": cat,
+            "primary_weightage": w, "sectoral": sectoral, "thematic": thematic,
+        }
+    return profiles
+
+
+def sector_membership_only(symbols: list[str], force_refresh: bool = False,
+                           verbose: bool = True) -> dict[str, list[str]]:
+    """symbol -> [primary_sector] (single-item list) -- shaped to match
+    stock_sector_rs()/stock_top_sector()'s membership format (designed
+    for a stock potentially belonging to multiple sectors; a single
+    ground-truth primary sector is just the 1-item case, so no other
+    function needs to change). Symbols with no resolvable sector are
+    omitted."""
+    profiles = resolve_sector_profiles(symbols, force_refresh=force_refresh, verbose=verbose)
+    return {sym: [p["primary_sector"]] for sym, p in profiles.items()
+           if p["primary_sector"]}
+
+
+def sector_membership_and_candles(symbols: list[str], days: int,
+                                  force_refresh: bool = False,
+                                  verbose: bool = True) -> tuple[dict, dict]:
+    """One-call convenience: resolves ground-truth primary sectors, then
+    fetches Kite candles for only the sectors actually in use (not the
+    full ~60-index catalog)."""
+    membership = sector_membership_only(symbols, force_refresh=force_refresh, verbose=verbose)
+    used_names = sorted(set(m[0] for m in membership.values()))
+    candles = fetch_sector_index_candles(used_names, days=days)
+    return membership, candles
 
 
 def _naive(frame: pd.DataFrame) -> pd.DataFrame:
     """Kite's timestamps are tz-aware (IST); backtest.py's stock candles and
     benchmark are normalized to tz-naive right after load (see
-    load_candles_cached), so comparing/slicing against them raises
-    TypeError unless sector candles get the same treatment here."""
+    load_candles_cached); comparing/slicing against them raises TypeError
+    unless sector candles get the same treatment here."""
     if not frame.empty and frame.index.tz is not None:
         frame = frame.copy()
         frame.index = frame.index.tz_localize(None)
     return frame
 
 
-def fetch_sector_index_candles(days: int = 1200) -> dict[str, pd.DataFrame]:
-    """Real historical daily candles for every sector index (each one's own
-    Kite INDICES-segment instrument, same as the NIFTY 50 benchmark) -- this
-    is what makes point-in-time sector strength possible, not just today's
-    NSE heatmap snapshot."""
+def fetch_sector_index_candles(names: list[str], days: int = 1200) -> dict[str, pd.DataFrame]:
+    """Real historical daily candles for each given sector index (each
+    one's own Kite INDICES-segment instrument, same as the NIFTY 50
+    benchmark) -- this is what makes point-in-time sector strength
+    possible, not just today's NSE snapshot. A handful of THEMATIC names
+    (e.g. NIFTY CEMENT, NIFTY RAILWAYSPSU, NIFTY COREHOUSING -- confirmed
+    2026-08-08) have no Kite instrument at all; those come back empty and
+    are skipped by sector_rs_asof(), degrading gracefully to "no sector_rs
+    for this stock" rather than a crash."""
     out = {}
-    for name in sector_names():
+    for name in names:
         try:
             out[name] = _naive(kite_client.fetch_index_candles(name, days))
         except Exception as e:
@@ -255,10 +336,11 @@ def sector_rs_asof(sector_candles: dict[str, pd.DataFrame], bench: pd.DataFrame,
 def stock_sector_rs(symbol: str, membership: dict[str, list[str]],
                     sector_rank: pd.Series) -> float | None:
     """A stock's sector-strength signal: the MAX relative strength across
-    every sector basket it belongs to -- not a single arbitrarily-assigned
-    sector (see module docstring). None if the stock has no membership, or
-    none of its sectors have a computed rank yet (e.g. too early in a
-    backtest for that sector's own lookback window)."""
+    every sector basket it belongs to (in practice, its single ground-truth
+    primary sector -- see sector_membership_only()). None if the stock has
+    no membership, or its sector has no computed rank yet (e.g. too early
+    in a backtest for that sector's own lookback window, or no Kite
+    instrument exists for it)."""
     secs = membership.get(symbol, [])
     vals = [sector_rank[s] for s in secs if s in sector_rank.index]
     return max(vals) if vals else None
@@ -280,7 +362,7 @@ def sector_breadth(membership: dict[str, list[str]], gate_status: pd.Series) -> 
     """% of each raw sector index's own tracked members that pass
     `gate_status` (a bool Series indexed by symbol -- pass the caller's
     PRE-sector-filter gate result, e.g. apply_gates()'s all_gates computed
-    before sector_diversify_ok is attached, so this doesn't circularly
+    before sector_diversify_ok exists in `tech`, so this doesn't circularly
     depend on the sector selection it's meant to help make). Practitioner
     rationale (IBD/O'Neil "Group Relative Strength" methodology): a
     sector's RS number can be carried by one or two outlier stocks --
@@ -347,5 +429,12 @@ def sector_composite_score(sector_rank: pd.Series, sector_candles: dict[str, pd.
 
 
 if __name__ == "__main__":
-    m = get_sector_membership(force_refresh=True)
-    print(f"\n{len(sector_names())} sector indices tracked: {sector_names()}")
+    import config
+    profiles = resolve_sector_profiles(config.UNIVERSE, force_refresh=True)
+    n_classified = sum(1 for p in profiles.values() if p["primary_sector"])
+    n_sectoral = sum(1 for p in profiles.values() if p["primary_category"] == "SECTORAL INDICES")
+    print(f"\n{n_classified}/{len(profiles)} symbols classified "
+         f"({n_sectoral} via a sectoral index, {n_classified - n_sectoral} via thematic fallback)")
+    unclassified = [s for s, p in profiles.items() if not p["primary_sector"]]
+    if unclassified:
+        print(f"unclassified: {unclassified}")

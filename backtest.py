@@ -350,7 +350,8 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
                        sector_candles: dict | None = None,
                        sector_membership: dict | None = None,
                        long_candles: dict | None = None,
-                       precomputed: dict | None = None) -> pd.DataFrame:
+                       precomputed: dict | None = None,
+                       sector_profiles: dict | None = None) -> pd.DataFrame:
     """Point-in-time ranking: identical pipeline to the live screener, fed
     only data up to `date`. Fundamental gate is off by default (fundamentals_
     history=None reproduces that exactly); pass a fundamentals_history dict
@@ -358,7 +359,7 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
     point-in-time score (fundamentals_agent.score_asof), not lookahead.
 
     sector_candles/sector_membership: optional, from sector_universe.
-    fetch_sector_index_candles()/get_sector_membership() -- both None
+    sector_membership_and_candles() -- both None
     (default) means no "sector_rs" column ever gets attached, so
     screener.score()'s sector-bonus guard never fires (byte-identical to
     before this feature existed).
@@ -526,7 +527,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     reproduces the original technical-only behavior exactly.
 
     sector_candles/sector_membership: optional, from sector_universe.
-    fetch_sector_index_candles()/get_sector_membership() -- turns on the
+    sector_membership_and_candles() -- turns on the
     sector relative-strength score bonus (config.STRATEGY["sector_bonus_
     weight"], 0 by default). Both None (default) reproduces the original
     behavior exactly.

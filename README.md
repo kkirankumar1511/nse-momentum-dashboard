@@ -238,17 +238,21 @@ sector strength is computed point-in-time with the same
 `indicators.relative_strength()` formula already used for every stock's
 own momentum, not today's NSE heatmap snapshot applied retroactively.
 
-Sector membership comes from two sources: NSE's live `heatmap-symbols` API
-(~148 F&O stocks, some in multiple overlapping sector baskets — NSE's
-sectoral indices mix broad umbrellas, cap-segment cuts, and strict
-sub-sectors, not a clean one-stock-one-sector taxonomy) plus a
-manually-curated `sector_map_manual.json` (~50 more symbols the API's
-category doesn't classify, e.g. newer PSU/defence/energy listings). A
-stock's sector-strength signal is the *max* relative strength across every
-basket it belongs to, not a single arbitrarily-picked sector.
+Sector *classification* (which index is a stock's "sector") comes from
+NSE's own ground-truth index-constituent data, not a heatmap scrape or a
+hand-curated guess: for each F&O stock, `resolve_sector_profiles()` takes
+its highest-weightage membership in a real "SECTORAL INDICES"-category
+index (NSE's `allIndices` endpoint's own category label), falling back to
+its highest-weightage "THEMATIC INDICES" membership only if it has none
+— e.g. WIPRO is a member of both NIFTY IT (sectoral) and NIFTY IND
+DIGITAL (thematic), and resolves to NIFTY IT. A handful of THEMATIC
+indices are ownership/liquidity/compliance/recency screens rather than
+real industries (NIFTY MNC, NIFTY CPSE, NIFTY SHARIAH*, NIFTY IPO, ...)
+and are excluded from the fallback so they can't win on weightage alone.
+Verified against a 208-symbol F&O resolution CSV, 2026-08-08.
 
 ```bash
-python sector_universe.py   # rebuild sector membership, print coverage
+python sector_universe.py   # rebuild sector profiles, print coverage
 ```
 
 Off by default (`sector_bonus_weight: 0.0` in `config.py`) — use the

@@ -1650,7 +1650,7 @@ def page_cockpit():
 
         donut_html = ""
         try:
-            membership = su.get_sector_membership(verbose=False)
+            membership = su.sector_membership_only(merged["symbol"].tolist(), verbose=False)
             sector_of = merged["symbol"].map(lambda s: (membership.get(s) or ["Unclassified"])[0])
             symbols_by_sector = merged.assign(sector=sector_of).groupby("sector")["symbol"] \
                 .apply(lambda s: ", ".join(s))
@@ -2510,9 +2510,9 @@ def page_screener():
             "candles already fetched by Run screen.")
         if st.button("Fetch current sector rankings"):
             with st.spinner("Fetching sector membership + index history..."):
-                membership = su.get_sector_membership()
                 days = config.STRATEGY["history_days"]
-                sector_candles = su.fetch_sector_index_candles(days=days)
+                membership, sector_candles = su.sector_membership_and_candles(
+                    config.UNIVERSE, days=days)
                 bench_sec = kite_client.benchmark_candles(days)
                 rank = su.sector_rs_asof(
                     sector_candles, bench_sec, dt.date.today(),
@@ -3608,8 +3608,8 @@ def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
     if (run_cfg.get("sector_bonus_weight", 0.0) > 0
             or run_cfg.get("sector_diversification_enabled", False)):
         report("Fetching sector index data...", 0.42)
-        sector_membership = su.get_sector_membership(verbose=False)
-        sector_candles = su.fetch_sector_index_candles(days=days)
+        sector_membership, sector_candles = su.sector_membership_and_candles(
+            config.UNIVERSE, days=days, verbose=False)
 
     # Only fetched when the weekly/monthly confirmation gate is on -- its
     # 200-bar (50-bar fallback) weekly/monthly EMA lookbacks need ~16.7
