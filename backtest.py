@@ -316,6 +316,7 @@ class Position:
     stop: float
     entry_date: pd.Timestamp
     highest_close: float = 0.0
+    sector: str | None = None
 
 
 @dataclasses.dataclass
@@ -327,6 +328,7 @@ class Trade:
     exit_price: float
     qty: int
     reason: str
+    sector: str | None = None
 
     @property
     def pnl(self):
@@ -618,7 +620,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         proceeds = pos.qty * price * (1 - cost)
         cash += proceeds
         trades.append(Trade(sym, pos.entry_date, date, pos.entry_price,
-                            price * (1 - cost), pos.qty, reason))
+                            price * (1 - cost), pos.qty, reason, sector=pos.sector))
 
     def _price_asof(sym: str, date) -> float | None:
         """Last known close at or before `date` -- forward-fills over a
@@ -656,8 +658,14 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             return
         cash -= qty * price * (1 + cost)
         entry_price = price * (1 + cost)
+        # row is the ranked-table row for this symbol (from watchlist),
+        # which already carries sector_group whenever sector data was
+        # given to this run -- None (Series.get's default) when it
+        # wasn't, e.g. sector_bonus_weight and sector_diversification_
+        # enabled both off/unset, same as every other optional column.
+        sector = row.get("sector_group") if hasattr(row, "get") else None
         positions[sym] = Position(sym, qty, entry_price, stop, date,
-                                  highest_close=entry_price)
+                                  highest_close=entry_price, sector=sector)
         if verbose:
             print(f"{date.date()} BUY  {sym:8s} x{qty} @ {price:.1f} stop {stop:.1f}")
 
@@ -840,6 +848,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             "unrealized_pnl": unrealized_pnl,
             "unrealized_ret_pct": (last_price / pos.entry_price - 1) * 100,
             "holding_days": (last - pos.entry_date).days,
+            "sector": pos.sector,
         })
     open_positions_df = pd.DataFrame(open_positions)
 
