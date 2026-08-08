@@ -35,9 +35,26 @@ def _zscore(s: pd.Series) -> pd.Series:
 
 def build_technical_table(candles: dict[str, pd.DataFrame],
                           bench: pd.DataFrame,
+                          cfg: dict | None = None,
                           long_candles: dict[str, pd.DataFrame] | None = None,
                           precomputed: dict[str, pd.Series] | None = None) -> pd.DataFrame:
-    """long_candles: optional, from backtest.load_long_history_cached() --
+    """cfg: BUG FIX -- this used to be hardcoded to config.STRATEGY
+    internally, silently ignoring any custom cfg a caller (i.e. every
+    Backtest UI run) actually passed, the same class of bug apply_gates()/
+    score() already had fixed. Concretely: a backtest with the weekly/
+    monthly confirmation gate enabled in its OWN cfg still computed
+    weekly_rsi/monthly_rsi/weekly_above_ema/monthly_above_ema as if that
+    gate were off (config.STRATEGY's default), so apply_gates() -- which
+    DID receive the real cfg -- compared a real threshold against columns
+    that were always NaN, zeroing every candidate for the whole run. Any
+    backtest customizing ema_fast/ema_slow/mom_lookback_days_*/
+    skip_recent_days away from config.STRATEGY's current values had the
+    same silent-ignore problem for those, not just this one gate. None
+    (default) reproduces config.STRATEGY, matching every live caller
+    (run_screen()) that never had a custom cfg to begin with -- this
+    fix only changes behavior for a caller that explicitly passes one.
+
+    long_candles: optional, from backtest.load_long_history_cached() --
     deep per-symbol history for indicators.compute_snapshot's weekly/
     monthly confirmation-gate lookbacks. None (default, and always the
     case for live callers today) means those fall back to `candles`
@@ -50,7 +67,7 @@ def build_technical_table(candles: dict[str, pd.DataFrame],
     callers today) falls back to indicators.compute_snapshot()
     recomputing ema/atr/rsi/macd from `df` directly, exactly as before
     this param existed -- correct either way, this only changes speed."""
-    cfg = config.STRATEGY
+    cfg = cfg if cfg is not None else config.STRATEGY
     rows = {}
     for sym, df in candles.items():
         long_df = long_candles.get(sym) if long_candles else None

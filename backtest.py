@@ -386,7 +386,7 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
     if precomputed is not None:
         precomputed_rows = {s: precomputed[s].loc[date] for s in sliced
                             if s in precomputed and date in precomputed[s].index}
-    tech = screener.build_technical_table(sliced, bench_slice, long_candles=long_sliced,
+    tech = screener.build_technical_table(sliced, bench_slice, cfg=cfg, long_candles=long_sliced,
                                           precomputed=precomputed_rows)
     if tech.empty:
         return tech
