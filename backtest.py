@@ -660,11 +660,18 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         cash -= qty * price * (1 + cost)
         entry_price = price * (1 + cost)
         # row is the ranked-table row for this symbol (from watchlist),
-        # which already carries sector_group whenever sector data was
-        # given to this run -- None (Series.get's default) when it
-        # wasn't, e.g. sector_bonus_weight and sector_diversification_
-        # enabled both off/unset, same as every other optional column.
-        sector = row.get("sector_group") if hasattr(row, "get") else None
+        # which already carries top_sector whenever sector data was given
+        # to this run -- None (Series.get's default) when it wasn't, e.g.
+        # sector_bonus_weight and sector_diversification_enabled both
+        # off/unset, same as every other optional column. Deliberately
+        # top_sector (the actual resolved NSE index, e.g. "NIFTY IND
+        # DEFENCE") rather than sector_group (the industry-grouped label
+        # used internally by the diversification cap, e.g. "Industrials")
+        # -- the raw index name is more informative for display, and every
+        # stock resolves to exactly one of the two real NSE index
+        # categories (sectoral or thematic), so there's always a genuine
+        # index name to show, not a made-up bucket.
+        sector = row.get("top_sector") if hasattr(row, "get") else None
         positions[sym] = Position(sym, qty, entry_price, stop, date,
                                   highest_close=entry_price, sector=sector)
         if verbose:
