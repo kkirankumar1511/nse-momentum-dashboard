@@ -216,6 +216,7 @@ def build_pdf(res: dict, bench: pd.DataFrame, cfg: dict, run_meta: dict,
     fg = "ON" if cfg.get("fundamental_gate_enabled") else "OFF"
     sd = "ON" if cfg.get("sector_diversification_enabled") else "OFF"
     sc = "composite" if cfg.get("sector_composite_score_enabled") else "RS-only"
+    rg = "ON" if cfg.get("regime_filter_enabled") else "OFF"
     story.append(_kv_table([
         ("Equal-weight allocator", f"{ew} (tol {cfg.get('equal_weight_tolerance_pct')})"),
         ("Fundamental gate", fg),
@@ -226,6 +227,8 @@ def build_pdf(res: dict, bench: pd.DataFrame, cfg: dict, run_meta: dict,
         ("Sector diversification", f"{sd} (top {cfg.get('top_n_sectors')}, "
         f"max {cfg.get('max_positions_per_sector')}/sector, {sc})"),
         ("Resistance zone weight", str(cfg.get("resistance_zone_weight", 0.0))),
+        ("Market regime filter", f"{rg} (x{cfg.get('regime_position_multiplier', 0.5)} positions "
+        f"when NIFTY < {cfg.get('regime_ema_period', 200)}EMA)"),
     ]))
 
     # ---- Summary metrics ----

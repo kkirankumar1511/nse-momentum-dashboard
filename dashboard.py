@@ -4022,6 +4022,37 @@ def page_backtest():
                  "momentum but open air above it. Untested — verify from "
                  "here before considering for live.")
 
+        rg1, rg2 = st.columns(2)
+        with rg1:
+            use_regime_filter = st.checkbox(
+                "Market regime filter", key="bt_use_regime_filter",
+                value=bool(config.STRATEGY.get("regime_filter_enabled", False)),
+                help="OFF by default. When NIFTY 50's own close is below its "
+                     "200 EMA, caps how many NEW positions may open to "
+                     "max_positions x the multiplier (right) -- never force-"
+                     "sells an existing position purely because the regime "
+                     "flipped, same 'blocks new entries only' rule as the "
+                     "sector diversification cap. A real 5-year A/B (core "
+                     "strategy, sector/resistance-zone/fundamental features "
+                     "off) improved every headline metric at once -- CAGR "
+                     "41.73%->42.86%, Sharpe 1.58->1.69, max drawdown "
+                     "-28.26%->-24.05%, win rate 43.6%->44.6% -- but wasn't "
+                     "uniform year to year: 2026 YTD was worse with it ON "
+                     "(-5.51% vs -2.16%), every other year flat-to-better. "
+                     "Verify against your own fuller config (sector bonus, "
+                     "diversification, resistance zone together) before "
+                     "considering for live.")
+        with rg2:
+            regime_position_multiplier_v = st.number_input(
+                "Regime position multiplier", min_value=0.1, max_value=1.0,
+                value=float(config.STRATEGY.get("regime_position_multiplier", 0.5)),
+                step=0.05, disabled=not use_regime_filter,
+                help="Fraction of max_positions allowed while NIFTY is below "
+                     "its 200 EMA -- 0.5 means half the normal slot count "
+                     "(and, with equal-weight sizing, roughly half the "
+                     "capital deployed, since each filled slot is still "
+                     "sized off the full max_positions).")
+
         st.caption("No per-trade cost is modeled — Zerodha charges no brokerage "
                   "on equity delivery (CNC). Statutory costs (STT, stamp duty, "
                   "exchange/SEBI charges) still apply in reality (~5-7 bps round "
@@ -4081,6 +4112,8 @@ def page_backtest():
         run_cfg["max_positions_per_sector"] = int(max_positions_per_sector_v)
         run_cfg["sector_composite_score_enabled"] = use_sector_composite
         run_cfg["resistance_zone_weight"] = float(resistance_zone_weight_v)
+        run_cfg["regime_filter_enabled"] = use_regime_filter
+        run_cfg["regime_position_multiplier"] = float(regime_position_multiplier_v)
         run_cfg["history_days"] = int(history_days_v)
         run_cfg["rebalance_cadence"] = rebalance_cadence_v
         start_background_job(
@@ -4186,6 +4219,9 @@ def page_backtest():
             s7.metric("Sector diversification", f"{_sd} (top {_bt_cfg.get('top_n_sectors')}, "
                      f"max {_bt_cfg.get('max_positions_per_sector')}/sector, {_sc})")
             s8.metric("Resistance zone weight", _bt_cfg.get("resistance_zone_weight", 0.0))
+            _rg = "ON" if _bt_cfg.get("regime_filter_enabled") else "OFF"
+            st.metric("Market regime filter", f"{_rg} (x{_bt_cfg.get('regime_position_multiplier', 0.5)} "
+                     f"positions when NIFTY < {_bt_cfg.get('regime_ema_period', 200)}EMA)")
 
     with st.container(border=True, key="ov-card-bt-pdf"):
         pdf_col1, pdf_col2 = st.columns([3, 2])
