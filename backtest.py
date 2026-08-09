@@ -73,13 +73,25 @@ def _tz_naive(frame: pd.DataFrame) -> pd.DataFrame:
 
 def load_candles_cached(symbols: list[str], days: int,
                         end_date: dt.date | None = None,
-                        progress_cb=None) -> tuple[dict, pd.DataFrame]:
+                        progress_cb=None,
+                        offline: bool = False) -> tuple[dict, pd.DataFrame]:
     """Fetch from Kite, caching each symbol as CSV (refreshed once per day).
 
     progress_cb(stage: str, frac: float), if given, is called once per
     symbol -- lets a caller (e.g. dashboard.py's background-job wrapper)
     show real progress through this step instead of an indeterminate
     spinner. Reserves the last 0-5% of frac for the benchmark fetch below.
+
+    offline: when True, skips the live Kite fetch (and its 3-attempt
+    retry/sleep dance) entirely and uses whatever's on disk regardless of
+    whether it was written today, for symbols that have any cache at all --
+    for local testing/analysis away from wherever the real Kite session
+    lives (e.g. the VPS's daily login flow), where every single symbol
+    would otherwise fail the live fetch and pay the full retry cost (a
+    real 202-symbol x ~3 attempts x 2s sleep, ~20+ minutes, measured
+    2026-08-09). Symbols with no cache at all still come back empty, same
+    as the existing stale-cache-fallback path. False (default) reproduces
+    the original online behavior exactly -- untouched for the real app.
 
     The cache-hit check only verifies the file was written today — it says
     nothing about whether the cached data's date range actually covers what
@@ -110,12 +122,15 @@ def load_candles_cached(symbols: list[str], days: int,
             progress_cb(f"Fetching {sym} ({i + 1}/{n})...", (i + 1) / n * 0.95)
         path = os.path.join(CACHE_DIR, f"{sym}.csv")
         df = None
+        cached = None
         if os.path.exists(path):
             cached = _naive(pd.read_csv(path, index_col=0, parse_dates=True))
             is_fresh = cached.attrs.get("stamp") == today or _stamp(path) == today
             covers_range = not cached.empty and cached.index.min() <= cutoff
-            if is_fresh and covers_range:
+            if (is_fresh or offline) and covers_range:
                 df = cached
+        if df is None and offline:
+            df = cached if cached is not None else pd.DataFrame()
         if df is None:
             import time
             fetched_fresh = False
@@ -151,8 +166,10 @@ def load_candles_cached(symbols: list[str], days: int,
         cached_bench = _naive(pd.read_csv(bpath, index_col=0, parse_dates=True))
         is_fresh = _stamp(bpath) == today
         covers_range = not cached_bench.empty and cached_bench.index.min() <= cutoff
-        if is_fresh and covers_range:
+        if (is_fresh or offline) and covers_range:
             bench = cached_bench
+    if bench is None and offline:
+        bench = cached_bench if cached_bench is not None else pd.DataFrame()
     if bench is None:
         # Same retry + stale-cache-fallback resilience the per-symbol loop
         # above already has -- this was previously a bare call with no
