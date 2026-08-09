@@ -264,6 +264,21 @@ _STRATEGY_DEFAULTS = {
     # considering for live.
     "sector_composite_score_enabled": False,
 
+    # Overhead-resistance tilt (see resistance_zones.py): tilts ranking
+    # toward stocks with more "clean room" before the nearest multi-year
+    # price zone above them (a level swing-touched repeatedly in the past
+    # -- latent overhead supply that can cap a rally and trigger the
+    # stop, even when every other momentum/trend signal looks fine at
+    # entry). 0 = off, same pattern as sector_bonus_weight -- ships
+    # disabled until an A/B backtest earns it a spot. Backtest-only for
+    # now (needs deep history via load_long_history_cached, same as the
+    # weekly/monthly gate).
+    "resistance_zone_weight": 0.0,
+    "resistance_zone_lookback_years": 5.0,   # receding window, not a fixed anchor
+    "resistance_zone_pivot_window": 10,      # trading days each side to confirm a swing pivot
+    "resistance_zone_cluster_tolerance_pct": 0.03,  # nearby pivots within this % cluster into one zone
+    "resistance_zone_search_pct": 0.20,      # ignore zones more than this far above price
+
     "history_days": 1200,              # calendar days of candles to fetch
 
     # Equal-weight capital allocation (screener.capital_position_size) vs.

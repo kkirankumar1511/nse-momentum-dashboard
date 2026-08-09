@@ -47,6 +47,7 @@ import pandas as pd
 
 import config
 import indicators
+import resistance_zones
 import screener
 import sector_universe
 
@@ -351,7 +352,7 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
                        sector_membership: dict | None = None,
                        long_candles: dict | None = None,
                        precomputed: dict | None = None,
-                       sector_profiles: dict | None = None) -> pd.DataFrame:
+                       precomputed_pivots: dict | None = None) -> pd.DataFrame:
     """Point-in-time ranking: identical pipeline to the live screener, fed
     only data up to `date`. Fundamental gate is off by default (fundamentals_
     history=None reproduces that exactly); pass a fundamentals_history dict
@@ -377,7 +378,15 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
     single call to this function (i.e. every rebalance day). None
     (default, and always the case for live callers today) means
     compute_snapshot recomputes them directly, exactly as before this
-    param existed -- correct either way, this only changes speed."""
+    param existed -- correct either way, this only changes speed.
+
+    precomputed_pivots: optional, {symbol: DataFrame} from run_backtest()'s
+    one-time resistance_zones.precompute_pivots() call over long_candles --
+    turns on the overhead-resistance score tilt (config.STRATEGY[
+    "resistance_zone_weight"], 0 by default). None (default) means no
+    "resistance_clearance" column ever gets attached, so screener.score()'s
+    guard for it never fires (byte-identical to before this feature
+    existed)."""
     sliced = {s: df.loc[:date] for s, df in candles.items()
               if not df.empty and date in df.index}
     bench_slice = bench.loc[:date]
@@ -448,6 +457,20 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
                     sector_rank.index.to_series().apply(sector_universe.industry_group)).max()
             top_group_names = set(group_rank.sort_values(ascending=False).head(top_n).index)
             tech["sector_diversify_ok"] = tech["sector_group"].isin(top_group_names)
+    # BACKTEST-ONLY (for now), off by default -- overhead-resistance score
+    # tilt (see resistance_zones.py). Only attached when the caller passed
+    # precomputed pivots AND the weight is on, so this is a no-op (column
+    # absent, screener.score()'s guard never fires) for every other run,
+    # same pattern as sector_rs above.
+    if precomputed_pivots is not None and cfg.get("resistance_zone_weight", 0.0):
+        tech["resistance_clearance"] = [
+            resistance_zones.resistance_clearance_asof(
+                precomputed_pivots[sym], float(tech.loc[sym, "price"]), date,
+                lookback_years=cfg.get("resistance_zone_lookback_years", 5.0),
+                tolerance_pct=cfg.get("resistance_zone_cluster_tolerance_pct", 0.03),
+                search_pct=cfg.get("resistance_zone_search_pct", 0.20))
+            if sym in precomputed_pivots else None
+            for sym in tech.index]
     gated = screener.apply_gates(tech, fundamentals=fundamentals, cfg=cfg)
     return screener.score(gated, cfg)
 
@@ -503,8 +526,17 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                  sector_membership: dict | None = None,
                  long_candles: dict | None = None,
                  start_date: dt.date | None = None,
-                 progress_cb=None) -> dict:
+                 progress_cb=None,
+                 precomputed_pivots: dict | None = None) -> dict:
     """Monthly-rebalanced long-only backtest.
+
+    precomputed_pivots: optional, {symbol: DataFrame} -- if omitted but
+    long_candles and cfg["resistance_zone_weight"] are both set, this is
+    computed internally (once per symbol, from long_candles) via
+    resistance_zones.precompute_pivots(); pass it explicitly only to reuse
+    pivots already computed elsewhere. None with the weight off (default)
+    means the overhead-resistance score tilt never activates, byte-
+    identical to before this feature existed.
 
     start_date: clamps the actual simulated/traded date range to >= this
     date, on top of (not instead of) the warmup_days skip below -- the
@@ -587,6 +619,20 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                        (i + 1) / n_syms * 0.1)
         if not df.empty and len(df) >= cfg["ema_slow"]:
             precomputed[sym] = indicators.precompute_daily_series(df, cfg)
+
+    # One-time precompute of swing-pivot history for the overhead-
+    # resistance score tilt (see resistance_zones.py) -- only when the
+    # feature is on and deep history was actually provided; pivot count is
+    # small and roughly constant per year of history (unlike daily bar
+    # count), so this and its per-day lookup stay cheap regardless of how
+    # long the backtest window is.
+    if precomputed_pivots is None and long_candles is not None \
+            and cfg.get("resistance_zone_weight", 0.0):
+        precomputed_pivots = {}
+        window = cfg.get("resistance_zone_pivot_window", 10)
+        for sym, df in long_candles.items():
+            if not df.empty:
+                precomputed_pivots[sym] = resistance_zones.precompute_pivots(df, window=window)
 
     dates = bench.index.sort_values()
     dates = dates[warmup_days:]
@@ -741,7 +787,8 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             ranked = rank_universe_asof(candles, bench, date, cfg,
                                        fundamentals_history, score_cache,
                                        sector_candles, sector_membership,
-                                       long_candles, precomputed)
+                                       long_candles, precomputed,
+                                       precomputed_pivots)
             if not ranked.empty:
                 candidates = ranked[ranked["all_gates"]]
                 keep_zone = set(candidates.head(cfg["max_positions"] * 2).index)

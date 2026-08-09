@@ -225,6 +225,7 @@ def build_pdf(res: dict, bench: pd.DataFrame, cfg: dict, run_meta: dict,
         ("Sector bonus weight", str(cfg.get("sector_bonus_weight"))),
         ("Sector diversification", f"{sd} (top {cfg.get('top_n_sectors')}, "
         f"max {cfg.get('max_positions_per_sector')}/sector, {sc})"),
+        ("Resistance zone weight", str(cfg.get("resistance_zone_weight", 0.0))),
     ]))
 
     # ---- Summary metrics ----

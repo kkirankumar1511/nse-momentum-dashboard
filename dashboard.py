@@ -3611,14 +3611,16 @@ def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
         sector_membership, sector_candles = su.sector_membership_and_candles(
             config.UNIVERSE, days=days, verbose=False)
 
-    # Only fetched when the weekly/monthly confirmation gate is on -- its
-    # 200-bar (50-bar fallback) weekly/monthly EMA lookbacks need ~16.7
-    # (~4.2) years of history, far more than this run's own candles_bt
-    # window usually has. Cached separately and incrementally (see
-    # bt.load_long_history_cached's docstring) so this is only slow the
-    # very first time, not on every run.
+    # Only fetched when the weekly/monthly confirmation gate OR the
+    # overhead-resistance tilt is on -- both need far more history than
+    # this run's own candles_bt window usually has (weekly/monthly's
+    # 200-bar EMA needs ~16.7 years; resistance zones need
+    # resistance_zone_lookback_years, 5 by default). Cached separately and
+    # incrementally (see bt.load_long_history_cached's docstring) so this
+    # is only slow the very first time, not on every run.
     long_candles = None
-    if run_cfg.get("weekly_monthly_gate_enabled", False):
+    if (run_cfg.get("weekly_monthly_gate_enabled", False)
+            or run_cfg.get("resistance_zone_weight", 0.0) > 0):
         long_candles = bt.load_long_history_cached(
             config.UNIVERSE, end_date=end_date,
             progress_cb=lambda s, f: report(s, 0.44 + f * 0.05))
@@ -4007,6 +4009,19 @@ def page_backtest():
                  "weaker signal than one with broad participation). "
                  "Untested — A/B against RS-alone from here first.")
 
+        resistance_zone_weight_v = st.number_input(
+            "Resistance zone weight", min_value=0.0, max_value=1.0,
+            value=float(config.STRATEGY.get("resistance_zone_weight", 0.0)), step=0.05,
+            help="0 = off. Tilts ranking toward stocks with more clean room "
+                 "before the nearest strong multi-year price zone above them "
+                 "-- a level swing-touched repeatedly in the past (the last "
+                 "5 years, receding), which can act as latent overhead "
+                 "supply and cap a rally even when momentum/trend look fine "
+                 "at entry. A stock right underneath a zone that's been "
+                 "touched many times scores worse than one with the same "
+                 "momentum but open air above it. Untested — verify from "
+                 "here before considering for live.")
+
         st.caption("No per-trade cost is modeled — Zerodha charges no brokerage "
                   "on equity delivery (CNC). Statutory costs (STT, stamp duty, "
                   "exchange/SEBI charges) still apply in reality (~5-7 bps round "
@@ -4065,6 +4080,7 @@ def page_backtest():
         run_cfg["top_n_sectors"] = int(top_n_sectors_v)
         run_cfg["max_positions_per_sector"] = int(max_positions_per_sector_v)
         run_cfg["sector_composite_score_enabled"] = use_sector_composite
+        run_cfg["resistance_zone_weight"] = float(resistance_zone_weight_v)
         run_cfg["history_days"] = int(history_days_v)
         run_cfg["rebalance_cadence"] = rebalance_cadence_v
         start_background_job(
@@ -4162,13 +4178,14 @@ def page_backtest():
             s2.metric("Fundamental gate", _fg)
             s3.metric("Fundamental bonus weight", _bt_cfg.get("fundamental_bonus_weight"))
             s4.metric("Min fundamental score", _bt_cfg.get("min_fundamental_score"))
-            s5, s6, s7 = st.columns(3)
+            s5, s6, s7, s8 = st.columns(4)
             s5.metric("52w-high proximity (%)", f"{_bt_cfg.get('near_high_threshold', 0) * 100:.0f}")
             s6.metric("Sector bonus weight", _bt_cfg.get("sector_bonus_weight"))
             _sd = "ON" if _bt_cfg.get("sector_diversification_enabled") else "OFF"
             _sc = "composite" if _bt_cfg.get("sector_composite_score_enabled") else "RS-only"
             s7.metric("Sector diversification", f"{_sd} (top {_bt_cfg.get('top_n_sectors')}, "
                      f"max {_bt_cfg.get('max_positions_per_sector')}/sector, {_sc})")
+            s8.metric("Resistance zone weight", _bt_cfg.get("resistance_zone_weight", 0.0))
 
     with st.container(border=True, key="ov-card-bt-pdf"):
         pdf_col1, pdf_col2 = st.columns([3, 2])

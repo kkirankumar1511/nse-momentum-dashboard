@@ -207,6 +207,19 @@ def score(t: pd.DataFrame, cfg: dict = config.STRATEGY) -> pd.DataFrame:
         t["score"] += (cfg["sector_bonus_weight"]
                        * _zscore(t["sector_rs"].astype(float)).fillna(0))
 
+    # Optional overhead-resistance tilt (see resistance_zones.py). Off by
+    # default (resistance_zone_weight=0) -- only present when the caller
+    # attached a "resistance_clearance" column (backtest.rank_universe_asof,
+    # opt-in). Higher clearance (more room before the nearest strong
+    # multi-year zone above price) scores better, same convention as every
+    # other factor here -- no sign flip needed. Same fillna(0)-on-missing
+    # treatment as the sector bonus: a stock with no zone data (too little
+    # history, or genuinely nothing nearby) contributes neutrally rather
+    # than being favored or penalized for missing data.
+    if cfg.get("resistance_zone_weight", 0.0) and "resistance_clearance" in t.columns:
+        t["score"] += (cfg["resistance_zone_weight"]
+                       * _zscore(t["resistance_clearance"].astype(float)).fillna(0))
+
     # EXPERIMENTAL, backtest-only for now -- tilts ranking toward higher
     # fundamental-quality names among gate-passers, same mechanic as the
     # sector bonus above (not the same as the quality GATE in apply_gates,
