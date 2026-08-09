@@ -279,6 +279,18 @@ _STRATEGY_DEFAULTS = {
     "resistance_zone_cluster_tolerance_pct": 0.03,  # nearby pivots within this % cluster into one zone
     "resistance_zone_search_pct": 0.20,      # ignore zones more than this far above price
 
+    # Market regime filter (backtest-only for now): caps how many NEW
+    # positions may be open at once when NIFTY 50 itself is below its own
+    # long-term trend -- a classic trend-following risk control (only
+    # trade long aggressively when the market you're trading IN is
+    # itself trending up). Never force-sells an existing position purely
+    # because the regime flipped, same "blocks new entries only"
+    # philosophy as the sector diversification cap. 0 = off by default,
+    # untested -- verify from the Backtest UI before considering for live.
+    "regime_filter_enabled": False,
+    "regime_ema_period": 200,
+    "regime_position_multiplier": 0.5,
+
     "history_days": 1200,              # calendar days of candles to fetch
 
     # Equal-weight capital allocation (screener.capital_position_size) vs.

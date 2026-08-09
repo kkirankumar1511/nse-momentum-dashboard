@@ -573,6 +573,18 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     is often too short for the 200-bar (or even 50-bar) lookback to ever
     resolve, silently failing that gate closed for the whole run.
 
+    market regime filter: config.STRATEGY["regime_filter_enabled"] (False
+    by default) caps how many NEW positions may be open at once to
+    max_positions * regime_position_multiplier (0.5 by default) on any day
+    NIFTY 50's own close is below its regime_ema_period (200) EMA -- never
+    force-sells an existing position purely because the regime flipped,
+    same "only blocks new entries" philosophy as the sector cap
+    (_apply_sector_cap). With equal-weight sizing, filling fewer of the
+    original slots also means proportionally less total capital deployed
+    (each filled slot is still sized off the FULL max_positions), not just
+    fewer names -- e.g. 5 of 10 original slots filled leaves ~50% in cash,
+    not the same capital concentrated into 5 names.
+
     trailing stop: config.STRATEGY["trailing_stop_enabled"] (False by
     default) ratchets each position's stop up to highest_close_since_entry
     - trailing_atr_multiple*ATR as it gains, never back down -- see the
@@ -634,6 +646,16 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             if not df.empty:
                 precomputed_pivots[sym] = resistance_zones.precompute_pivots(df, window=window)
 
+    # One-time precompute of the market-regime filter (see module docstring
+    # on regime_filter_enabled below) -- NIFTY's own close vs. its causal
+    # EWM, computed once over the whole benchmark series exactly like
+    # indicators.precompute_daily_series does for stocks (safe for the same
+    # reason: a causal ewm at position i depends only on rows [0..i]).
+    bench_above_regime_ema = None
+    if cfg.get("regime_filter_enabled", False):
+        regime_ema = indicators.ema(bench["close"], cfg.get("regime_ema_period", 200))
+        bench_above_regime_ema = bench["close"] > regime_ema
+
     dates = bench.index.sort_values()
     dates = dates[warmup_days:]
     if start_date is not None:
@@ -649,6 +671,13 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     positions: dict[str, Position] = {}
     trades: list[Trade] = []
     curve = []
+    # Recomputed once per day below (see bench_above_regime_ema) -- how
+    # many positions try_enter()/the fill loops are allowed to hold open
+    # RIGHT NOW. Only ever caps NEW entries, same "never forces an exit"
+    # philosophy as _apply_sector_cap -- a regime flip alone never sells an
+    # existing position, it only pauses fresh buying until positions roll
+    # off naturally (stop/rebalance exit) down to the reduced cap.
+    effective_max_positions = cfg["max_positions"]
     # Gate-passers not yet held, refreshed at each rebalance (same monthly
     # cadence as everything else -- a stock's gate status can go stale for
     # up to a month either way) and consumed daily by step 2b so a slot
@@ -686,7 +715,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
 
     def try_enter(sym, row, price, stop, date, qty_override=None):
         nonlocal cash
-        if len(positions) >= cfg["max_positions"] or sym in positions:
+        if len(positions) >= effective_max_positions or sym in positions:
             return
         if qty_override is not None:
             qty = qty_override
@@ -752,6 +781,10 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         # close together anyway.
         if progress_cb and (i % max(1, n_dates // 100) == 0 or i == n_dates - 1):
             progress_cb(f"Simulating {date.date()}...", 0.1 + (i + 1) / n_dates * 0.9)
+        if bench_above_regime_ema is not None:
+            regime_ok = bool(bench_above_regime_ema.get(date, True))
+            effective_max_positions = cfg["max_positions"] if regime_ok else \
+                max(1, int(cfg["max_positions"] * cfg.get("regime_position_multiplier", 0.5)))
         # 1) stop checks on today's bar
         for sym in list(positions):
             df = candles[sym]
@@ -846,7 +879,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 total_equity=equity_now, max_positions=cfg["max_positions"],
                 tolerance_pct=cfg.get("equal_weight_tolerance_pct", 0.10))
             for sym, (qty, _reason) in alloc["new_buys"].items():
-                if len(positions) >= cfg["max_positions"]:
+                if len(positions) >= effective_max_positions:
                     break
                 price = prices[sym]
                 atr_now = float(indicators.atr(candles[sym].loc[:date], cfg["atr_period"]).iloc[-1])
@@ -856,7 +889,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                     watchlist.pop(sym, None)
             for sym, extra_qty in alloc["top_ups"].items():
                 top_up_position(sym, extra_qty, prices[sym], date)
-        elif watchlist and len(positions) < cfg["max_positions"]:
+        elif watchlist and len(positions) < effective_max_positions:
             # Highest-score candidates get first pick of the limited slots.
             ordered = sorted(watchlist.items(),
                             key=lambda kv: kv[1].get("score", 0), reverse=True)
@@ -864,7 +897,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 [s for s, _ in ordered], positions, ranked, cfg))
             ordered = [(s, r) for s, r in ordered if s in capped_syms]
             for sym, row in ordered:
-                if len(positions) >= cfg["max_positions"]:
+                if len(positions) >= effective_max_positions:
                     break
                 if sym in positions or date not in candles[sym].index:
                     continue
