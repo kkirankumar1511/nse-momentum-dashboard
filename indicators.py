@@ -61,15 +61,81 @@ def _higher_tf_trend_ok(resampled_close: pd.Series, period_primary: int = 200,
     return bool(resampled_close.iloc[-1] > ema(resampled_close, period).iloc[-1])
 
 
+def precompute_weekly_monthly_bars(long_close: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """Precomputes the FULL weekly/monthly last-close bar series ONCE from
+    long_close's entire history -- the "already complete" portion
+    weekly_above_ema/monthly_above_ema's fast path (precomputed_full param)
+    reuses on every call instead of re-resampling all of long_close from
+    scratch on every single rebalance day, which profiled as ~45% of a
+    gate-enabled backtest's total runtime (the resample() call itself, not
+    the EMA math on top of it, is what's expensive on a multi-year daily
+    series).
+
+    Safe because a COMPLETE calendar bucket's last-close never depends on
+    what happens after it -- resample("W-FRI").last() for the week ending
+    a past Friday gives the identical value whether you resample the
+    whole history or just that one week's days. Slicing this precomputed
+    series to `.loc[:date]` for a particular query date is therefore
+    correct for every bucket EXCEPT one: the bucket for whatever week/
+    month `date` itself currently falls inside, which may still be
+    "forming" (`date` isn't necessarily that period's last trading day)
+    -- but that bucket's label is a period-END date (e.g. the upcoming
+    Friday), which is chronologically AFTER `date` while it's still
+    forming, so `.loc[:date]` automatically excludes it rather than
+    silently returning a wrong, future-leaking value. See
+    _fast_higher_tf_close for how the caller reconstructs that one
+    still-needed bucket cheaply instead."""
+    weekly = long_close.resample("W-FRI").last().dropna()
+    monthly = long_close.resample("ME").last().dropna()
+    return weekly, monthly
+
+
+def _fast_higher_tf_close(precomputed_full: pd.Series, close_upto_date: pd.Series,
+                          date, freq: str) -> pd.Series:
+    """Reconstructs exactly what close_upto_date.resample(freq).last().
+    dropna() would produce, without re-resampling all of close_upto_date --
+    see precompute_weekly_monthly_bars's docstring for why this is safe.
+    Every complete bucket comes straight from the precomputed series;
+    only the possibly-still-forming bucket containing `date` is resampled
+    fresh, from a short trailing slice of close_upto_date (a resample
+    bucket's aggregation only ever looks at rows within its own calendar
+    range, so resampling just the tail reproduces the identical value for
+    that one bucket as resampling the full series would)."""
+    complete = precomputed_full.loc[:date]
+    tail_days = 8 if freq == "W-FRI" else 33
+    current = close_upto_date.tail(tail_days).resample(freq).last().dropna()
+    if not current.empty and (complete.empty or current.index[-1] > complete.index[-1]):
+        return pd.concat([complete, current.tail(1)])
+    return complete
+
+
 def weekly_above_ema(close: pd.Series, period_primary: int = 200,
-                     period_fallback: int = 50) -> float:
-    weekly = close.resample("W-FRI").last().dropna()
+                     period_fallback: int = 50,
+                     precomputed_full: pd.Series | None = None,
+                     asof_date=None) -> float:
+    """precomputed_full/asof_date: optional fast-path pair (from
+    precompute_weekly_monthly_bars()'s weekly return value, plus the date
+    this call represents) -- reconstructs the same resampled series far
+    cheaper than resampling all of `close` from scratch every call (see
+    _fast_higher_tf_close). Both None (default, and always the case for
+    live callers today) reproduces the original full-resample-every-time
+    behavior exactly -- correct either way, this only changes speed."""
+    if precomputed_full is not None and asof_date is not None:
+        weekly = _fast_higher_tf_close(precomputed_full, close, asof_date, "W-FRI")
+    else:
+        weekly = close.resample("W-FRI").last().dropna()
     return _higher_tf_trend_ok(weekly, period_primary, period_fallback)
 
 
 def monthly_above_ema(close: pd.Series, period_primary: int = 200,
-                      period_fallback: int = 50) -> float:
-    monthly = close.resample("ME").last().dropna()
+                      period_fallback: int = 50,
+                      precomputed_full: pd.Series | None = None,
+                      asof_date=None) -> float:
+    """Same fast-path contract as weekly_above_ema -- see its docstring."""
+    if precomputed_full is not None and asof_date is not None:
+        monthly = _fast_higher_tf_close(precomputed_full, close, asof_date, "ME")
+    else:
+        monthly = close.resample("ME").last().dropna()
     return _higher_tf_trend_ok(monthly, period_primary, period_fallback)
 
 
@@ -206,8 +272,19 @@ def precompute_daily_series(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
 def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
                      long_close: pd.Series | None = None,
-                     precomputed_row: pd.Series | None = None) -> dict:
+                     precomputed_row: pd.Series | None = None,
+                     precomputed_weekly_monthly: tuple | None = None,
+                     asof_date=None) -> dict:
     """All technical metrics for one symbol from its daily candles.
+
+    precomputed_weekly_monthly/asof_date: optional, (weekly_full,
+    monthly_full) from indicators.precompute_weekly_monthly_bars() (via
+    backtest.run_backtest() -> screener.build_technical_table()) plus the
+    date this snapshot represents -- turns on weekly_above_ema/
+    monthly_above_ema's fast path instead of them re-resampling all of
+    long_close from scratch on every call. None (default, and always the
+    case for live callers today) reproduces the original behavior exactly
+    -- correct either way, this only changes how fast.
 
     long_close: optional, deep (many-year) daily close history for the
     same symbol -- from backtest.load_long_history_cached() via
@@ -266,8 +343,15 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
     weekly_rsi_val = monthly_rsi_val = np.nan
     if cfg.get("weekly_monthly_gate_enabled", False):
         wk_close = long_close if long_close is not None else close
-        weekly_trend_ok = weekly_above_ema(wk_close)
-        monthly_trend_ok = monthly_above_ema(wk_close)
+        if precomputed_weekly_monthly is not None and asof_date is not None:
+            weekly_full, monthly_full = precomputed_weekly_monthly
+            weekly_trend_ok = weekly_above_ema(wk_close, precomputed_full=weekly_full,
+                                               asof_date=asof_date)
+            monthly_trend_ok = monthly_above_ema(wk_close, precomputed_full=monthly_full,
+                                                 asof_date=asof_date)
+        else:
+            weekly_trend_ok = weekly_above_ema(wk_close)
+            monthly_trend_ok = monthly_above_ema(wk_close)
     else:
         weekly_trend_ok = monthly_trend_ok = np.nan
 

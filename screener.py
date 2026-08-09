@@ -37,7 +37,8 @@ def build_technical_table(candles: dict[str, pd.DataFrame],
                           bench: pd.DataFrame,
                           cfg: dict | None = None,
                           long_candles: dict[str, pd.DataFrame] | None = None,
-                          precomputed: dict[str, pd.Series] | None = None) -> pd.DataFrame:
+                          precomputed: dict[str, pd.Series] | None = None,
+                          precomputed_weekly_monthly: dict | None = None) -> pd.DataFrame:
     """cfg: BUG FIX -- this used to be hardcoded to config.STRATEGY
     internally, silently ignoring any custom cfg a caller (i.e. every
     Backtest UI run) actually passed, the same class of bug apply_gates()/
@@ -66,15 +67,31 @@ def build_technical_table(candles: dict[str, pd.DataFrame],
     rank_universe_asof(). None (default, and always the case for live
     callers today) falls back to indicators.compute_snapshot()
     recomputing ema/atr/rsi/macd from `df` directly, exactly as before
-    this param existed -- correct either way, this only changes speed."""
+    this param existed -- correct either way, this only changes speed.
+
+    precomputed_weekly_monthly: optional, {symbol: (weekly_full,
+    monthly_full)} from indicators.precompute_weekly_monthly_bars() via
+    backtest.run_backtest() -- turns on weekly_above_ema/
+    monthly_above_ema's fast path (see their docstrings) instead of
+    re-resampling all of long_close from scratch for every symbol on
+    every rebalance day, profiled as ~45% of a gate-enabled backtest's
+    runtime. None (default, and always the case for live callers today)
+    reproduces the original behavior exactly -- correct either way, this
+    only changes speed. The as-of date itself is read from `bench`'s own
+    last index entry (rank_universe_asof always passes bench already
+    sliced to exactly `:date`, so this is never a guess)."""
     cfg = cfg if cfg is not None else config.STRATEGY
+    asof_date = bench.index[-1] if not bench.empty else None
     rows = {}
     for sym, df in candles.items():
         long_df = long_candles.get(sym) if long_candles else None
         long_close = long_df["close"] if long_df is not None and not long_df.empty else None
         precomputed_row = precomputed.get(sym) if precomputed else None
+        precomputed_wm = precomputed_weekly_monthly.get(sym) if precomputed_weekly_monthly else None
         snap = indicators.compute_snapshot(df, bench, cfg, long_close=long_close,
-                                          precomputed_row=precomputed_row)
+                                          precomputed_row=precomputed_row,
+                                          precomputed_weekly_monthly=precomputed_wm,
+                                          asof_date=asof_date)
         if snap:
             rows[sym] = snap
     return pd.DataFrame(rows).T

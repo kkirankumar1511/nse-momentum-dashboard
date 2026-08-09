@@ -369,7 +369,8 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
                        sector_membership: dict | None = None,
                        long_candles: dict | None = None,
                        precomputed: dict | None = None,
-                       precomputed_pivots: dict | None = None) -> pd.DataFrame:
+                       precomputed_pivots: dict | None = None,
+                       precomputed_weekly_monthly: dict | None = None) -> pd.DataFrame:
     """Point-in-time ranking: identical pipeline to the live screener, fed
     only data up to `date`. Fundamental gate is off by default (fundamentals_
     history=None reproduces that exactly); pass a fundamentals_history dict
@@ -403,7 +404,16 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
     "resistance_zone_weight"], 0 by default). None (default) means no
     "resistance_clearance" column ever gets attached, so screener.score()'s
     guard for it never fires (byte-identical to before this feature
-    existed)."""
+    existed).
+
+    precomputed_weekly_monthly: optional, {symbol: (weekly_full,
+    monthly_full)} from run_backtest()'s one-time indicators.
+    precompute_weekly_monthly_bars() call over long_candles -- passed
+    through to screener.build_technical_table() to speed up the weekly/
+    monthly confirmation gate (see that function and indicators.
+    weekly_above_ema's docstrings). None (default) reproduces the
+    original full-resample-every-call behavior exactly -- correct either
+    way, this only changes speed."""
     sliced = {s: df.loc[:date] for s, df in candles.items()
               if not df.empty and date in df.index}
     bench_slice = bench.loc[:date]
@@ -416,7 +426,8 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
         precomputed_rows = {s: precomputed[s].loc[date] for s in sliced
                             if s in precomputed and date in precomputed[s].index}
     tech = screener.build_technical_table(sliced, bench_slice, cfg=cfg, long_candles=long_sliced,
-                                          precomputed=precomputed_rows)
+                                          precomputed=precomputed_rows,
+                                          precomputed_weekly_monthly=precomputed_weekly_monthly)
     if tech.empty:
         return tech
     fundamentals = None
@@ -663,6 +674,17 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             if not df.empty:
                 precomputed_pivots[sym] = resistance_zones.precompute_pivots(df, window=window)
 
+    # One-time precompute of the weekly/monthly confirmation gate's
+    # resampled bar history -- see indicators.precompute_weekly_monthly_
+    # bars's docstring for why this is safe. Replaces re-resampling all of
+    # long_candles from scratch for every symbol on every single rebalance
+    # day below, profiled as ~45% of a gate-enabled backtest's runtime.
+    precomputed_weekly_monthly: dict = {}
+    if long_candles is not None and cfg.get("weekly_monthly_gate_enabled", False):
+        for sym, df in long_candles.items():
+            if not df.empty:
+                precomputed_weekly_monthly[sym] = indicators.precompute_weekly_monthly_bars(df["close"])
+
     # One-time precompute of the market-regime filter (see module docstring
     # on regime_filter_enabled below) -- NIFTY's own close vs. its causal
     # EWM, computed once over the whole benchmark series exactly like
@@ -838,7 +860,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                                        fundamentals_history, score_cache,
                                        sector_candles, sector_membership,
                                        long_candles, precomputed,
-                                       precomputed_pivots)
+                                       precomputed_pivots, precomputed_weekly_monthly)
             if not ranked.empty:
                 candidates = ranked[ranked["all_gates"]]
                 keep_zone = set(candidates.head(cfg["max_positions"] * 2).index)
