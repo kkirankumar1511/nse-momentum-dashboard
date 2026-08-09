@@ -635,8 +635,13 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     "D" re-evaluates it every trading day instead, matching the cadence
     live_rebalance.py's scheduled job actually runs at (Mon-Fri) if its
     proposal is executed that often -- added specifically to let that
-    live/backtest cadence gap be measured rather than assumed. No other
-    value is supported.
+    live/backtest cadence gap be measured rather than assumed. "W"
+    re-evaluates it once per calendar week, on the last trading day of
+    that week (Friday, or the prior trading day if Friday is a market
+    holiday) -- backtest-only for now, no live scheduled job runs this
+    cadence yet. Buys/top-ups always fill any open slot daily regardless
+    of which of these is chosen -- only the SELL/keep-zone check's
+    frequency changes. No other value is supported.
     """
     cfg = dict(cfg or config.STRATEGY)
     cost = cost_bps / 10_000
@@ -701,6 +706,20 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         dates = dates[dates >= pd.Timestamp(start_date)]
     if rebalance == "D":
         rb_dates = set(dates)
+    elif rebalance == "W":
+        # last trading day of each ISO calendar week -- Friday if it's a
+        # trading day, otherwise whatever trading day precedes it (Friday
+        # itself just isn't IN `weekday_dates` on a market holiday, so
+        # grouping by ISO (year, week) and taking the max already lands on
+        # the right day with no holiday-calendar lookup needed). Restricted
+        # to Mon-Fri specifically -- NSE occasionally holds a special
+        # Saturday/Sunday live session (Budget-day reaction, Diwali Muhurat
+        # trading), which would otherwise get picked as "the last trading
+        # day of the week" instead of the Friday the user actually means.
+        weekday_dates = dates[dates.dayofweek < 5]
+        iso = weekday_dates.isocalendar()
+        rb_dates = set(pd.Series(weekday_dates).groupby(
+            [iso["year"].values, iso["week"].values]).max())
     else:
         # first trading day of each month
         rb_dates = set(pd.Series(dates).groupby(

@@ -3625,9 +3625,11 @@ def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
             config.UNIVERSE, end_date=end_date,
             progress_cb=lambda s, f: report(s, 0.44 + f * 0.05))
 
+    _rebalance_code = {"daily": "D", "weekly": "W", "monthly": "MS"}.get(
+        rebalance_cadence_v, "MS")
     res = bt.run_backtest(
         candles_bt, bench_bt, run_cfg, initial_capital=bt_capital,
-        rebalance="D" if rebalance_cadence_v == "daily" else "MS",
+        rebalance=_rebalance_code,
         fundamentals_history=fundamentals_history,
         sector_candles=sector_candles, sector_membership=sector_membership,
         long_candles=long_candles, start_date=sim_start_date,
@@ -3789,14 +3791,19 @@ def page_backtest():
                 value=float(config.STRATEGY["risk_per_trade_pct"]), step=0.1)
         with tm4:
             rebalance_cadence_v = st.segmented_control(
-                "Rebalance cadence", ["daily", "monthly"],
+                "Rebalance cadence", ["daily", "weekly", "monthly"],
                 default=config.STRATEGY.get("rebalance_cadence", "daily"),
                 key="bt_rebalance_cadence",
-                help="Mirrors the LIVE Admin setting. 'daily' re-checks the "
-                     "sell/keep-zone rule every trading day (matches the live "
-                     "default); 'monthly' only re-checks it on the first "
-                     "trading day of each month. Buys/top-ups always fill open "
-                     "slots daily either way, in both live and this backtest.")
+                help="'daily' and 'monthly' mirror the LIVE Admin setting -- "
+                     "'daily' re-checks the sell/keep-zone rule every trading "
+                     "day (matches the live default); 'monthly' only on the "
+                     "first trading day of each month. 'weekly' is "
+                     "backtest-only for now (no live scheduled job runs this "
+                     "cadence yet) -- re-checks on the last trading day of "
+                     "each week (Friday, or the prior trading day if Friday "
+                     "is a market holiday). Buys/top-ups always fill open "
+                     "slots daily regardless of which is chosen -- only the "
+                     "sell decision's frequency changes.")
 
         _ov_muted("Technical indicator")
         ti1, ti2, ti3 = st.columns(3)
