@@ -34,11 +34,64 @@ def _zscore(s: pd.Series) -> pd.Series:
 
 
 def build_technical_table(candles: dict[str, pd.DataFrame],
-                          bench: pd.DataFrame) -> pd.DataFrame:
-    cfg = config.STRATEGY
+                          bench: pd.DataFrame,
+                          cfg: dict | None = None,
+                          long_candles: dict[str, pd.DataFrame] | None = None,
+                          precomputed: dict[str, pd.Series] | None = None,
+                          precomputed_weekly_monthly: dict | None = None) -> pd.DataFrame:
+    """cfg: BUG FIX -- this used to be hardcoded to config.STRATEGY
+    internally, silently ignoring any custom cfg a caller (i.e. every
+    Backtest UI run) actually passed, the same class of bug apply_gates()/
+    score() already had fixed. Concretely: a backtest with the weekly/
+    monthly confirmation gate enabled in its OWN cfg still computed
+    weekly_rsi/monthly_rsi/weekly_above_ema/monthly_above_ema as if that
+    gate were off (config.STRATEGY's default), so apply_gates() -- which
+    DID receive the real cfg -- compared a real threshold against columns
+    that were always NaN, zeroing every candidate for the whole run. Any
+    backtest customizing ema_fast/ema_slow/mom_lookback_days_*/
+    skip_recent_days away from config.STRATEGY's current values had the
+    same silent-ignore problem for those, not just this one gate. None
+    (default) reproduces config.STRATEGY, matching every live caller
+    (run_screen()) that never had a custom cfg to begin with -- this
+    fix only changes behavior for a caller that explicitly passes one.
+
+    long_candles: optional, from backtest.load_long_history_cached() --
+    deep per-symbol history for indicators.compute_snapshot's weekly/
+    monthly confirmation-gate lookbacks. None (default, and always the
+    case for live callers today) means those fall back to `candles`
+    itself, same as before this existed.
+
+    precomputed: optional, one row per symbol (as of the date this call
+    represents) from backtest.run_backtest()'s precomputed daily-EWM
+    series -- from indicators.precompute_daily_series() via
+    rank_universe_asof(). None (default, and always the case for live
+    callers today) falls back to indicators.compute_snapshot()
+    recomputing ema/atr/rsi/macd from `df` directly, exactly as before
+    this param existed -- correct either way, this only changes speed.
+
+    precomputed_weekly_monthly: optional, {symbol: (weekly_full,
+    monthly_full)} from indicators.precompute_weekly_monthly_bars() via
+    backtest.run_backtest() -- turns on weekly_above_ema/
+    monthly_above_ema's fast path (see their docstrings) instead of
+    re-resampling all of long_close from scratch for every symbol on
+    every rebalance day, profiled as ~45% of a gate-enabled backtest's
+    runtime. None (default, and always the case for live callers today)
+    reproduces the original behavior exactly -- correct either way, this
+    only changes speed. The as-of date itself is read from `bench`'s own
+    last index entry (rank_universe_asof always passes bench already
+    sliced to exactly `:date`, so this is never a guess)."""
+    cfg = cfg if cfg is not None else config.STRATEGY
+    asof_date = bench.index[-1] if not bench.empty else None
     rows = {}
     for sym, df in candles.items():
-        snap = indicators.compute_snapshot(df, bench, cfg)
+        long_df = long_candles.get(sym) if long_candles else None
+        long_close = long_df["close"] if long_df is not None and not long_df.empty else None
+        precomputed_row = precomputed.get(sym) if precomputed else None
+        precomputed_wm = precomputed_weekly_monthly.get(sym) if precomputed_weekly_monthly else None
+        snap = indicators.compute_snapshot(df, bench, cfg, long_close=long_close,
+                                          precomputed_row=precomputed_row,
+                                          precomputed_weekly_monthly=precomputed_wm,
+                                          asof_date=asof_date)
         if snap:
             rows[sym] = snap
     return pd.DataFrame(rows).T
@@ -82,6 +135,27 @@ def apply_gates(tech: pd.DataFrame,
     t["near_high_ok"] = t["pct_52w_high"] >= cfg["near_high_threshold"]
     t["rsi_ok"] = t["rsi"].between(cfg["rsi_min"], cfg["rsi_max"])
 
+    # BACKTEST-ONLY (for now), off by default -- requires the higher-
+    # timeframe trend to also be strong, not just the daily one: weekly
+    # AND monthly price must each be above their own 200-period EMA
+    # (falls back to a 50-period EMA when there isn't enough resampled
+    # history for 200 yet -- see indicators._higher_tf_trend_ok).
+    # Simplified to EMA-only at the user's request -- originally also
+    # required weekly/monthly RSI above a floor (4 conditions total), but
+    # real-run data showed that caused excessive rebalance-exit churn: a
+    # held position only needed ONE of the 4 to wobble near its threshold
+    # to get force-sold. NaN (not enough weekly/monthly history at all,
+    # e.g. early in a backtest) fails this gate rather than passing it --
+    # deliberately fail-closed, unlike the fundamental gate's fail-open
+    # default, since "can't confirm the higher-timeframe trend" is a
+    # reason to skip a technical entry, not ignore the check.
+    if cfg.get("weekly_monthly_gate_enabled", False):
+        t["weekly_monthly_gate_ok"] = (
+            (t["weekly_above_ema"].fillna(False).astype(bool))
+            & (t["monthly_above_ema"].fillna(False).astype(bool)))
+    else:
+        t["weekly_monthly_gate_ok"] = True
+
     # EXPERIMENTAL, backtest-only for now -- excludes candidates priced
     # above max_stock_price entirely, at the root of the "one very
     # expensive stock breaks equal-weight math" problem
@@ -119,7 +193,15 @@ def apply_gates(tech: pd.DataFrame,
         t["quality_fails"] = ""
 
     t["all_gates"] = (t["trend_ok"] & t["near_high_ok"] & t["rsi_ok"]
-                      & t["quality_ok"] & t["price_ok"])
+                      & t["quality_ok"] & t["price_ok"] & t["weekly_monthly_gate_ok"])
+    # BACKTEST-ONLY (for now), off by default -- restricts entries to
+    # stocks whose best sector is currently among the top-N strongest
+    # (cfg["top_n_sectors"]). Only attached by rank_universe_asof() when
+    # both sector data AND sector_diversification_enabled are given, so
+    # this AND is a no-op (column absent) for every other caller,
+    # including live's run_screen() and any run without sector data.
+    if "sector_diversify_ok" in t.columns:
+        t["all_gates"] = t["all_gates"] & t["sector_diversify_ok"]
     return t
 
 
@@ -141,6 +223,19 @@ def score(t: pd.DataFrame, cfg: dict = config.STRATEGY) -> pd.DataFrame:
     if cfg.get("sector_bonus_weight", 0.0) and "sector_rs" in t.columns:
         t["score"] += (cfg["sector_bonus_weight"]
                        * _zscore(t["sector_rs"].astype(float)).fillna(0))
+
+    # Optional overhead-resistance tilt (see resistance_zones.py). Off by
+    # default (resistance_zone_weight=0) -- only present when the caller
+    # attached a "resistance_clearance" column (backtest.rank_universe_asof,
+    # opt-in). Higher clearance (more room before the nearest strong
+    # multi-year zone above price) scores better, same convention as every
+    # other factor here -- no sign flip needed. Same fillna(0)-on-missing
+    # treatment as the sector bonus: a stock with no zone data (too little
+    # history, or genuinely nothing nearby) contributes neutrally rather
+    # than being favored or penalized for missing data.
+    if cfg.get("resistance_zone_weight", 0.0) and "resistance_clearance" in t.columns:
+        t["score"] += (cfg["resistance_zone_weight"]
+                       * _zscore(t["resistance_clearance"].astype(float)).fillna(0))
 
     # EXPERIMENTAL, backtest-only for now -- tilts ranking toward higher
     # fundamental-quality names among gate-passers, same mechanic as the
@@ -197,7 +292,8 @@ def capital_position_size(total_equity: float, remaining_cash: float, price: flo
 
 
 def sell_check(sym: str, ranked: pd.DataFrame, candidates: pd.DataFrame,
-              keep_zone: set, max_positions: int) -> str | None:
+              keep_zone: set, max_positions: int,
+              cfg: dict = config.STRATEGY) -> str | None:
     """Returns the reason `sym` should be sold at rebalance, or None to
     keep holding it. Pulled out as one shared function 2026-08-04 --
     backtest.py's daily loop and live_rebalance.py's propose_rebalance()
@@ -214,6 +310,11 @@ def sell_check(sym: str, ranked: pd.DataFrame, candidates: pd.DataFrame,
     candidates: ranked[ranked["all_gates"]] -- gate-passers only, still
     sorted by score descending (score() itself sorts).
     keep_zone: set(candidates.head(max_positions * 2).index).
+    cfg: only consulted for the optional rsi_exit_gate_enabled/
+    rsi_exit_max check below -- every other rule here reads gate columns
+    apply_gates() already baked into `ranked`, not cfg directly. Defaults
+    to config.STRATEGY (live) so existing callers that don't pass cfg see
+    byte-identical behavior (the gate defaults off).
     """
     r = ranked.loc[sym] if sym in ranked.index else None
     if r is None:
@@ -221,6 +322,22 @@ def sell_check(sym: str, ranked: pd.DataFrame, candidates: pd.DataFrame,
     if not bool(r.get("above_ema200", False)):
         return "closed below 200 EMA"
     if sym not in keep_zone:
+        # BACKTEST-ONLY (for now), off by default -- see config.py's
+        # rsi_exit_gate_enabled comment: this was already tried once and
+        # discarded, re-exposed here for re-testing from the Backtest UI.
+        # A held position whose ONLY failing gate is the entry-band RSI
+        # ceiling stays held as long as RSI is still under the separate,
+        # wider rsi_exit_max, instead of being force-sold here just for
+        # running hot. Only fires when sym isn't a candidate at all (i.e.
+        # failed some gate); a candidate merely ranked below the keep
+        # zone still exits normally below, unaffected by this.
+        if cfg.get("rsi_exit_gate_enabled", False) and sym not in candidates.index:
+            non_rsi_gates_ok = bool(
+                r.get("trend_ok", True) and r.get("near_high_ok", True)
+                and r.get("quality_ok", True) and r.get("price_ok", True))
+            if non_rsi_gates_ok and float(r.get("rsi", 0)) <= cfg.get(
+                    "rsi_exit_max", cfg["rsi_max"]):
+                return None
         keep_zone_size = max_positions * 2
         if sym in candidates.index:
             rank = candidates.index.get_loc(sym) + 1

@@ -35,6 +35,7 @@ import streamlit as st
 from kiteconnect.exceptions import TokenException
 
 import backtest as bt
+import backtest_report
 import config
 import fundamentals_agent as fa
 import indicators
@@ -42,6 +43,7 @@ import kite_client
 import live_rebalance as lr
 import notify
 import nse_holidays
+import paper_page
 import screener
 import sector_universe as su
 from background_jobs import clear_background_job, get_background_job, start_background_job
@@ -417,6 +419,29 @@ _OVERVIEW_CSS = """
    right regardless of the parent's flex-direction. */
 [data-testid="stColumn"]:has(.st-key-lr_run_scan_hdr) { display:flex !important; }
 .st-key-lr_run_scan_hdr { margin-left:auto !important; width:fit-content !important; }
+/* Auto-execute-mode header row: "Auto-execute ON" chip + "Run today's
+   scan" button, side by side (chip on the left) and right-aligned to the
+   page edge together -- same technique as .st-key-screen_run_row. The
+   button used to live on its own separate row below the chip, only ever
+   pushed as far right as its own [5,2] column. */
+.st-key-lr_autoexec_header_row {
+    display:flex !important; flex-direction:row !important;
+    align-items:center !important; justify-content:flex-end !important; gap:12px !important;
+}
+/* Both "Run today's scan" buttons: a plain flex child (or a narrow
+   [5,2] column) shrinks below the button's natural single-line width
+   under pressure, wrapping "Run today's" / "scan" onto two lines --
+   flex-shrink:0 stops the button itself from being squeezed, and
+   white-space:nowrap on its label is the actual fix for the wrap (belt
+   and suspenders: shrink:0 alone doesn't stop text inside from
+   wrapping if the button's own width still ends up smaller than the
+   text needs). */
+.st-key-lr_run_scan_hdr, .st-key-lr_run_scan_autoexec {
+    flex-shrink:0 !important; width:fit-content !important;
+}
+.st-key-lr_run_scan_hdr button p, .st-key-lr_run_scan_autoexec button p {
+    white-space:nowrap !important;
+}
 /* Segmented control's real root is [data-testid="stButtonGroup"] (found
    by reading Streamlit's own source -- button_group.py/ButtonGroup.*.js
    -- after several guesses at the wrong element failed). It has exactly
@@ -1626,7 +1651,7 @@ def page_cockpit():
 
         donut_html = ""
         try:
-            membership = su.get_sector_membership(verbose=False)
+            membership = su.sector_membership_only(merged["symbol"].tolist(), verbose=False)
             sector_of = merged["symbol"].map(lambda s: (membership.get(s) or ["Unclassified"])[0])
             symbols_by_sector = merged.assign(sector=sector_of).groupby("sector")["symbol"] \
                 .apply(lambda s: ", ".join(s))
@@ -2486,9 +2511,9 @@ def page_screener():
             "candles already fetched by Run screen.")
         if st.button("Fetch current sector rankings"):
             with st.spinner("Fetching sector membership + index history..."):
-                membership = su.get_sector_membership()
                 days = config.STRATEGY["history_days"]
-                sector_candles = su.fetch_sector_index_candles(days=days)
+                membership, sector_candles = su.sector_membership_and_candles(
+                    config.UNIVERSE, days=days)
                 bench_sec = kite_client.benchmark_candles(days)
                 rank = su.sector_rs_asof(
                     sector_candles, bench_sec, dt.date.today(),
@@ -2518,6 +2543,31 @@ def page_screener():
 # Page: Live Rebalance
 # ---------------------------------------------------------------------------
 
+def _with_day_item_status(result: dict) -> dict:
+    """Overlays result's sells/buys/top_ups/stop_updates with EVERY item
+    from EVERY run on the SAME CALENDAR DAY as result['run_time'] -- not
+    just the single run_id that produced/loaded this result -- so the
+    Proposed sells/buys/top-ups/stop-updates sections on the Live
+    Rebalance page show the full day's activity (e.g. an early auto-
+    execute run followed by a later manual re-scan that found nothing
+    new) with each row's real status, instead of only the latest run in
+    isolation and instead of executed/error/expired items silently
+    disappearing. See get_rebalance_day_items(). Safe to call right after
+    a fresh scan too: propose_rebalance() already persists via
+    save_rebalance_run() before returning, so the DB is authoritative by
+    the time this runs. Trade-off: loses any column that only ever
+    existed in the in-memory propose_rebalance() result and was never
+    persisted (e.g. 'rank') -- the buys table already degrades
+    gracefully for that (builds its column list from whatever's actually
+    present)."""
+    run_time = result.get("run_time")
+    if run_time is None:
+        return result
+    date_str = run_time.date().isoformat() if hasattr(run_time, "date") else str(run_time)[:10]
+    result.update(state_db.get_rebalance_day_items(date_str))
+    return result
+
+
 def page_live_rebalance():
     auto_exec = bool(config.STRATEGY.get("auto_execute_trades", False))
     rebalance_job = get_background_job("rebalance_run")
@@ -2545,13 +2595,22 @@ def page_live_rebalance():
             "override for whatever's left (e.g. a manual 'Run today's scan'). "
             "Turn this off in Admin → Strategy configuration to go back to "
             "manual-only.")
-        st.markdown(
-            '<div class="ov-header"><div><span class="ov-h1">📡 Live Rebalance</span> '
-            '<span class="ov-sub">· review, then execute</span></div>'
-            '<div class="ov-chips">'
-            f'<span class="ov-info-icon" title="{_auto_exec_tip}">ℹ️</span>'
-            '<span class="ov-chip ov-chip-amber">'
-            '⚠ Auto-execute ON</span></div></div>', unsafe_allow_html=True)
+        _hdr_l, _hdr_r = st.columns([5, 2])
+        with _hdr_l:
+            st.markdown(
+                '<div class="ov-header" style="margin-bottom:0;">'
+                '<div><span class="ov-h1">📡 Live Rebalance</span> '
+                '<span class="ov-sub">· review, then execute</span></div>'
+                '</div>', unsafe_allow_html=True)
+        with _hdr_r:
+            with st.container(key="lr_autoexec_header_row"):
+                st.markdown(
+                    f'<span class="ov-info-icon" title="{_auto_exec_tip}">ℹ️</span>'
+                    '<span class="ov-chip ov-chip-amber">⚠ Auto-execute ON</span>',
+                    unsafe_allow_html=True)
+                if st.button("Run today's scan", type="primary",
+                            disabled=rebalance_running, key="lr_run_scan_autoexec"):
+                    _run_scan_now()
     else:
         _hdr_l, _hdr_r = st.columns([5, 2])
         with _hdr_l:
@@ -2573,16 +2632,10 @@ def page_live_rebalance():
             # fresh here regardless of when the underlying proposal ran.
             last_run["holdings"] = lr.get_live_holdings().reset_index().rename(
                 columns={"tradingsymbol": "symbol"})
-            st.session_state["rebalance_proposal"] = last_run
+            st.session_state["rebalance_proposal"] = _with_day_item_status(last_run)
 
     if rebalance_running:
         st.info(f"⏳ Scan running since {rebalance_job['started_at']:%H:%M:%S} — safe to switch tabs.")
-    if auto_exec:
-        _, _scan_col = st.columns([5, 2])
-        with _scan_col:
-            if st.button("Run today's scan", type="primary",
-                        disabled=rebalance_running, key="lr_run_scan_autoexec"):
-                _run_scan_now()
 
     @st.fragment(run_every="1s" if rebalance_running else None)
     def _rebalance_job_status():
@@ -2597,7 +2650,7 @@ def page_live_rebalance():
         if job["error"]:
             st.error(f"Scan failed: {job['error']}")
         else:
-            st.session_state["rebalance_proposal"] = job["result"]
+            st.session_state["rebalance_proposal"] = _with_day_item_status(job["result"])
         clear_background_job("rebalance_run")
         st.rerun()
 
@@ -2613,17 +2666,56 @@ def page_live_rebalance():
                   "it finishes, so you can't execute against this now-stale "
                   "proposal while a fresh one is being computed.")
 
+    def _latest_per_symbol(df: pd.DataFrame) -> pd.DataFrame:
+        """Collapses a day-aggregated sells/buys/top_ups/stop_updates table
+        (see _with_day_item_status -- can have one row per symbol PER RUN
+        today) down to one row per symbol: whichever run's row is most
+        recent. save_rebalance_run() already guarantees at most one
+        'proposed' row per symbol exists at a time (expires every prior
+        proposed row the moment a new scan runs), so this only ever
+        changes what's shown for a symbol whose most recent attempt
+        already resolved (executed/error/expired) -- never hides a
+        genuinely still-open proposal behind a stale one."""
+        if df.empty or "run_time" not in df.columns:
+            return df
+        return (df.sort_values("run_time")
+                 .groupby("symbol", as_index=False).last()
+                 .sort_values("run_time", ascending=False).reset_index(drop=True))
+
+    for _key in ("sells", "buys", "top_ups", "stop_updates"):
+        if _key in result:
+            result[_key] = _latest_per_symbol(result[_key])
+
+    def _pending(df: pd.DataFrame) -> pd.DataFrame:
+        """The still-actionable (auto-selected) subset of a sells/buys/
+        top_ups/stop_updates table -- these now carry every status (see
+        _with_day_item_status), so counts/badges/what's pre-selected for
+        Execute all need this rather than the raw row count. Only
+        'proposed' rows are pre-selected -- an 'error' row needs an
+        explicit manual pick (see _actionable below), never auto-retried."""
+        return df[df["status"] == "proposed"] if "status" in df.columns else df
+
+    def _actionable(df: pd.DataFrame) -> pd.DataFrame:
+        """The full selectable set for a section's multiselect: 'proposed'
+        (normal, pre-selected) PLUS 'error' (opt-in manual retry only --
+        see _pending). 'executed'/'expired' rows are never selectable,
+        there's nothing left to do with them."""
+        return (df[df["status"].isin(["proposed", "error"])]
+               if "status" in df.columns else df)
+
     _real_max_positions = config.STRATEGY["max_positions"]
     _real_target = result.get("target_per_slot") or 0
     _cash_pool = result.get("cash_pool") or 0
+    _pending_sells = _pending(result["sells"])
+    _pending_buys = _pending(result["buys"])
     st.markdown(
         '<div class="ov-grid-metrics">'
         + _ov_metric_html("Current holdings", str(len(result["holdings"])), "CNC positions", "", "blue")
-        + _ov_metric_html("Proposed sells", str(len(result["sells"])),
-                         (result["sells"].iloc[0]["symbol"] if not result["sells"].empty else None),
+        + _ov_metric_html("Proposed sells", str(len(_pending_sells)),
+                         (_pending_sells.iloc[0]["symbol"] if not _pending_sells.empty else None),
                          "", "red")
-        + _ov_metric_html("Proposed buys", str(len(result["buys"])),
-                         (result["buys"].iloc[0]["symbol"] if not result["buys"].empty else None),
+        + _ov_metric_html("Proposed buys", str(len(_pending_buys)),
+                         (_pending_buys.iloc[0]["symbol"] if not _pending_buys.empty else None),
                          "", "green")
         + _ov_metric_html("Open slots after sells", str(result["open_slots"]),
                          f"of {_real_max_positions} max", "", "purple")
@@ -2638,8 +2730,8 @@ def page_live_rebalance():
     # longer relevant to anything still actionable, so skip it entirely
     # rather than show a stale "buys below may be partial" next to an
     # empty buys table.
-    still_actionable = (not result["buys"].empty
-                        or not result.get("top_ups", pd.DataFrame()).empty)
+    still_actionable = (not _pending_buys.empty
+                        or not _pending(result.get("top_ups", pd.DataFrame())).empty)
     if still_actionable and result.get("cash_shortfall") is not None:
         target = result.get("target_per_slot") or 0
         pool = result.get("cash_pool") or 0
@@ -2672,12 +2764,12 @@ def page_live_rebalance():
         st.markdown(
             '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
             '<span class="ov-dot" style="background:var(--ov-red);">'
-            f'</span>Proposed sells <span class="ov-badge ov-badge-red">{len(result["sells"])}</span>'
+            f'</span>Proposed sells <span class="ov-badge ov-badge-red">{len(_pending_sells)}</span>'
             f'<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
             f'Dropped out of the top-{_keep_zone_size} keep zone</span></p>',
             unsafe_allow_html=True)
         if st.session_state.get("sell_exec_log"):
-            st.success("Sell(s) executed and removed from the list below.")
+            st.success("Sell(s) executed — status below reflects the result.")
             for line in st.session_state["sell_exec_log"]:
                 st.write(line)
             del st.session_state["sell_exec_log"]
@@ -2690,31 +2782,60 @@ def page_live_rebalance():
                 _sells_display["ltp"] = pd.NA
             _sells_display["pnl"] = (
                 (_sells_display["ltp"] - _sells_display["avg_price"]) * _sells_display["qty"])
+            # Rows can now come from several runs today (see
+            # _with_day_item_status) -- show which run each came from so
+            # two rows for the same symbol (e.g. re-proposed after an
+            # earlier one expired) aren't just confusing duplicates.
+            if "run_time" in _sells_display.columns:
+                _sells_display["run_time"] = pd.to_datetime(
+                    _sells_display["run_time"]).dt.strftime("%d %b %H:%M")
+            _sells_cols = [c for c in
+                          ["run_time", "symbol", "qty", "avg_price", "ltp", "pnl",
+                           "reason", "status"] if c in _sells_display.columns]
             st.markdown(
                 _ov_table_html(
-                    _sells_display,
-                    columns=["symbol", "qty", "avg_price", "ltp", "pnl", "reason"],
+                    _sells_display, columns=_sells_cols,
                     sym_cols=["symbol"], pnl_cols=["pnl"],
                     num_fmt={"qty": "{:.0f}", "avg_price": "₹{:.2f}", "ltp": "₹{:.2f}",
-                             "pnl": "₹{:+,.0f}"}),
+                             "pnl": "₹{:+,.0f}"},
+                    badges={"status": {"proposed": "ov-badge-amber", "executed": "ov-badge-green",
+                                       "error": "ov-badge-red", "expired": "ov-badge-gray"}}),
                 unsafe_allow_html=True)
-            confirm_sell = st.checkbox(
-                "I confirm I want to execute ALL proposed sells at market",
-                key="confirm_sell_all")
-            if st.button("Execute all sells", disabled=not confirm_sell or rebalance_running,
-                        use_container_width=True, key="lr_execute_sells"):
-                log, succeeded, failed = lr.execute_sells(result["sells"])
-                st.session_state["sell_exec_log"] = log
-                resolved = succeeded + list(failed)
-                if resolved:
-                    result["sells"] = result["sells"][
-                        ~result["sells"]["symbol"].isin(resolved)].reset_index(drop=True)
-                    result["open_slots"] = result.get("open_slots", 0) + len(succeeded)
-                    st.session_state["rebalance_proposal"] = result
-                    state_db.mark_rebalance_sells_executed(result.get("run_id"), succeeded)
-                    state_db.mark_rebalance_sells_failed(result.get("run_id"), failed)
-                    state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
-                st.rerun()
+            _sells_actionable = _actionable(result["sells"])
+            if not _sells_actionable.empty:
+                _sells_status = _sells_actionable.set_index("symbol")["status"]
+                selected_sells = st.multiselect(
+                    "Select which to execute — error rows are offered for a "
+                    "manual retry but never auto-selected",
+                    options=_sells_actionable["symbol"].tolist(),
+                    default=_pending_sells["symbol"].tolist(),
+                    format_func=lambda s: f"{s} ({_sells_status.get(s)})",
+                    key="lr_sells_select")
+                st.caption(f"{len(selected_sells)} of {len(_sells_actionable)} selected")
+                confirm_sell = st.checkbox(
+                    "I confirm I want to execute the SELECTED sells at market",
+                    key="confirm_sell_all")
+                if st.button("Execute selected sells",
+                            disabled=not confirm_sell or not selected_sells or rebalance_running,
+                            use_container_width=True, key="lr_execute_sells"):
+                    _to_execute = _sells_actionable[
+                        _sells_actionable["symbol"].isin(selected_sells)]
+                    log, succeeded, failed = lr.execute_sells(_to_execute)
+                    st.session_state["sell_exec_log"] = log
+                    resolved = succeeded + list(failed)
+                    if resolved:
+                        result["open_slots"] = result.get("open_slots", 0) + len(succeeded)
+                        state_db.mark_rebalance_sells_executed(result.get("run_id"), succeeded)
+                        state_db.mark_rebalance_sells_failed(result.get("run_id"), failed)
+                        state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
+                        # Re-read from state_db (already the source of truth after
+                        # the marks above) rather than hand-patching this dict --
+                        # keeps every already-resolved row visible with its real
+                        # status instead of dropping it from the table.
+                        st.session_state["rebalance_proposal"] = _with_day_item_status(result)
+                    st.rerun()
+            else:
+                st.caption("All resolved — nothing left to execute here.")
         elif not result.get("is_rebalance_day", True):
             st.caption(f"Sell/keep-zone rule not evaluated today -- "
                       f"'{result.get('rebalance_cadence', 'daily')}' cadence selected in "
@@ -2727,70 +2848,91 @@ def page_live_rebalance():
         st.markdown(
             '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
             '<span class="ov-dot" style="background:var(--ov-green);">'
-            f'</span>Proposed buys <span class="ov-badge ov-badge-green">{len(result["buys"])}</span>'
+            f'</span>Proposed buys <span class="ov-badge ov-badge-green">{len(_pending_buys)}</span>'
             '<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
             'Sized off real available cash</span></p>',
             unsafe_allow_html=True)
         if st.session_state.get("buy_exec_log"):
-            st.success("Buy(s) executed and removed from the list below.")
+            st.success("Buy(s) executed — status below reflects the result.")
             for line in st.session_state["buy_exec_log"]:
                 st.write(line)
             del st.session_state["buy_exec_log"]
         if not result["buys"].empty:
-            # "rank" was added to the buys dict alongside this restyle -- a
-            # proposal already sitting in session state (or loaded from a
-            # run stored before this change) won't have it, so build the
-            # column list from what's actually present rather than assume.
+            # "rank" only ever exists on a just-completed scan's in-memory
+            # result (never persisted to rebalance_buys -- see
+            # _with_day_item_status) -- a proposal reloaded from state_db
+            # won't have it, so build the column list from what's actually
+            # present rather than assume.
             _buys_display = result["buys"].copy()
             _buys_display["amount"] = _buys_display["qty"] * _buys_display["price"]
+            if "run_time" in _buys_display.columns:
+                _buys_display["run_time"] = pd.to_datetime(
+                    _buys_display["run_time"]).dt.strftime("%d %b %H:%M")
             _buys_cols = [c for c in
-                         ["symbol", "rank", "score", "price", "qty", "amount", "stop",
-                          "fundamental_score"] if c in _buys_display.columns]
+                         ["run_time", "symbol", "rank", "score", "price", "qty", "amount",
+                          "stop", "fundamental_score", "status"] if c in _buys_display.columns]
             st.markdown(
                 _ov_table_html(
                     _buys_display, columns=_buys_cols, sym_cols=["symbol"],
                     num_fmt={"rank": "{:.0f}", "qty": "{:.0f}", "price": "₹{:.2f}",
                              "amount": "₹{:,.0f}", "stop": "₹{:.2f}", "score": "{:.2f}",
-                             "fundamental_score": "{:.1f}"}),
+                             "fundamental_score": "{:.1f}"},
+                    badges={"status": {"proposed": "ov-badge-amber", "executed": "ov-badge-green",
+                                       "error": "ov-badge-red", "expired": "ov-badge-gray"}}),
                 unsafe_allow_html=True)
             st.markdown(
                 f'<div class="ov-row"><span class="ov-card-meta">Total amount</span>'
                 f'<span class="ov-sym">₹{_buys_display["amount"].sum():,.0f}</span></div>',
                 unsafe_allow_html=True)
-            place_gtt = st.checkbox("Also place a GTT stop-loss for each buy",
-                                    value=True, key="rebal_gtt")
-            confirm_buy = st.checkbox(
-                "I confirm I want to execute ALL proposed buys at market",
-                key="confirm_buy_all")
-            if st.button("Execute all buys", disabled=not confirm_buy or rebalance_running,
-                        use_container_width=True, key="lr_execute_buys"):
-                log, succeeded, failed = lr.execute_buys(result["buys"], place_gtt=place_gtt)
-                st.session_state["buy_exec_log"] = log
-                resolved = succeeded + list(failed)
-                if resolved:
-                    result["buys"] = result["buys"][
-                        ~result["buys"]["symbol"].isin(resolved)].reset_index(drop=True)
-                    result["open_slots"] = max(result.get("open_slots", 0) - len(succeeded), 0)
-                    st.session_state["rebalance_proposal"] = result
-                    state_db.mark_rebalance_buys_executed(result.get("run_id"), succeeded)
-                    state_db.mark_rebalance_buys_failed(result.get("run_id"), failed)
-                    state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
-                st.rerun()
+            _buys_actionable = _actionable(result["buys"])
+            if not _buys_actionable.empty:
+                _buys_status = _buys_actionable.set_index("symbol")["status"]
+                selected_buys = st.multiselect(
+                    "Select which to execute — error rows are offered for a "
+                    "manual retry but never auto-selected",
+                    options=_buys_actionable["symbol"].tolist(),
+                    default=_pending_buys["symbol"].tolist(),
+                    format_func=lambda s: f"{s} ({_buys_status.get(s)})",
+                    key="lr_buys_select")
+                st.caption(f"{len(selected_buys)} of {len(_buys_actionable)} selected")
+                place_gtt = st.checkbox("Also place a GTT stop-loss for each buy",
+                                        value=True, key="rebal_gtt")
+                confirm_buy = st.checkbox(
+                    "I confirm I want to execute the SELECTED buys at market",
+                    key="confirm_buy_all")
+                if st.button("Execute selected buys",
+                            disabled=not confirm_buy or not selected_buys or rebalance_running,
+                            use_container_width=True, key="lr_execute_buys"):
+                    _to_execute = _buys_actionable[
+                        _buys_actionable["symbol"].isin(selected_buys)]
+                    log, succeeded, failed = lr.execute_buys(_to_execute, place_gtt=place_gtt)
+                    st.session_state["buy_exec_log"] = log
+                    resolved = succeeded + list(failed)
+                    if resolved:
+                        result["open_slots"] = max(result.get("open_slots", 0) - len(succeeded), 0)
+                        state_db.mark_rebalance_buys_executed(result.get("run_id"), succeeded)
+                        state_db.mark_rebalance_buys_failed(result.get("run_id"), failed)
+                        state_db.set_rebalance_open_slots(result.get("run_id"), result["open_slots"])
+                        st.session_state["rebalance_proposal"] = _with_day_item_status(result)
+                    st.rerun()
+            else:
+                st.caption("All resolved — nothing left to execute here.")
         else:
             st.caption("No open slots, or no candidates today.")
 
     top_ups = result.get("top_ups", pd.DataFrame())
     stop_updates = result.get("stop_updates", pd.DataFrame())
+    _pending_topups = _pending(top_ups)
     col_topups, col_stops = st.columns(2)
     with col_topups:
         with st.container(border=True, key="ov-card-lr-topups"):
             st.markdown(
                 '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
                 '<span class="ov-dot" style="background:var(--ov-blue);">'
-                f'</span>Proposed top-ups <span class="ov-badge ov-badge-gray">{len(top_ups)}</span></p>',
+                f'</span>Proposed top-ups <span class="ov-badge ov-badge-gray">{len(_pending_topups)}</span></p>',
                 unsafe_allow_html=True)
             if st.session_state.get("topup_exec_log"):
-                st.success("Top-up(s) executed and removed from the list below.")
+                st.success("Top-up(s) executed — status below reflects the result.")
                 for line in st.session_state["topup_exec_log"]:
                     st.write(line)
                 del st.session_state["topup_exec_log"]
@@ -2803,34 +2945,54 @@ def page_live_rebalance():
                     "total.")
                 _topups_display = top_ups.copy()
                 _topups_display["amount"] = _topups_display["extra_qty"] * _topups_display["price"]
+                if "run_time" in _topups_display.columns:
+                    _topups_display["run_time"] = pd.to_datetime(
+                        _topups_display["run_time"]).dt.strftime("%d %b %H:%M")
                 _topups_cols = [c for c in
-                               ["symbol", "extra_qty", "price", "amount", "gtt_trigger_id"]
+                               ["run_time", "symbol", "extra_qty", "price", "amount",
+                                "gtt_trigger_id", "status"]
                                if c in _topups_display.columns]
                 st.markdown(
                     _ov_table_html(
                         _topups_display, columns=_topups_cols, sym_cols=["symbol"],
                         num_fmt={"extra_qty": "{:.0f}", "price": "₹{:.2f}",
-                                "amount": "₹{:,.0f}"}),
+                                "amount": "₹{:,.0f}"},
+                        badges={"status": {"proposed": "ov-badge-amber", "executed": "ov-badge-green",
+                                           "error": "ov-badge-red", "expired": "ov-badge-gray"}}),
                     unsafe_allow_html=True)
                 st.markdown(
                     f'<div class="ov-row"><span class="ov-card-meta">Total amount</span>'
                     f'<span class="ov-sym">₹{_topups_display["amount"].sum():,.0f}</span></div>',
                     unsafe_allow_html=True)
-                confirm_topup = st.checkbox(
-                    "I confirm I want to execute ALL proposed top-ups at market",
-                    key="confirm_topup_all")
-                if st.button("Execute all top-ups", disabled=not confirm_topup or rebalance_running,
-                            use_container_width=True, key="lr_execute_topups"):
-                    log, succeeded, failed = lr.execute_top_ups(top_ups)
-                    st.session_state["topup_exec_log"] = log
-                    resolved = succeeded + list(failed)
-                    if resolved:
-                        result["top_ups"] = top_ups[
-                            ~top_ups["symbol"].isin(resolved)].reset_index(drop=True)
-                        st.session_state["rebalance_proposal"] = result
-                        state_db.mark_rebalance_top_ups_executed(result.get("run_id"), succeeded)
-                        state_db.mark_rebalance_top_ups_failed(result.get("run_id"), failed)
-                    st.rerun()
+                _topups_actionable = _actionable(top_ups)
+                if not _topups_actionable.empty:
+                    _topups_status = _topups_actionable.set_index("symbol")["status"]
+                    selected_topups = st.multiselect(
+                        "Select which to execute — error rows are offered for a "
+                        "manual retry but never auto-selected",
+                        options=_topups_actionable["symbol"].tolist(),
+                        default=_pending_topups["symbol"].tolist(),
+                        format_func=lambda s: f"{s} ({_topups_status.get(s)})",
+                        key="lr_topups_select")
+                    st.caption(f"{len(selected_topups)} of {len(_topups_actionable)} selected")
+                    confirm_topup = st.checkbox(
+                        "I confirm I want to execute the SELECTED top-ups at market",
+                        key="confirm_topup_all")
+                    if st.button("Execute selected top-ups",
+                                disabled=not confirm_topup or not selected_topups or rebalance_running,
+                                use_container_width=True, key="lr_execute_topups"):
+                        _to_execute = _topups_actionable[
+                            _topups_actionable["symbol"].isin(selected_topups)]
+                        log, succeeded, failed = lr.execute_top_ups(_to_execute)
+                        st.session_state["topup_exec_log"] = log
+                        resolved = succeeded + list(failed)
+                        if resolved:
+                            state_db.mark_rebalance_top_ups_executed(result.get("run_id"), succeeded)
+                            state_db.mark_rebalance_top_ups_failed(result.get("run_id"), failed)
+                            st.session_state["rebalance_proposal"] = _with_day_item_status(result)
+                        st.rerun()
+                else:
+                    st.caption("All resolved — nothing left to execute here.")
             else:
                 st.caption("No under-target holdings, or no cash left over to top up with.")
 
@@ -2840,66 +3002,88 @@ def page_live_rebalance():
                 '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
                 '<span class="ov-dot" style="background:var(--ov-amber);">'
                 f'</span>Stop updates needing attention '
-                f'<span class="ov-badge ov-badge-gray">{len(stop_updates)}</span></p>',
+                f'<span class="ov-badge ov-badge-gray">{len(_pending(stop_updates))}</span></p>',
                 unsafe_allow_html=True)
             if st.session_state.get("stopupdate_exec_log"):
-                st.success("Stop update(s) applied and removed from the list below.")
+                st.success("Stop update(s) applied — status below reflects the result.")
                 for line in st.session_state["stopupdate_exec_log"]:
                     st.write(line)
                 del st.session_state["stopupdate_exec_log"]
+            _pending_stops = _pending(stop_updates)
             if not stop_updates.empty:
                 st.caption("Ratchets auto-apply; only ones that couldn't (no active "
                           "GTT / Kite error) land here.")
                 _stops_display = stop_updates.copy()
                 _stops_display["gtt_status"] = _stops_display["gtt_trigger_id"].apply(
                     lambda v: "none active" if pd.isna(v) else "active")
+                if "run_time" in _stops_display.columns:
+                    _stops_display["run_time"] = pd.to_datetime(
+                        _stops_display["run_time"]).dt.strftime("%d %b %H:%M")
+                _stops_cols = [c for c in
+                              ["run_time", "symbol", "current_stop", "recommended_stop",
+                               "gtt_status", "status"]
+                              if c in _stops_display.columns]
                 st.markdown(
                     _ov_table_html(
-                        _stops_display,
-                        columns=["symbol", "current_stop", "recommended_stop", "gtt_status"],
-                        sym_cols=["symbol"],
+                        _stops_display, columns=_stops_cols, sym_cols=["symbol"],
                         num_fmt={"current_stop": "₹{:.2f}", "recommended_stop": "₹{:.2f}"},
                         badges={"gtt_status": {"active": "ov-badge-green",
-                                               "none active": "ov-badge-red"}}),
+                                               "none active": "ov-badge-red"},
+                               "status": {"proposed": "ov-badge-amber", "executed": "ov-badge-green",
+                                          "error": "ov-badge-red", "expired": "ov-badge-gray"}}),
                     unsafe_allow_html=True)
-                confirm_stops = st.checkbox(
-                    "I confirm I want to raise ALL these GTT stop-losses",
-                    key="confirm_stop_updates")
-                if st.button("Apply stop updates", disabled=not confirm_stops or rebalance_running,
-                            use_container_width=True, key="lr_apply_stops"):
-                    log = []
-                    succeeded = []
-                    failed = {}
-                    for _, r in stop_updates.iterrows():
-                        if pd.isna(r["gtt_trigger_id"]):
-                            log.append(f"⚠️ {r['symbol']}: no active GTT to update — "
-                                      "place one manually first (Trade tab).")
-                            failed[r["symbol"]] = "No active GTT to update"
-                            continue
-                        try:
-                            ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
-                            kite_client.modify_gtt_trigger(
-                                int(r["gtt_trigger_id"]), r["symbol"], int(r["qty"]),
-                                r["recommended_stop"], ltp)
-                            # Only now does the recommended stop become the applied
-                            # (real, broker-side) stop -- see apply_stop_update()'s
-                            # docstring for why this must never happen earlier.
-                            state_db.apply_stop_update(r["symbol"])
-                            log.append(f"✅ {r['symbol']}: stop raised to "
-                                      f"₹{r['recommended_stop']:.2f}")
-                            succeeded.append(r["symbol"])
-                        except Exception as e:
-                            log.append(f"❌ {r['symbol']}: FAILED — {e}")
-                            failed[r["symbol"]] = str(e)
-                    st.session_state["stopupdate_exec_log"] = log
-                    resolved = succeeded + list(failed)
-                    if resolved:
-                        result["stop_updates"] = stop_updates[
-                            ~stop_updates["symbol"].isin(resolved)].reset_index(drop=True)
-                        st.session_state["rebalance_proposal"] = result
-                        state_db.mark_rebalance_stop_updates_executed(result.get("run_id"), succeeded)
-                        state_db.mark_rebalance_stop_updates_failed(result.get("run_id"), failed)
-                    st.rerun()
+                _stops_actionable = _actionable(stop_updates)
+                if not _stops_actionable.empty:
+                    _stops_status = _stops_actionable.set_index("symbol")["status"]
+                    selected_stops = st.multiselect(
+                        "Select which to apply — error rows are offered for a "
+                        "manual retry but never auto-selected",
+                        options=_stops_actionable["symbol"].tolist(),
+                        default=_pending_stops["symbol"].tolist(),
+                        format_func=lambda s: f"{s} ({_stops_status.get(s)})",
+                        key="lr_stops_select")
+                    st.caption(f"{len(selected_stops)} of {len(_stops_actionable)} selected")
+                    confirm_stops = st.checkbox(
+                        "I confirm I want to raise the SELECTED GTT stop-losses",
+                        key="confirm_stop_updates")
+                    if st.button("Apply selected stop updates",
+                                disabled=not confirm_stops or not selected_stops or rebalance_running,
+                                use_container_width=True, key="lr_apply_stops"):
+                        _to_apply = _stops_actionable[
+                            _stops_actionable["symbol"].isin(selected_stops)]
+                        log = []
+                        succeeded = []
+                        failed = {}
+                        for _, r in _to_apply.iterrows():
+                            if pd.isna(r["gtt_trigger_id"]):
+                                log.append(f"⚠️ {r['symbol']}: no active GTT to update — "
+                                          "place one manually first (Trade tab).")
+                                failed[r["symbol"]] = "No active GTT to update"
+                                continue
+                            try:
+                                ltp = kite_client.get_ltp([r["symbol"]])[r["symbol"]]
+                                kite_client.modify_gtt_trigger(
+                                    int(r["gtt_trigger_id"]), r["symbol"], int(r["qty"]),
+                                    r["recommended_stop"], ltp)
+                                # Only now does the recommended stop become the applied
+                                # (real, broker-side) stop -- see apply_stop_update()'s
+                                # docstring for why this must never happen earlier.
+                                state_db.apply_stop_update(r["symbol"])
+                                log.append(f"✅ {r['symbol']}: stop raised to "
+                                          f"₹{r['recommended_stop']:.2f}")
+                                succeeded.append(r["symbol"])
+                            except Exception as e:
+                                log.append(f"❌ {r['symbol']}: FAILED — {e}")
+                                failed[r["symbol"]] = str(e)
+                        st.session_state["stopupdate_exec_log"] = log
+                        resolved = succeeded + list(failed)
+                        if resolved:
+                            state_db.mark_rebalance_stop_updates_executed(result.get("run_id"), succeeded)
+                            state_db.mark_rebalance_stop_updates_failed(result.get("run_id"), failed)
+                            st.session_state["rebalance_proposal"] = _with_day_item_status(result)
+                        st.rerun()
+                else:
+                    st.caption("All resolved — nothing left to apply here.")
             else:
                 st.caption("No trailing-stop increases needed attention today — "
                           "either nothing ratcheted, or it all auto-applied cleanly.")
@@ -3381,7 +3565,94 @@ def page_positions_trade():
 # Page: Backtest
 # ---------------------------------------------------------------------------
 
+def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
+                      run_cfg, bt_capital, rebalance_cadence_v, progress_cb=None):
+    """Runs in a background thread via start_background_job -- everything
+    the old synchronous button handler did (load candles, load fundamentals
+    history, run the backtest, cache the result), just with progress
+    reporting threaded through both slow steps instead of an indeterminate
+    spinner. Candle loading gets 0-40% of the bar, the simulation itself
+    gets the remaining 40-100% -- a rough split, not measured, but close
+    enough that the bar never looks stuck for long."""
+    def report(stage, frac):
+        if progress_cb:
+            progress_cb(stage, frac)
+
+    if range_mode == "Custom dates":
+        days = (dt.date.today() - start_date).days + 400
+        candles_bt, bench_bt = bt.load_candles_cached(
+            config.UNIVERSE, days, end_date=end_date,
+            progress_cb=lambda s, f: report(s, f * 0.4))
+        sim_start_date = start_date
+    else:
+        days = int(years * 365) + 400
+        candles_bt, bench_bt = bt.load_candles_cached(
+            config.UNIVERSE, days, progress_cb=lambda s, f: report(s, f * 0.4))
+        # Same reasoning as the Custom-dates branch's sim_start_date: the
+        # warmup-days skip alone only approximately lands `years` back
+        # from today (it depends on exactly how much candle history was
+        # fetched), so without this a "5 years" run could actually
+        # simulate/trade a bit outside that window.
+        sim_start_date = dt.date.today() - dt.timedelta(days=int(years * 365))
+
+    fundamentals_history = None
+    if use_fundamentals and os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
+        fundamentals_history = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)["history"]
+
+    # Only fetched when the sector bonus OR the sector diversification cap
+    # is actually on (~21 index candle fetches, ~15-30s) -- bt.run_backtest()
+    # treats both None (both features off) as byte-identical to never
+    # having sector data at all, so there's no reason to pay for the fetch
+    # otherwise.
+    sector_candles = None
+    sector_membership = None
+    if (run_cfg.get("sector_bonus_weight", 0.0) > 0
+            or run_cfg.get("sector_diversification_enabled", False)):
+        report("Fetching sector index data...", 0.42)
+        sector_membership, sector_candles = su.sector_membership_and_candles(
+            config.UNIVERSE, days=days, verbose=False)
+
+    # Only fetched when the weekly/monthly confirmation gate OR the
+    # overhead-resistance tilt is on -- both need far more history than
+    # this run's own candles_bt window usually has (weekly/monthly's
+    # 200-bar EMA needs ~16.7 years; resistance zones need
+    # resistance_zone_lookback_years, 5 by default). Cached separately and
+    # incrementally (see bt.load_long_history_cached's docstring) so this
+    # is only slow the very first time, not on every run.
+    long_candles = None
+    if (run_cfg.get("weekly_monthly_gate_enabled", False)
+            or run_cfg.get("resistance_zone_weight", 0.0) > 0):
+        long_candles = bt.load_long_history_cached(
+            config.UNIVERSE, end_date=end_date,
+            progress_cb=lambda s, f: report(s, 0.44 + f * 0.05))
+
+    _rebalance_code = {"daily": "D", "weekly": "W", "monthly": "MS"}.get(
+        rebalance_cadence_v, "MS")
+    res = bt.run_backtest(
+        candles_bt, bench_bt, run_cfg, initial_capital=bt_capital,
+        rebalance=_rebalance_code,
+        fundamentals_history=fundamentals_history,
+        sector_candles=sector_candles, sector_membership=sector_membership,
+        long_candles=long_candles, start_date=sim_start_date,
+        progress_cb=lambda s, f: report(s, 0.4 + f * 0.6))
+    run_time = dt.datetime.now()
+    os.makedirs("cache", exist_ok=True)
+    run_meta = {
+        "range_mode": range_mode, "years": years,
+        "start_date": start_date, "end_date": end_date,
+        "bt_capital": bt_capital, "rebalance_cadence": rebalance_cadence_v,
+        "use_fundamentals": use_fundamentals,
+    }
+    result = {"result": res, "bench": bench_bt, "run_time": run_time,
+              "cfg": run_cfg, "run_meta": run_meta}
+    pd.to_pickle(result, BACKTEST_CACHE)
+    return result
+
+
 def page_backtest():
+    backtest_job = get_background_job("backtest_run")
+    backtest_running = backtest_job is not None and not backtest_job["done"]
+
     _backtest_tip = html_lib.escape(
         "Replays the exact screener logic point-in-time with monthly "
         "rebalancing (any slot freed by a stop gets redeployed immediately, "
@@ -3407,9 +3678,11 @@ def page_backtest():
     with _bt_hdr_r:
         _bt_hdr_r1, _bt_hdr_r2 = st.columns(2)
         _build_fh_clicked = _bt_hdr_r1.button(
-            "Build/Refresh fundamentals history", key="bt_build_fh_hdr")
+            "Build/Refresh fundamentals history", key="bt_build_fh_hdr",
+            disabled=backtest_running)
         _run_backtest_clicked = _bt_hdr_r2.button(
-            "Run backtest", type="primary", key="bt_run_hdr")
+            "Run backtest", type="primary", key="bt_run_hdr",
+            disabled=backtest_running)
 
     if "bt_result" not in st.session_state and os.path.exists(BACKTEST_CACHE):
         _cached_bt = pd.read_pickle(BACKTEST_CACHE)
@@ -3417,6 +3690,8 @@ def page_backtest():
         st.session_state["bt_bench"] = _cached_bt["bench"]
         st.session_state["bt_run_time"] = _cached_bt["run_time"]
         st.session_state["bt_is_cached"] = True
+        st.session_state["bt_cfg"] = _cached_bt.get("cfg")
+        st.session_state["bt_run_meta"] = _cached_bt.get("run_meta")
 
     _bt_run_time_hdr = st.session_state.get("bt_run_time")
     if _bt_run_time_hdr is not None:
@@ -3517,14 +3792,19 @@ def page_backtest():
                 value=float(config.STRATEGY["risk_per_trade_pct"]), step=0.1)
         with tm4:
             rebalance_cadence_v = st.segmented_control(
-                "Rebalance cadence", ["daily", "monthly"],
+                "Rebalance cadence", ["daily", "weekly", "monthly"],
                 default=config.STRATEGY.get("rebalance_cadence", "daily"),
                 key="bt_rebalance_cadence",
-                help="Mirrors the LIVE Admin setting. 'daily' re-checks the "
-                     "sell/keep-zone rule every trading day (matches the live "
-                     "default); 'monthly' only re-checks it on the first "
-                     "trading day of each month. Buys/top-ups always fill open "
-                     "slots daily either way, in both live and this backtest.")
+                help="'daily' and 'monthly' mirror the LIVE Admin setting -- "
+                     "'daily' re-checks the sell/keep-zone rule every trading "
+                     "day (matches the live default); 'monthly' only on the "
+                     "first trading day of each month. 'weekly' is "
+                     "backtest-only for now (no live scheduled job runs this "
+                     "cadence yet) -- re-checks on the last trading day of "
+                     "each week (Friday, or the prior trading day if Friday "
+                     "is a market holiday). Buys/top-ups always fill open "
+                     "slots daily regardless of which is chosen -- only the "
+                     "sell decision's frequency changes.")
 
         _ov_muted("Technical indicator")
         ti1, ti2, ti3 = st.columns(3)
@@ -3568,6 +3848,51 @@ def page_backtest():
             history_days_v = st.number_input(
                 "Candle history fetched (days)", min_value=300, max_value=3000,
                 value=int(config.STRATEGY["history_days"]), step=100)
+        ti9, ti10 = st.columns([1, 1])
+        with ti9:
+            use_rsi_exit_gate = st.checkbox(
+                "Separate exit RSI ceiling", key="bt_use_rsi_exit_gate",
+                value=bool(config.STRATEGY.get("rsi_exit_gate_enabled", False)),
+                help="OFF by default and NOT the live behavior. When on, a "
+                     "held position whose only failing gate is the entry-band "
+                     "RSI max above stays held (instead of being force-sold) "
+                     "as long as RSI is still under the separate ceiling to "
+                     "the right — lets a hot winner keep running instead of "
+                     "selling the moment it crosses the entry ceiling. Note: "
+                     "this exact idea was already A/B tested once and made "
+                     "every metric worse — re-testing here against current "
+                     "data, not assumed to flip that result.")
+        with ti10:
+            rsi_exit_max_v = st.number_input(
+                "Exit RSI ceiling", min_value=0.0, max_value=100.0,
+                value=float(config.STRATEGY.get("rsi_exit_max", config.STRATEGY["rsi_max"])),
+                step=1.0, format="%.2f", disabled=not use_rsi_exit_gate)
+        ti11, _ti12 = st.columns([1, 2])
+        with ti11:
+            use_wm_rsi_gate = st.checkbox(
+                "Weekly/monthly EMA trend gate", key="bt_use_wm_rsi_gate",
+                value=bool(config.STRATEGY.get("weekly_monthly_gate_enabled", False)),
+                help="OFF by default and NOT the live behavior. Extra entry "
+                     "gate on top of the daily checks above: weekly close "
+                     "must be above its own 200-EMA, AND monthly close above "
+                     "its own 200-EMA (each falls back to a 50-EMA when there "
+                     "isn't enough resampled history for 200 yet). Higher-"
+                     "timeframe confirmation that the trend isn't just a "
+                     "short-term daily blip. Simplified to EMA-only (no "
+                     "weekly/monthly RSI requirement) after real-run data "
+                     "showed the RSI leg added excessive rebalance-exit "
+                     "churn -- a held position only needed one of the (then "
+                     "four) stacked conditions to wobble near its threshold "
+                     "to get force-sold. Needs deep (~16-year) history per "
+                     "symbol, fetched and cached separately the first time "
+                     "this is checked (slow, one-time) and updated "
+                     "incrementally after that (fast) -- but the gate itself "
+                     "stays meaningfully slower than everything else on this "
+                     "page even after that, since it re-resamples that deep "
+                     "history from scratch every rebalance day (unlike the "
+                     "daily indicators, this can't be safely precomputed "
+                     "without risking lookahead). Untested — verify from "
+                     "here before considering for live.")
 
         _ov_muted("Scanner param")
         sc1, sc2, sc3 = st.columns(3)
@@ -3621,13 +3946,16 @@ def page_backtest():
             min_fundamental_score_v = st.number_input(
                 "Min fundamental score", min_value=0.0, max_value=100.0,
                 value=float(config.STRATEGY["min_fundamental_score"]), step=1.0,
-                disabled=not use_fundamentals,
                 help="NOT independently A/B-tuned -- config.py calls 50 (the "
                      "live default) 'a rough average-or-better bar, tune to "
                      "taste.' Only the gate's on/off status and the bonus "
                      "weight above have documented A/B history; this threshold "
                      "itself has never been swept, so treat any result here as "
-                     "a first look, not a verified finding.")
+                     "a first look, not a verified finding. Stays editable "
+                     "regardless of the gate checkbox above -- unlike the bonus "
+                     "weight, this is just a plain threshold value with no "
+                     "other side effect when the gate is off, so there's no "
+                     "reason to grey it out.")
         with sc5:
             near_high_threshold_v = st.number_input(
                 "52-week-high proximity (%)", min_value=50.0, max_value=100.0,
@@ -3641,6 +3969,97 @@ def page_backtest():
                      "allocator specifically: loses on CAGR and Sharpe at every "
                      "weight, and drawdown gets worse too, so there's no "
                      "risk/reward trade-off to make here.")
+        sc7, sc8, sc9 = st.columns([1, 1, 1])
+        with sc7:
+            use_sector_diversification = st.checkbox(
+                "Sector diversification cap", key="bt_use_sector_diversification",
+                value=bool(config.STRATEGY.get("sector_diversification_enabled", False)),
+                help="OFF by default and NOT the live behavior. Unlike the bonus "
+                     "above (a ranking tilt that can still leave a portfolio "
+                     "stacked into one hot sector), this is a hard constraint: "
+                     "a stock only qualifies if its best-matching sector GROUP "
+                     "is currently among the top N strongest (right), AND no "
+                     "single group can hold more than the position cap (right) "
+                     "at once -- enforced at buy time, never forces an exit. "
+                     "Grouped, not raw index names: NSE tracks several "
+                     "overlapping sector indices for the same real industry "
+                     "(e.g. 4 different healthcare-flavored ones) -- capping "
+                     "by raw name alone let a real test portfolio end up 100% "
+                     "one industry since each variant got its own independent "
+                     "allowance, so this groups them first (see "
+                     "sector_universe.SECTOR_INDUSTRY_GROUPS) and caps the "
+                     "group instead. Untested — verify from here before "
+                     "considering for live.")
+        with sc8:
+            top_n_sectors_v = st.number_input(
+                "Top N sectors", min_value=1, max_value=10,
+                value=int(config.STRATEGY.get("top_n_sectors", 3)), step=1,
+                disabled=not use_sector_diversification)
+        with sc9:
+            max_positions_per_sector_v = st.number_input(
+                "Max positions / sector", min_value=1, max_value=10,
+                value=int(config.STRATEGY.get("max_positions_per_sector", 3)), step=1,
+                disabled=not use_sector_diversification)
+        use_sector_composite = st.checkbox(
+            "Use composite sector score (RS + 52w-high + breadth) instead of RS alone",
+            key="bt_use_sector_composite",
+            value=bool(config.STRATEGY.get("sector_composite_score_enabled", False)),
+            disabled=not use_sector_diversification,
+            help="Only affects which sectors count as 'top N' above -- OFF "
+                 "ranks sectors on relative strength alone (the original "
+                 "behavior); ON blends in two more signals, each research-"
+                 "backed: the sector index's own 52-week-high proximity "
+                 "(George & Hwang 2004 -- predicts continuation better than "
+                 "past returns alone) and breadth, i.e. what % of the "
+                 "sector's own stocks are themselves passing the technical "
+                 "gates (IBD/O'Neil 'Group Relative Strength' methodology -- "
+                 "a sector whose RS is carried by one or two outliers is a "
+                 "weaker signal than one with broad participation). "
+                 "Untested — A/B against RS-alone from here first.")
+
+        resistance_zone_weight_v = st.number_input(
+            "Resistance zone weight", min_value=0.0, max_value=1.0,
+            value=float(config.STRATEGY.get("resistance_zone_weight", 0.0)), step=0.05,
+            help="0 = off. Tilts ranking toward stocks with more clean room "
+                 "before the nearest strong multi-year price zone above them "
+                 "-- a level swing-touched repeatedly in the past (the last "
+                 "5 years, receding), which can act as latent overhead "
+                 "supply and cap a rally even when momentum/trend look fine "
+                 "at entry. A stock right underneath a zone that's been "
+                 "touched many times scores worse than one with the same "
+                 "momentum but open air above it. Untested — verify from "
+                 "here before considering for live.")
+
+        rg1, rg2 = st.columns(2)
+        with rg1:
+            use_regime_filter = st.checkbox(
+                "Market regime filter", key="bt_use_regime_filter",
+                value=bool(config.STRATEGY.get("regime_filter_enabled", False)),
+                help="OFF by default. When NIFTY 50's own close is below its "
+                     "200 EMA, caps how many NEW positions may open to "
+                     "max_positions x the multiplier (right) -- never force-"
+                     "sells an existing position purely because the regime "
+                     "flipped, same 'blocks new entries only' rule as the "
+                     "sector diversification cap. A real 5-year A/B (core "
+                     "strategy, sector/resistance-zone/fundamental features "
+                     "off) improved every headline metric at once -- CAGR "
+                     "41.73%->42.86%, Sharpe 1.58->1.69, max drawdown "
+                     "-28.26%->-24.05%, win rate 43.6%->44.6% -- but wasn't "
+                     "uniform year to year: 2026 YTD was worse with it ON "
+                     "(-5.51% vs -2.16%), every other year flat-to-better. "
+                     "Verify against your own fuller config (sector bonus, "
+                     "diversification, resistance zone together) before "
+                     "considering for live.")
+        with rg2:
+            regime_position_multiplier_v = st.number_input(
+                "Regime position multiplier", min_value=0.1, max_value=1.0,
+                value=float(config.STRATEGY.get("regime_position_multiplier", 0.5)),
+                step=0.05, disabled=not use_regime_filter,
+                help="Fraction of max_positions allowed while NIFTY is below "
+                     "its 200 EMA -- 0.5 means half the normal slot count "
+                     "(and, with equal-weight sizing, roughly half the "
+                     "capital deployed, since each filled slot is still "
+                     "sized off the full max_positions).")
 
         st.caption("No per-trade cost is modeled — Zerodha charges no brokerage "
                   "on equity delivery (CNC). Statutory costs (STT, stamp duty, "
@@ -3665,17 +4084,6 @@ def page_backtest():
         st.error("Start date must be before end date.")
 
     if _run_backtest_clicked and not run_disabled:
-        with st.spinner("Loading candles (cached daily, first run is slow)..."):
-            if range_mode == "Custom dates":
-                days = (dt.date.today() - start_date).days + 400
-                candles_bt, bench_bt = bt.load_candles_cached(
-                    config.UNIVERSE, days, end_date=end_date)
-            else:
-                days = int(years * 365) + 400
-                candles_bt, bench_bt = bt.load_candles_cached(config.UNIVERSE, days)
-        fundamentals_history = None
-        if use_fundamentals and os.path.exists(FUNDAMENTALS_HISTORY_CACHE):
-            fundamentals_history = pd.read_pickle(FUNDAMENTALS_HISTORY_CACHE)["history"]
         # Always built fresh from the live config + every control above, so
         # the backtest that actually runs can never silently diverge from
         # what's shown on screen (previously run_cfg stayed None -- falling
@@ -3698,27 +4106,62 @@ def page_backtest():
         run_cfg["mom_lookback_days_short"] = int(mom_lookback_short_v)
         run_cfg["mom_lookback_days_long"] = int(mom_lookback_long_v)
         run_cfg["skip_recent_days"] = int(skip_recent_days_v)
+        run_cfg["rsi_exit_gate_enabled"] = use_rsi_exit_gate
+        run_cfg["rsi_exit_max"] = float(rsi_exit_max_v)
+        run_cfg["weekly_monthly_gate_enabled"] = use_wm_rsi_gate
         run_cfg["near_high_threshold"] = float(near_high_threshold_v) / 100
         run_cfg["ema_fast"] = int(ema_fast_v)
         run_cfg["ema_slow"] = int(ema_slow_v)
         run_cfg["atr_stop_multiple"] = float(atr_stop_multiple_v)
         run_cfg["risk_per_trade_pct"] = float(risk_per_trade_pct_v)
         run_cfg["sector_bonus_weight"] = float(sector_bonus_weight_v)
+        run_cfg["sector_diversification_enabled"] = use_sector_diversification
+        run_cfg["top_n_sectors"] = int(top_n_sectors_v)
+        run_cfg["max_positions_per_sector"] = int(max_positions_per_sector_v)
+        run_cfg["sector_composite_score_enabled"] = use_sector_composite
+        run_cfg["resistance_zone_weight"] = float(resistance_zone_weight_v)
+        run_cfg["regime_filter_enabled"] = use_regime_filter
+        run_cfg["regime_position_multiplier"] = float(regime_position_multiplier_v)
         run_cfg["history_days"] = int(history_days_v)
         run_cfg["rebalance_cadence"] = rebalance_cadence_v
-        with st.spinner("Simulating..."):
-            res = bt.run_backtest(candles_bt, bench_bt, run_cfg,
-                                  initial_capital=bt_capital,
-                                  rebalance="D" if rebalance_cadence_v == "daily" else "MS",
-                                  fundamentals_history=fundamentals_history)
-            run_time = dt.datetime.now()
-            st.session_state["bt_result"] = res
-            st.session_state["bt_bench"] = bench_bt
-            st.session_state["bt_run_time"] = run_time
+        start_background_job(
+            "backtest_run", _run_backtest_job,
+            range_mode, years, start_date, end_date, use_fundamentals,
+            run_cfg, bt_capital, rebalance_cadence_v,
+            job_type="backtest_run",
+            summarize_fn=lambda r: (
+                f"CAGR {r['result']['metrics'].get('CAGR %', '?')}%, "
+                f"Sharpe {r['result']['metrics'].get('Sharpe', '?')}"))
+        st.rerun()
+
+    if backtest_running:
+        st.info(f"⏳ Backtest running since {backtest_job['started_at']:%H:%M:%S} "
+                "— safe to switch tabs or close the browser, it keeps running "
+                "server-side; come back to this page any time to see progress.")
+
+    @st.fragment(run_every="1s" if backtest_running else None)
+    def _backtest_job_status():
+        job = get_background_job("backtest_run")
+        if job is None:
+            return
+        if not job["done"]:
+            frac, stage = job["progress"]
+            st.progress(frac, text=f"{stage} — started {job['started_at']:%H:%M:%S}")
+            return
+        if job["error"]:
+            st.error(f"Backtest failed: {job['error']}")
+        else:
+            result = job["result"]
+            st.session_state["bt_result"] = result["result"]
+            st.session_state["bt_bench"] = result["bench"]
+            st.session_state["bt_run_time"] = result["run_time"]
             st.session_state["bt_is_cached"] = False
-            os.makedirs("cache", exist_ok=True)
-            pd.to_pickle({"result": res, "bench": bench_bt, "run_time": run_time},
-                        BACKTEST_CACHE)
+            st.session_state["bt_cfg"] = result.get("cfg")
+            st.session_state["bt_run_meta"] = result.get("run_meta")
+        clear_background_job("backtest_run")
+        st.rerun()
+
+    _backtest_job_status()
 
     if "bt_result" not in st.session_state:
         st.info("Click **Run backtest** to simulate on real Kite data.")
@@ -3729,6 +4172,83 @@ def page_backtest():
     bench_bt = st.session_state["bt_bench"]
 
     nifty = bench_bt["close"].reindex(eq.index).ffill()
+
+    _bt_cfg = st.session_state.get("bt_cfg")
+    _bt_meta = st.session_state.get("bt_run_meta") or {}
+    with st.expander("⚙️ Parameters used for this run", expanded=False):
+        if not _bt_cfg:
+            st.caption("This result was cached before parameter tracking was "
+                       "added — re-run the backtest to record its config.")
+        else:
+            if _bt_meta.get("range_mode") == "Custom dates":
+                _range_txt = (f"{_bt_meta.get('start_date')} → "
+                              f"{_bt_meta.get('end_date')}")
+            else:
+                _range_txt = f"{_bt_meta.get('years')} years trailing"
+            p1, p2, p3, p4 = st.columns(4)
+            p1.metric("Date range", _range_txt)
+            p2.metric("Starting capital", f"₹{_bt_meta.get('bt_capital', 0):,.0f}")
+            p3.metric("Max positions", _bt_cfg.get("max_positions"))
+            p4.metric("Rebalance cadence", _bt_cfg.get("rebalance_cadence"))
+
+            st.caption("Trade management")
+            t1, t2, t3, t4 = st.columns(4)
+            t1.metric("Initial stop (× ATR)", _bt_cfg.get("atr_stop_multiple"))
+            _trail = "ON" if _bt_cfg.get("trailing_stop_enabled") else "OFF"
+            t2.metric("Trailing stop", f"{_trail} ({_bt_cfg.get('trailing_atr_multiple')}×)")
+            t3.metric("Risk per trade (%)", _bt_cfg.get("risk_per_trade_pct"))
+            t4.metric("History fetched (days)", _bt_cfg.get("history_days"))
+
+            st.caption("Technical indicator")
+            i1, i2, i3, i4 = st.columns(4)
+            i1.metric("RSI range", f"{_bt_cfg.get('rsi_min')}–{_bt_cfg.get('rsi_max')}")
+            i2.metric("EMA fast/slow", f"{_bt_cfg.get('ema_fast')}/{_bt_cfg.get('ema_slow')}")
+            i3.metric("Momentum lookback", f"{_bt_cfg.get('mom_lookback_days_short')}/"
+                     f"{_bt_cfg.get('mom_lookback_days_long')}d")
+            i4.metric("Skip most recent (days)", _bt_cfg.get("skip_recent_days"))
+            _rsi_exit = "ON" if _bt_cfg.get("rsi_exit_gate_enabled") else "OFF"
+            st.metric("Exit RSI ceiling", f"{_rsi_exit} ({_bt_cfg.get('rsi_exit_max')})")
+            _wm_rsi = "ON" if _bt_cfg.get("weekly_monthly_gate_enabled") else "OFF"
+            st.metric("Weekly/monthly EMA trend gate", f"{_wm_rsi} (price>200EMA on both)")
+
+            st.caption("Scanner param")
+            s1, s2, s3, s4 = st.columns(4)
+            _ew = "ON" if _bt_cfg.get("advanced_equal_weight_sizing") else "OFF"
+            s1.metric("Equal-weight allocator", f"{_ew} (tol {_bt_cfg.get('equal_weight_tolerance_pct')})")
+            _fg = "ON" if _bt_cfg.get("fundamental_gate_enabled") else "OFF"
+            s2.metric("Fundamental gate", _fg)
+            s3.metric("Fundamental bonus weight", _bt_cfg.get("fundamental_bonus_weight"))
+            s4.metric("Min fundamental score", _bt_cfg.get("min_fundamental_score"))
+            s5, s6, s7, s8 = st.columns(4)
+            s5.metric("52w-high proximity (%)", f"{_bt_cfg.get('near_high_threshold', 0) * 100:.0f}")
+            s6.metric("Sector bonus weight", _bt_cfg.get("sector_bonus_weight"))
+            _sd = "ON" if _bt_cfg.get("sector_diversification_enabled") else "OFF"
+            _sc = "composite" if _bt_cfg.get("sector_composite_score_enabled") else "RS-only"
+            s7.metric("Sector diversification", f"{_sd} (top {_bt_cfg.get('top_n_sectors')}, "
+                     f"max {_bt_cfg.get('max_positions_per_sector')}/sector, {_sc})")
+            s8.metric("Resistance zone weight", _bt_cfg.get("resistance_zone_weight", 0.0))
+            _rg = "ON" if _bt_cfg.get("regime_filter_enabled") else "OFF"
+            st.metric("Market regime filter", f"{_rg} (x{_bt_cfg.get('regime_position_multiplier', 0.5)} "
+                     f"positions when NIFTY < {_bt_cfg.get('regime_ema_period', 200)}EMA)")
+
+    with st.container(border=True, key="ov-card-bt-pdf"):
+        pdf_col1, pdf_col2 = st.columns([3, 2])
+        with pdf_col1:
+            st.markdown("**📄 PDF report** — config used, summary metrics, "
+                       "equity/drawdown charts, year-by-year table, and the "
+                       "full trade list for this result, all in one file.")
+        with pdf_col2:
+            if st.button("Generate PDF report", key="bt_gen_pdf", width="stretch"):
+                with st.spinner("Building PDF..."):
+                    st.session_state["bt_pdf_bytes"] = backtest_report.build_pdf(
+                        res, bench_bt, _bt_cfg or {}, _bt_meta or {}, _bt_run_time_hdr)
+                    st.session_state["bt_pdf_run_time"] = _bt_run_time_hdr
+            if (st.session_state.get("bt_pdf_run_time") == _bt_run_time_hdr
+                    and "bt_pdf_bytes" in st.session_state):
+                st.download_button(
+                    "⬇️ Download PDF", st.session_state["bt_pdf_bytes"],
+                    f"backtest_report_{_bt_run_time_hdr:%Y%m%d_%H%M}.pdf",
+                    mime="application/pdf", key="bt_dl_pdf", width="stretch")
 
     with st.container(border=True, key="ov-card-bt-equity"):
         eq_fig = go.Figure()
@@ -4130,13 +4650,14 @@ def page_fundamentals():
 # Page: Job Log
 # ---------------------------------------------------------------------------
 
-JOB_TYPES = ["rebalance_scan", "gap_check", "fundamentals_refresh", "screen_run"]
+JOB_TYPES = ["rebalance_scan", "gap_check", "fundamentals_refresh", "screen_run",
+            "backtest_run"]
 
 # Mirrors deploy/vps/systemd/*.timer's OnCalendar schedules -- kept in sync
 # by hand, not read from systemd itself (this dashboard process has no
 # visibility into the VPS's timer state). weekdays: 0=Mon..6=Sun.
-# screen_run has no entry -- it's the Screener page's manual "Run screen"
-# button only, never scheduled.
+# screen_run/backtest_run have no entry -- both are manual-only buttons
+# (Screener's "Run screen", Backtest's "Run backtest"), never scheduled.
 _JOB_SCHEDULES = {
     "rebalance_scan": ([0, 1, 2, 3, 4], 14, 45),
     "gap_check": ([0, 1, 2, 3, 4], 9, 16),
@@ -4442,6 +4963,12 @@ page_job_log_p = st.Page(page_job_log, title="Job Log", icon="🗂️")
 page_rebalance_history_p = st.Page(page_rebalance_history, title="Rebalance History", icon="📜")
 page_ledger_p = st.Page(page_ledger, title="Ledger", icon="💰")
 page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
+# Experimental, fully isolated from the real portfolio -- see paper_page.py
+# / paper_engine.py / paper_db.py's own docstrings for the containment
+# story (separate cache/state_paper.db, no kite_client import anywhere in
+# that trio, never places a real order).
+page_paper_p = st.Page(lambda: paper_page.render(_ov_table_html, _ov_metric_html),
+                       title="Paper Trading", icon="🧻")
 
 # Injected before the sidebar (not per-page) so every page -- not just
 # Overview, where this design system started -- gets the same compact
@@ -4473,6 +5000,7 @@ with st.sidebar:
 
     st.markdown('<p class="ov-side-label">Testing</p>', unsafe_allow_html=True)
     st.page_link(page_backtest_p)
+    st.page_link(page_paper_p)
 
     # Streamlit gives the current page's link no stable DOM marker (just an
     # unstable emotion class with a faint default tint), so CSS alone can't
@@ -4592,5 +5120,5 @@ with st.container(key="ov-topbar"):
 nav = st.navigation([page_cockpit_p, page_live_rebalance_p, page_positions_trade_p,
                     page_screener_p, page_fundamentals_p, page_tradebook_p,
                     page_job_log_p, page_rebalance_history_p, page_backtest_p,
-                    page_admin_p, page_ledger_p], position="hidden")
+                    page_admin_p, page_ledger_p, page_paper_p], position="hidden")
 nav.run()

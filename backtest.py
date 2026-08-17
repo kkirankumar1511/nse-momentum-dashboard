@@ -47,10 +47,24 @@ import pandas as pd
 
 import config
 import indicators
+import resistance_zones
 import screener
 import sector_universe
 
 CACHE_DIR = "cache"
+LONG_CACHE_DIR = os.path.join(CACHE_DIR, "long")
+
+
+def _tz_naive(frame: pd.DataFrame) -> pd.DataFrame:
+    """Kite's timestamps are tz-aware (IST); everything this module compares
+    them against (cutoff dates, other cached frames) is tz-naive, so every
+    fetch path needs this same normalization -- shared here rather than
+    reimplemented per-function (load_candles_cached and
+    load_long_history_cached both need it)."""
+    if not frame.empty and frame.index.tz is not None:
+        frame = frame.copy()
+        frame.index = frame.index.tz_localize(None)
+    return frame
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +72,26 @@ CACHE_DIR = "cache"
 # ---------------------------------------------------------------------------
 
 def load_candles_cached(symbols: list[str], days: int,
-                        end_date: dt.date | None = None) -> tuple[dict, pd.DataFrame]:
+                        end_date: dt.date | None = None,
+                        progress_cb=None,
+                        offline: bool = False) -> tuple[dict, pd.DataFrame]:
     """Fetch from Kite, caching each symbol as CSV (refreshed once per day).
+
+    progress_cb(stage: str, frac: float), if given, is called once per
+    symbol -- lets a caller (e.g. dashboard.py's background-job wrapper)
+    show real progress through this step instead of an indeterminate
+    spinner. Reserves the last 0-5% of frac for the benchmark fetch below.
+
+    offline: when True, skips the live Kite fetch (and its 3-attempt
+    retry/sleep dance) entirely and uses whatever's on disk regardless of
+    whether it was written today, for symbols that have any cache at all --
+    for local testing/analysis away from wherever the real Kite session
+    lives (e.g. the VPS's daily login flow), where every single symbol
+    would otherwise fail the live fetch and pay the full retry cost (a
+    real 202-symbol x ~3 attempts x 2s sleep, ~20+ minutes, measured
+    2026-08-09). Symbols with no cache at all still come back empty, same
+    as the existing stale-cache-fallback path. False (default) reproduces
+    the original online behavior exactly -- untouched for the real app.
 
     The cache-hit check only verifies the file was written today — it says
     nothing about whether the cached data's date range actually covers what
@@ -81,29 +113,24 @@ def load_candles_cached(symbols: list[str], days: int,
     today = dt.date.today().isoformat()
     cutoff = pd.Timestamp(dt.date.today() - dt.timedelta(days=days))
     end_ts = pd.Timestamp(end_date) if end_date else None
-
-    def _naive(frame: pd.DataFrame) -> pd.DataFrame:
-        # Kite's timestamps are tz-aware (IST); cutoff above is naive.
-        # Comparing tz-aware vs tz-naive raises TypeError, and which side
-        # ends up tz-aware depends on whether a row came from a fresh Kite
-        # fetch or a re-parsed CSV — normalizing to naive right after load
-        # sidesteps that mismatch everywhere instead of patching every
-        # comparison site individually.
-        if not frame.empty and frame.index.tz is not None:
-            frame = frame.copy()
-            frame.index = frame.index.tz_localize(None)
-        return frame
+    _naive = _tz_naive
 
     out = {}
-    for sym in symbols:
+    n = len(symbols)
+    for i, sym in enumerate(symbols):
+        if progress_cb:
+            progress_cb(f"Fetching {sym} ({i + 1}/{n})...", (i + 1) / n * 0.95)
         path = os.path.join(CACHE_DIR, f"{sym}.csv")
         df = None
+        cached = None
         if os.path.exists(path):
             cached = _naive(pd.read_csv(path, index_col=0, parse_dates=True))
             is_fresh = cached.attrs.get("stamp") == today or _stamp(path) == today
             covers_range = not cached.empty and cached.index.min() <= cutoff
-            if is_fresh and covers_range:
+            if (is_fresh or offline) and covers_range:
                 df = cached
+        if df is None and offline:
+            df = cached if cached is not None else pd.DataFrame()
         if df is None:
             import time
             fetched_fresh = False
@@ -130,6 +157,8 @@ def load_candles_cached(symbols: list[str], days: int,
         if end_ts is not None and not sym_df.empty:
             sym_df = sym_df[sym_df.index <= end_ts]
         out[sym] = sym_df
+    if progress_cb:
+        progress_cb("Fetching NIFTY benchmark...", 0.97)
     bpath = os.path.join(CACHE_DIR, "_NIFTY.csv")
     bench = None
     cached_bench = None
@@ -137,8 +166,10 @@ def load_candles_cached(symbols: list[str], days: int,
         cached_bench = _naive(pd.read_csv(bpath, index_col=0, parse_dates=True))
         is_fresh = _stamp(bpath) == today
         covers_range = not cached_bench.empty and cached_bench.index.min() <= cutoff
-        if is_fresh and covers_range:
+        if (is_fresh or offline) and covers_range:
             bench = cached_bench
+    if bench is None and offline:
+        bench = cached_bench if cached_bench is not None else pd.DataFrame()
     if bench is None:
         # Same retry + stale-cache-fallback resilience the per-symbol loop
         # above already has -- this was previously a bare call with no
@@ -161,11 +192,90 @@ def load_candles_cached(symbols: list[str], days: int,
     bench = bench[bench.index >= cutoff]
     if end_ts is not None and not bench.empty:
         bench = bench[bench.index <= end_ts]
+    if progress_cb:
+        progress_cb("Candles loaded", 1.0)
     return out, bench
 
 
 def _stamp(path: str) -> str:
     return dt.date.fromtimestamp(os.path.getmtime(path)).isoformat()
+
+
+def load_long_history_cached(symbols: list[str], min_days: int = 6100,
+                             end_date: dt.date | None = None,
+                             progress_cb=None) -> dict[str, pd.DataFrame]:
+    """Deep daily history per symbol (~min_days=6100 -> ~16.7 years),
+    cached separately from load_candles_cached()'s cache/{SYM}.csv --
+    that cache is sized to whatever a single run's `days` window needs and
+    gets FULLY re-fetched (all `days` worth) the moment it's a day stale,
+    which is fine for a normal few-year backtest window but far too slow
+    to do daily for 200+ symbols at 16-year depth.
+
+    Only for the weekly/monthly confirmation gate (screener.apply_gates'
+    weekly_monthly_gate_enabled), which needs deep history for its 200-bar
+    weekly/monthly EMA lookbacks independent of whatever date range a
+    given backtest run asked for -- see indicators._higher_tf_trend_ok.
+    Every other backtest feature keeps using the run-scoped
+    load_candles_cached(); this cache is never trimmed by a run's own
+    `days`, so it only grows.
+
+    end_date: the backtest run's own end date (None -> today, matching
+    "Trailing years" mode which always runs through today). The cache is
+    guaranteed fresh through at least this date -- explicit, not just
+    incidental from always fetching to today -- and a custom `end_date`
+    well in the past skips the fetch entirely once the cache already
+    reaches it, even if real "today" has since moved on further.
+
+    Once seeded (which does fetch through today -- Kite's API has no
+    "as of a past date" fetch, and the extra rows are harmless, just
+    sliced off by the caller's own point-in-time `.loc[:date]`), a stale
+    cache fetches ONLY the days missing up to end_date and appends them
+    (not a full min_days re-fetch) -- the whole point of a separate cache
+    is to make this cheap on every subsequent day."""
+    import time
+    import kite_client
+    os.makedirs(LONG_CACHE_DIR, exist_ok=True)
+    target = end_date or dt.date.today()
+    out = {}
+    n = len(symbols)
+    for i, sym in enumerate(symbols):
+        if progress_cb:
+            progress_cb(f"Long history {sym} ({i + 1}/{n})...", (i + 1) / n)
+        path = os.path.join(LONG_CACHE_DIR, f"{sym}.csv")
+        cached = None
+        if os.path.exists(path):
+            cached = _tz_naive(pd.read_csv(path, index_col=0, parse_dates=True))
+        if cached is not None and not cached.empty:
+            gap_days = (target - cached.index.max().date()).days
+            if gap_days <= 0:
+                out[sym] = cached
+                continue
+            try:
+                # Kite always fetches through real today regardless of
+                # `days`, so this naturally reaches target (target <=
+                # today always, since a run's end_date can't be future).
+                delta = _tz_naive(kite_client.fetch_daily_candles(sym, gap_days + 5))
+                delta = delta[delta.index > cached.index.max()]
+                combined = cached if delta.empty else pd.concat([cached, delta]).sort_index()
+                combined.to_csv(path)
+                out[sym] = combined
+            except Exception as e:
+                print(f"[warn] {sym}: long-history incremental fetch failed "
+                     f"({e}); using stale cache ({gap_days}d behind)")
+                out[sym] = cached
+        else:
+            try:
+                full = _tz_naive(kite_client.fetch_daily_candles(sym, min_days))
+                if not full.empty:
+                    full.to_csv(path)
+                out[sym] = full
+            except Exception as e:
+                print(f"[warn] {sym}: long-history seed fetch failed ({e}); skipping")
+                out[sym] = pd.DataFrame()
+        time.sleep(0.35)
+    if progress_cb:
+        progress_cb("Long history loaded", 1.0)
+    return out
 
 
 def make_synthetic_universe(n_symbols: int = 30, n_days: int = 900,
@@ -224,6 +334,7 @@ class Position:
     stop: float
     entry_date: pd.Timestamp
     highest_close: float = 0.0
+    sector: str | None = None
 
 
 @dataclasses.dataclass
@@ -235,6 +346,7 @@ class Trade:
     exit_price: float
     qty: int
     reason: str
+    sector: str | None = None
 
     @property
     def pnl(self):
@@ -254,7 +366,11 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
                        fundamentals_history: dict | None = None,
                        score_cache: dict | None = None,
                        sector_candles: dict | None = None,
-                       sector_membership: dict | None = None) -> pd.DataFrame:
+                       sector_membership: dict | None = None,
+                       long_candles: dict | None = None,
+                       precomputed: dict | None = None,
+                       precomputed_pivots: dict | None = None,
+                       precomputed_weekly_monthly: dict | None = None) -> pd.DataFrame:
     """Point-in-time ranking: identical pipeline to the live screener, fed
     only data up to `date`. Fundamental gate is off by default (fundamentals_
     history=None reproduces that exactly); pass a fundamentals_history dict
@@ -262,14 +378,56 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
     point-in-time score (fundamentals_agent.score_asof), not lookahead.
 
     sector_candles/sector_membership: optional, from sector_universe.
-    fetch_sector_index_candles()/get_sector_membership() -- both None
+    sector_membership_and_candles() -- both None
     (default) means no "sector_rs" column ever gets attached, so
     screener.score()'s sector-bonus guard never fires (byte-identical to
-    before this feature existed)."""
+    before this feature existed).
+
+    long_candles: optional, from load_long_history_cached() -- deep
+    (~16-year) per-symbol history for the weekly/monthly confirmation
+    gate's 200-bar EMA lookbacks, independent of however short `candles`
+    is for this particular run. None (default) means weekly/monthly
+    indicators fall back to whatever's in `candles` itself (see
+    indicators.compute_snapshot), same as before this existed.
+
+    precomputed: optional, {symbol: DataFrame} from run_backtest()'s
+    one-time indicators.precompute_daily_series() call -- avoids
+    recomputing ema/atr/rsi/macd from scratch inside `sliced` on every
+    single call to this function (i.e. every rebalance day). None
+    (default, and always the case for live callers today) means
+    compute_snapshot recomputes them directly, exactly as before this
+    param existed -- correct either way, this only changes speed.
+
+    precomputed_pivots: optional, {symbol: DataFrame} from run_backtest()'s
+    one-time resistance_zones.precompute_pivots() call over long_candles --
+    turns on the overhead-resistance score tilt (config.STRATEGY[
+    "resistance_zone_weight"], 0 by default). None (default) means no
+    "resistance_clearance" column ever gets attached, so screener.score()'s
+    guard for it never fires (byte-identical to before this feature
+    existed).
+
+    precomputed_weekly_monthly: optional, {symbol: (weekly_full,
+    monthly_full)} from run_backtest()'s one-time indicators.
+    precompute_weekly_monthly_bars() call over long_candles -- passed
+    through to screener.build_technical_table() to speed up the weekly/
+    monthly confirmation gate (see that function and indicators.
+    weekly_above_ema's docstrings). None (default) reproduces the
+    original full-resample-every-call behavior exactly -- correct either
+    way, this only changes speed."""
     sliced = {s: df.loc[:date] for s, df in candles.items()
               if not df.empty and date in df.index}
     bench_slice = bench.loc[:date]
-    tech = screener.build_technical_table(sliced, bench_slice)
+    long_sliced = None
+    if long_candles is not None:
+        long_sliced = {s: df.loc[:date] for s, df in long_candles.items()
+                       if not df.empty}
+    precomputed_rows = None
+    if precomputed is not None:
+        precomputed_rows = {s: precomputed[s].loc[date] for s in sliced
+                            if s in precomputed and date in precomputed[s].index}
+    tech = screener.build_technical_table(sliced, bench_slice, cfg=cfg, long_candles=long_sliced,
+                                          precomputed=precomputed_rows,
+                                          precomputed_weekly_monthly=precomputed_weekly_monthly)
     if tech.empty:
         return tech
     fundamentals = None
@@ -282,8 +440,106 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
         tech["sector_rs"] = [
             sector_universe.stock_sector_rs(sym, sector_membership, sector_rank)
             for sym in tech.index]
+        # BACKTEST-ONLY (for now), off by default -- top_sector/sector_group
+        # are always attached whenever sector data is given (cheap, and
+        # needed by the per-sector position cap in run_backtest()'s
+        # buy-fill step even for HELD symbols that may not pass all_gates
+        # this month); the gate itself (restricting entries to the top-N
+        # currently strongest GROUPS) only fires when explicitly enabled.
+        #
+        # sector_group (not the raw top_sector) is what the gate/cap
+        # actually use -- several tracked indices are overlapping cuts of
+        # the same real industry (e.g. 4 healthcare-flavored ones), so
+        # capping by raw index name still let a real test portfolio end up
+        # 100% one industry (see sector_universe.SECTOR_INDUSTRY_GROUPS).
+        # Grouping the RS ranking itself (not just relabeling each stock's
+        # raw winner) so "top N sectors" means top N GROUPS, each
+        # represented by its own strongest member index.
+        tech["top_sector"] = [
+            sector_universe.stock_top_sector(sym, sector_membership, sector_rank)
+            for sym in tech.index]
+        tech["sector_group"] = tech["top_sector"].apply(
+            lambda s: sector_universe.industry_group(s) if s else s)
+        if cfg.get("sector_diversification_enabled", False):
+            top_n = cfg.get("top_n_sectors", 3)
+            # BACKTEST-ONLY (for now), off by default -- an alternative to
+            # ranking sectors on raw RS alone. Composite of RS + 52-week-
+            # high proximity + breadth (see sector_universe.
+            # sector_composite_score's docstring for the research behind
+            # each component). Breadth needs each stock's OWN pre-sector
+            # gate status, so this calls apply_gates() once here (before
+            # sector_diversify_ok exists in `tech`, so it's genuinely
+            # "gates other than the sector filter," not circular) purely
+            # to get that -- a second, real apply_gates() call still runs
+            # below with sector_diversify_ok attached for the actual
+            # result.
+            if cfg.get("sector_composite_score_enabled", False):
+                pre_gates = screener.apply_gates(tech, fundamentals=fundamentals, cfg=cfg)
+                breadth = sector_universe.sector_breadth(sector_membership, pre_gates["all_gates"])
+                composite = sector_universe.sector_composite_score(
+                    sector_rank, sector_candles, date, breadth)
+                group_rank = composite.groupby(
+                    composite.index.to_series().apply(sector_universe.industry_group)).max()
+            else:
+                group_rank = sector_rank.groupby(
+                    sector_rank.index.to_series().apply(sector_universe.industry_group)).max()
+            top_group_names = set(group_rank.sort_values(ascending=False).head(top_n).index)
+            tech["sector_diversify_ok"] = tech["sector_group"].isin(top_group_names)
+    # BACKTEST-ONLY (for now), off by default -- overhead-resistance score
+    # tilt (see resistance_zones.py). Only attached when the caller passed
+    # precomputed pivots AND the weight is on, so this is a no-op (column
+    # absent, screener.score()'s guard never fires) for every other run,
+    # same pattern as sector_rs above.
+    if precomputed_pivots is not None and cfg.get("resistance_zone_weight", 0.0):
+        tech["resistance_clearance"] = [
+            resistance_zones.resistance_clearance_asof(
+                precomputed_pivots[sym], float(tech.loc[sym, "price"]), date,
+                lookback_years=cfg.get("resistance_zone_lookback_years", 5.0),
+                tolerance_pct=cfg.get("resistance_zone_cluster_tolerance_pct", 0.03),
+                search_pct=cfg.get("resistance_zone_search_pct", 0.20))
+            if sym in precomputed_pivots else None
+            for sym in tech.index]
     gated = screener.apply_gates(tech, fundamentals=fundamentals, cfg=cfg)
     return screener.score(gated, cfg)
+
+
+def _apply_sector_cap(ordered_syms: list[str], positions: dict, ranked: pd.DataFrame,
+                      cfg: dict) -> list[str]:
+    """Filters an already score-sorted list of NEW-entry candidates,
+    dropping any symbol whose sector_group (see rank_universe_asof -- the
+    industry-grouped counterpart to the raw top_sector, e.g. "Healthcare"
+    covers 4 overlapping raw sector indices) is already at
+    cfg['max_positions_per_sector'] -- counting currently held positions
+    plus higher-ranked symbols earlier in this same list as they get
+    greedily reserved, so the cap is enforced across the whole day's fill,
+    not just per-candidate in isolation. Grouping (not the raw index name)
+    is what makes this actually prevent single-industry concentration --
+    capping by raw name alone still let a real test portfolio end up 100%
+    healthcare-themed, since each of the 4 healthcare-flavored indices got
+    its own independent allowance. Never touches already-HELD positions (a
+    full sector doesn't force an exit, only blocks new entries) -- callers
+    pass held positions separately for top-ups. No-op (returns the input
+    unchanged) when the feature is off or sector_group data isn't
+    available, e.g. no sector data was fetched this run."""
+    if not cfg.get("sector_diversification_enabled", False) or ranked.empty \
+            or "sector_group" not in ranked.columns:
+        return ordered_syms
+    max_per_sector = cfg.get("max_positions_per_sector", 3)
+    sector_counts: dict[str, int] = {}
+    for sym in positions:
+        if sym in ranked.index:
+            sec = ranked.loc[sym, "sector_group"]
+            if sec:
+                sector_counts[sec] = sector_counts.get(sec, 0) + 1
+    kept = []
+    for sym in ordered_syms:
+        sec = ranked.loc[sym, "sector_group"] if sym in ranked.index else None
+        if sec and sector_counts.get(sec, 0) >= max_per_sector:
+            continue
+        kept.append(sym)
+        if sec:
+            sector_counts[sec] = sector_counts.get(sec, 0) + 1
+    return kept
 
 
 def run_backtest(candles: dict, bench: pd.DataFrame,
@@ -295,8 +551,29 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                  verbose: bool = False,
                  fundamentals_history: dict | None = None,
                  sector_candles: dict | None = None,
-                 sector_membership: dict | None = None) -> dict:
+                 sector_membership: dict | None = None,
+                 long_candles: dict | None = None,
+                 start_date: dt.date | None = None,
+                 progress_cb=None,
+                 precomputed_pivots: dict | None = None) -> dict:
     """Monthly-rebalanced long-only backtest.
+
+    precomputed_pivots: optional, {symbol: DataFrame} -- if omitted but
+    long_candles and cfg["resistance_zone_weight"] are both set, this is
+    computed internally (once per symbol, from long_candles) via
+    resistance_zones.precompute_pivots(); pass it explicitly only to reuse
+    pivots already computed elsewhere. None with the weight off (default)
+    means the overhead-resistance score tilt never activates, byte-
+    identical to before this feature existed.
+
+    start_date: clamps the actual simulated/traded date range to >= this
+    date, on top of (not instead of) the warmup_days skip below -- the
+    warmup skip alone only approximately lands near a caller's intended
+    start (it depends on exactly how much candle history was fetched),
+    so a caller asking for e.g. "2025-01-01 to 2025-06-30" could
+    otherwise see real trades dated weeks before 2025-01-01. None
+    (default) reproduces the original behavior exactly -- warmup_days
+    alone decides where the simulation starts, as before this existed.
 
     cost_bps defaults to 0 -- Zerodha charges no brokerage on equity
     delivery (CNC). Statutory costs (STT, stamp duty, exchange/SEBI
@@ -310,10 +587,31 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     reproduces the original technical-only behavior exactly.
 
     sector_candles/sector_membership: optional, from sector_universe.
-    fetch_sector_index_candles()/get_sector_membership() -- turns on the
+    sector_membership_and_candles() -- turns on the
     sector relative-strength score bonus (config.STRATEGY["sector_bonus_
     weight"], 0 by default). Both None (default) reproduces the original
     behavior exactly.
+
+    long_candles: optional, from load_long_history_cached() -- deep
+    (~16-year) per-symbol history feeding the weekly/monthly confirmation
+    gate's 200-bar EMA lookbacks (config.STRATEGY["weekly_monthly_gate_
+    enabled"], off by default), independent of however short `candles`
+    is for this run. None (default) reproduces the original behavior --
+    weekly/monthly indicators fall back to whatever's in `candles`, which
+    is often too short for the 200-bar (or even 50-bar) lookback to ever
+    resolve, silently failing that gate closed for the whole run.
+
+    market regime filter: config.STRATEGY["regime_filter_enabled"] (False
+    by default) caps how many NEW positions may be open at once to
+    max_positions * regime_position_multiplier (0.5 by default) on any day
+    NIFTY 50's own close is below its regime_ema_period (200) EMA -- never
+    force-sells an existing position purely because the regime flipped,
+    same "only blocks new entries" philosophy as the sector cap
+    (_apply_sector_cap). With equal-weight sizing, filling fewer of the
+    original slots also means proportionally less total capital deployed
+    (each filled slot is still sized off the FULL max_positions), not just
+    fewer names -- e.g. 5 of 10 original slots filled leaves ~50% in cash,
+    not the same capital concentrated into 5 names.
 
     trailing stop: config.STRATEGY["trailing_stop_enabled"] (False by
     default) ratchets each position's stop up to highest_close_since_entry
@@ -337,8 +635,13 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     "D" re-evaluates it every trading day instead, matching the cadence
     live_rebalance.py's scheduled job actually runs at (Mon-Fri) if its
     proposal is executed that often -- added specifically to let that
-    live/backtest cadence gap be measured rather than assumed. No other
-    value is supported.
+    live/backtest cadence gap be measured rather than assumed. "W"
+    re-evaluates it once per calendar week, on the last trading day of
+    that week (Friday, or the prior trading day if Friday is a market
+    holiday) -- backtest-only for now, no live scheduled job runs this
+    cadence yet. Buys/top-ups always fill any open slot daily regardless
+    of which of these is chosen -- only the SELL/keep-zone check's
+    frequency changes. No other value is supported.
     """
     cfg = dict(cfg or config.STRATEGY)
     cost = cost_bps / 10_000
@@ -347,10 +650,76 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     # state -- see fundamentals_agent.score_asof for the memoization key.
     score_cache: dict = {}
 
+    # One-time, O(symbols x history) precompute of the causal daily EWM
+    # indicators (ema/atr/rsi/macd) -- see indicators.precompute_daily_
+    # series's docstring for why this is safe (not an approximation).
+    # Replaces recomputing them from scratch inside a growing
+    # df.loc[:date] slice on every single rebalance day below, which
+    # profiled as ~87% of a daily-cadence backtest's total runtime.
+    n_syms = len(candles)
+    precomputed: dict = {}
+    for i, (sym, df) in enumerate(candles.items()):
+        if progress_cb and (i % max(1, n_syms // 20) == 0 or i == n_syms - 1):
+            progress_cb(f"Precomputing indicators ({i + 1}/{n_syms})...",
+                       (i + 1) / n_syms * 0.1)
+        if not df.empty and len(df) >= cfg["ema_slow"]:
+            precomputed[sym] = indicators.precompute_daily_series(df, cfg)
+
+    # One-time precompute of swing-pivot history for the overhead-
+    # resistance score tilt (see resistance_zones.py) -- only when the
+    # feature is on and deep history was actually provided; pivot count is
+    # small and roughly constant per year of history (unlike daily bar
+    # count), so this and its per-day lookup stay cheap regardless of how
+    # long the backtest window is.
+    if precomputed_pivots is None and long_candles is not None \
+            and cfg.get("resistance_zone_weight", 0.0):
+        precomputed_pivots = {}
+        window = cfg.get("resistance_zone_pivot_window", 10)
+        for sym, df in long_candles.items():
+            if not df.empty:
+                precomputed_pivots[sym] = resistance_zones.precompute_pivots(df, window=window)
+
+    # One-time precompute of the weekly/monthly confirmation gate's
+    # resampled bar history -- see indicators.precompute_weekly_monthly_
+    # bars's docstring for why this is safe. Replaces re-resampling all of
+    # long_candles from scratch for every symbol on every single rebalance
+    # day below, profiled as ~45% of a gate-enabled backtest's runtime.
+    precomputed_weekly_monthly: dict = {}
+    if long_candles is not None and cfg.get("weekly_monthly_gate_enabled", False):
+        for sym, df in long_candles.items():
+            if not df.empty:
+                precomputed_weekly_monthly[sym] = indicators.precompute_weekly_monthly_bars(df["close"])
+
+    # One-time precompute of the market-regime filter (see module docstring
+    # on regime_filter_enabled below) -- NIFTY's own close vs. its causal
+    # EWM, computed once over the whole benchmark series exactly like
+    # indicators.precompute_daily_series does for stocks (safe for the same
+    # reason: a causal ewm at position i depends only on rows [0..i]).
+    bench_above_regime_ema = None
+    if cfg.get("regime_filter_enabled", False):
+        regime_ema = indicators.ema(bench["close"], cfg.get("regime_ema_period", 200))
+        bench_above_regime_ema = bench["close"] > regime_ema
+
     dates = bench.index.sort_values()
     dates = dates[warmup_days:]
+    if start_date is not None:
+        dates = dates[dates >= pd.Timestamp(start_date)]
     if rebalance == "D":
         rb_dates = set(dates)
+    elif rebalance == "W":
+        # last trading day of each ISO calendar week -- Friday if it's a
+        # trading day, otherwise whatever trading day precedes it (Friday
+        # itself just isn't IN `weekday_dates` on a market holiday, so
+        # grouping by ISO (year, week) and taking the max already lands on
+        # the right day with no holiday-calendar lookup needed). Restricted
+        # to Mon-Fri specifically -- NSE occasionally holds a special
+        # Saturday/Sunday live session (Budget-day reaction, Diwali Muhurat
+        # trading), which would otherwise get picked as "the last trading
+        # day of the week" instead of the Friday the user actually means.
+        weekday_dates = dates[dates.dayofweek < 5]
+        iso = weekday_dates.isocalendar()
+        rb_dates = set(pd.Series(weekday_dates).groupby(
+            [iso["year"].values, iso["week"].values]).max())
     else:
         # first trading day of each month
         rb_dates = set(pd.Series(dates).groupby(
@@ -360,6 +729,13 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     positions: dict[str, Position] = {}
     trades: list[Trade] = []
     curve = []
+    # Recomputed once per day below (see bench_above_regime_ema) -- how
+    # many positions try_enter()/the fill loops are allowed to hold open
+    # RIGHT NOW. Only ever caps NEW entries, same "never forces an exit"
+    # philosophy as _apply_sector_cap -- a regime flip alone never sells an
+    # existing position, it only pauses fresh buying until positions roll
+    # off naturally (stop/rebalance exit) down to the reduced cap.
+    effective_max_positions = cfg["max_positions"]
     # Gate-passers not yet held, refreshed at each rebalance (same monthly
     # cadence as everything else -- a stock's gate status can go stale for
     # up to a month either way) and consumed daily by step 2b so a slot
@@ -378,7 +754,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         proceeds = pos.qty * price * (1 - cost)
         cash += proceeds
         trades.append(Trade(sym, pos.entry_date, date, pos.entry_price,
-                            price * (1 - cost), pos.qty, reason))
+                            price * (1 - cost), pos.qty, reason, sector=pos.sector))
 
     def _price_asof(sym: str, date) -> float | None:
         """Last known close at or before `date` -- forward-fills over a
@@ -397,7 +773,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
 
     def try_enter(sym, row, price, stop, date, qty_override=None):
         nonlocal cash
-        if len(positions) >= cfg["max_positions"] or sym in positions:
+        if len(positions) >= effective_max_positions or sym in positions:
             return
         if qty_override is not None:
             qty = qty_override
@@ -416,8 +792,21 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             return
         cash -= qty * price * (1 + cost)
         entry_price = price * (1 + cost)
+        # row is the ranked-table row for this symbol (from watchlist),
+        # which already carries top_sector whenever sector data was given
+        # to this run -- None (Series.get's default) when it wasn't, e.g.
+        # sector_bonus_weight and sector_diversification_enabled both
+        # off/unset, same as every other optional column. Deliberately
+        # top_sector (the actual resolved NSE index, e.g. "NIFTY IND
+        # DEFENCE") rather than sector_group (the industry-grouped label
+        # used internally by the diversification cap, e.g. "Industrials")
+        # -- the raw index name is more informative for display, and every
+        # stock resolves to exactly one of the two real NSE index
+        # categories (sectoral or thematic), so there's always a genuine
+        # index name to show, not a made-up bucket.
+        sector = row.get("top_sector") if hasattr(row, "get") else None
         positions[sym] = Position(sym, qty, entry_price, stop, date,
-                                  highest_close=entry_price)
+                                  highest_close=entry_price, sector=sector)
         if verbose:
             print(f"{date.date()} BUY  {sym:8s} x{qty} @ {price:.1f} stop {stop:.1f}")
 
@@ -441,7 +830,19 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         if verbose:
             print(f"{date.date()} TOPUP {sym:8s} +{extra_qty} @ {price:.1f} (new qty {new_qty})")
 
-    for date in dates:
+    n_dates = len(dates)
+    for i, date in enumerate(dates):
+        # Throttled to ~100 updates over the whole run rather than every
+        # single day -- calling into Streamlit's session state from here
+        # on every trading day (thousands of them for a 5yr run) would add
+        # measurable overhead for no visible benefit between updates that
+        # close together anyway.
+        if progress_cb and (i % max(1, n_dates // 100) == 0 or i == n_dates - 1):
+            progress_cb(f"Simulating {date.date()}...", 0.1 + (i + 1) / n_dates * 0.9)
+        if bench_above_regime_ema is not None:
+            regime_ok = bool(bench_above_regime_ema.get(date, True))
+            effective_max_positions = cfg["max_positions"] if regime_ok else \
+                max(1, int(cfg["max_positions"] * cfg.get("regime_position_multiplier", 0.5)))
         # 1) stop checks on today's bar
         for sym in list(positions):
             df = candles[sym]
@@ -476,7 +877,9 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         if date in rb_dates:
             ranked = rank_universe_asof(candles, bench, date, cfg,
                                        fundamentals_history, score_cache,
-                                       sector_candles, sector_membership)
+                                       sector_candles, sector_membership,
+                                       long_candles, precomputed,
+                                       precomputed_pivots, precomputed_weekly_monthly)
             if not ranked.empty:
                 candidates = ranked[ranked["all_gates"]]
                 keep_zone = set(candidates.head(cfg["max_positions"] * 2).index)
@@ -486,7 +889,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                     if px is None:
                         continue
                     if screener.sell_check(sym, ranked, candidates, keep_zone,
-                                          cfg["max_positions"]):
+                                          cfg["max_positions"], cfg):
                         close_position(sym, float(px), date, "rebalance")
 
                 # Replace the watchlist wholesale -- next rebalance is the
@@ -509,6 +912,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             ordered_syms = [sym for sym, _ in sorted(
                 watchlist.items(), key=lambda kv: kv[1].get("score", 0), reverse=True)
                 if date in candles[sym].index]
+            ordered_syms = _apply_sector_cap(ordered_syms, positions, ranked, cfg)
             # Held positions that are STILL legitimately good candidates
             # this month (not being sold) -- eligible for the allocator's
             # top-up mechanic. Held symbols are never in `watchlist`
@@ -533,7 +937,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 total_equity=equity_now, max_positions=cfg["max_positions"],
                 tolerance_pct=cfg.get("equal_weight_tolerance_pct", 0.10))
             for sym, (qty, _reason) in alloc["new_buys"].items():
-                if len(positions) >= cfg["max_positions"]:
+                if len(positions) >= effective_max_positions:
                     break
                 price = prices[sym]
                 atr_now = float(indicators.atr(candles[sym].loc[:date], cfg["atr_period"]).iloc[-1])
@@ -543,12 +947,15 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                     watchlist.pop(sym, None)
             for sym, extra_qty in alloc["top_ups"].items():
                 top_up_position(sym, extra_qty, prices[sym], date)
-        elif watchlist and len(positions) < cfg["max_positions"]:
+        elif watchlist and len(positions) < effective_max_positions:
             # Highest-score candidates get first pick of the limited slots.
             ordered = sorted(watchlist.items(),
                             key=lambda kv: kv[1].get("score", 0), reverse=True)
+            capped_syms = set(_apply_sector_cap(
+                [s for s, _ in ordered], positions, ranked, cfg))
+            ordered = [(s, r) for s, r in ordered if s in capped_syms]
             for sym, row in ordered:
-                if len(positions) >= cfg["max_positions"]:
+                if len(positions) >= effective_max_positions:
                     break
                 if sym in positions or date not in candles[sym].index:
                     continue
@@ -587,6 +994,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             "unrealized_pnl": unrealized_pnl,
             "unrealized_ret_pct": (last_price / pos.entry_price - 1) * 100,
             "holding_days": (last - pos.entry_date).days,
+            "sector": pos.sector,
         })
     open_positions_df = pd.DataFrame(open_positions)
 
@@ -701,6 +1109,7 @@ def main():
     args = ap.parse_args()
 
     cfg = dict(config.STRATEGY)
+    sim_start_date = None
 
     if args.synthetic:
         candles, bench = make_synthetic_universe()
@@ -710,13 +1119,16 @@ def main():
               if args.end_date else dt.date.today())
         days = (dt.date.today() - start).days + 400  # extra for indicator warmup
         candles, bench = load_candles_cached(config.UNIVERSE, days, end_date=end)
+        sim_start_date = start
     else:
         days = int(args.years * 365) + 400  # extra for indicator warmup
         candles, bench = load_candles_cached(config.UNIVERSE, days)
+        sim_start_date = dt.date.today() - dt.timedelta(days=int(args.years * 365))
 
     res = run_backtest(candles, bench, cfg,
                        initial_capital=args.capital,
-                       cost_bps=args.cost_bps, verbose=args.verbose)
+                       cost_bps=args.cost_bps, verbose=args.verbose,
+                       start_date=sim_start_date)
 
     print("\n=== Metrics ===")
     for k, v in res["metrics"].items():

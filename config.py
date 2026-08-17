@@ -147,6 +147,28 @@ _STRATEGY_DEFAULTS = {
     "rsi_min": 45,
     "rsi_max": 80,
 
+    # Backtest-only (for now): decouples the RSI ceiling used to decide
+    # whether an ALREADY-HELD position should be sold from the entry-band
+    # check above. See the rsi_max comment just above -- this exact idea
+    # (widen the ceiling for held positions only, so overbought alone
+    # wouldn't trigger a sell) was already A/B tested once and made every
+    # metric worse, hence off by default. Re-exposed here, wired into the
+    # Backtest UI, for re-testing against today's data/universe rather
+    # than trusting that one past result forever.
+    "rsi_exit_gate_enabled": False,
+    "rsi_exit_max": 80,
+
+    # Backtest-only (for now): extra higher-timeframe confirmation gate --
+    # weekly AND monthly price must each be above their own 200-period
+    # EMA (falls back to a 50-period EMA when there isn't enough
+    # resampled history for 200 yet). Originally also required weekly/
+    # monthly RSI above a floor, dropped after real-run data showed that
+    # (4 stacked conditions total) caused excessive rebalance-exit churn
+    # -- a held position only needed one condition to wobble near its
+    # threshold to get force-sold. Off by default, untested -- add to
+    # the Backtest UI first and A/B before considering for live.
+    "weekly_monthly_gate_enabled": False,
+
     # Risk management
     "atr_period": 14,
     "atr_stop_multiple": 2.5,          # initial stop = entry - 2.5*ATR
@@ -213,6 +235,61 @@ _STRATEGY_DEFAULTS = {
     # until an A/B backtest earns it (see the removed breakout-bonus tier).
     "sector_bonus_weight": 0.0,
     "sector_rs_lookback_days": 126,    # matches mom_lookback_days_long
+
+    # Sector diversification (backtest-only for now, off by default): the
+    # sector bonus above is a pure ranking TILT -- it can still leave a
+    # portfolio stacked into one hot sector if that sector's stocks simply
+    # score highest (real example: 8 of 10 top candidates were all Pharma
+    # on one real scan). This is a hard constraint instead -- restricts
+    # entries to stocks whose best-matching sector is currently among the
+    # top_n_sectors strongest, AND caps how many open positions any single
+    # sector can hold at once (max_positions_per_sector), enforced at buy
+    # time in run_backtest()'s allocation step. Untested -- verify from
+    # the Backtest UI before considering for live.
+    "sector_diversification_enabled": False,
+    "top_n_sectors": 3,
+    "max_positions_per_sector": 3,
+
+    # Alternative to ranking sectors on raw relative-strength alone --
+    # blends RS with the sector index's own 52-week-high proximity and
+    # breadth (% of the sector's own stocks passing the technical gates)
+    # into one composite score. Backed by real literature, see
+    # sector_universe.sector_composite_score()'s docstring: Moskowitz &
+    # Grinblatt (1999) for industry momentum, George & Hwang (2004) for
+    # 52-week-high proximity as an independent predictive signal, IBD/
+    # O'Neil "Group Relative Strength" for breadth. Off by default --
+    # only has any effect when sector_diversification_enabled is also on
+    # (it changes which sectors count as "top N"). Untested -- verify
+    # from the Backtest UI, A/B against the plain-RS version, before
+    # considering for live.
+    "sector_composite_score_enabled": False,
+
+    # Overhead-resistance tilt (see resistance_zones.py): tilts ranking
+    # toward stocks with more "clean room" before the nearest multi-year
+    # price zone above them (a level swing-touched repeatedly in the past
+    # -- latent overhead supply that can cap a rally and trigger the
+    # stop, even when every other momentum/trend signal looks fine at
+    # entry). 0 = off, same pattern as sector_bonus_weight -- ships
+    # disabled until an A/B backtest earns it a spot. Backtest-only for
+    # now (needs deep history via load_long_history_cached, same as the
+    # weekly/monthly gate).
+    "resistance_zone_weight": 0.0,
+    "resistance_zone_lookback_years": 5.0,   # receding window, not a fixed anchor
+    "resistance_zone_pivot_window": 10,      # trading days each side to confirm a swing pivot
+    "resistance_zone_cluster_tolerance_pct": 0.03,  # nearby pivots within this % cluster into one zone
+    "resistance_zone_search_pct": 0.20,      # ignore zones more than this far above price
+
+    # Market regime filter (backtest-only for now): caps how many NEW
+    # positions may be open at once when NIFTY 50 itself is below its own
+    # long-term trend -- a classic trend-following risk control (only
+    # trade long aggressively when the market you're trading IN is
+    # itself trending up). Never force-sells an existing position purely
+    # because the regime flipped, same "blocks new entries only"
+    # philosophy as the sector diversification cap. 0 = off by default,
+    # untested -- verify from the Backtest UI before considering for live.
+    "regime_filter_enabled": False,
+    "regime_ema_period": 200,
+    "regime_position_multiplier": 0.5,
 
     "history_days": 1200,              # calendar days of candles to fetch
 
