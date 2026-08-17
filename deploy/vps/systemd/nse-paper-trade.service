@@ -1,0 +1,8 @@
+[Unit]
+Description=NSE paper-trade scan for the Heikin-Ashi trend-following strategy (isolated -- cache/state_paper.db only, no Kite orders, no live_rebalance/screener/state_db import)
+
+[Service]
+Type=oneshot
+User=nseapp
+WorkingDirectory=/opt/nse-momentum-dashboard
+ExecStart=/opt/nse-momentum-dashboard/.venv/bin/python paper_engine.py

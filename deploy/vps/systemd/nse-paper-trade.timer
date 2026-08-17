@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the NSE paper-trade scan daily at 16:15 (weekdays, after market close at 15:30 and after nse-rebalance.timer's 14:55 run) -- paper trading fills at end-of-day close to match backtest.py's own convention, so it needs Kite's daily candle fully finalized, unlike the real rebalance job which deliberately runs pre-close on a same-day intraday basis. Also keeps it clear of any rate-limit/resource contention with the 14:55 job.
+
+[Timer]
+OnCalendar=Mon..Fri 16:15
+Persistent=false
+Unit=nse-paper-trade.service
+
+[Install]
+WantedBy=timers.target
