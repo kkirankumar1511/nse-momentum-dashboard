@@ -31,7 +31,11 @@ def heikin_ashi(open_: pd.Series, high: pd.Series, low: pd.Series,
         return pd.DataFrame({"ha_open": ha_open, "ha_high": ha_open.copy(),
                             "ha_low": ha_open.copy(), "ha_close": ha_close})
     ha_open.iloc[0] = (float(open_.iloc[0]) + float(close.iloc[0])) / 2.0
-    ha_open_vals = ha_open.values
+    # .copy() -- pandas can hand back a read-only view here (copy-on-write
+    # builds, or certain DataFrame construction paths) depending on
+    # pandas version; the in-place recursive fill below needs a writable
+    # array regardless of where this Series came from.
+    ha_open_vals = ha_open.values.copy()
     ha_close_vals = ha_close.values
     for i in range(1, len(close)):
         ha_open_vals[i] = (ha_open_vals[i - 1] + ha_close_vals[i - 1]) / 2.0
