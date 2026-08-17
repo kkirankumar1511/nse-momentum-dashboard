@@ -1,8 +1,8 @@
 [Unit]
-Description=Run the NSE paper-trade scan daily at 16:15 (weekdays, after market close at 15:30 and after nse-rebalance.timer's 14:55 run) -- paper trading fills at end-of-day close to match backtest.py's own convention, so it needs Kite's daily candle fully finalized, unlike the real rebalance job which deliberately runs pre-close on a same-day intraday basis. Also keeps it clear of any rate-limit/resource contention with the 14:55 job.
+Description=Run the NSE paper-trade scan daily at 14:56 (weekdays, right alongside nse-rebalance.timer's 14:55 run, per explicit request -- both jobs' results land at the same time each day). One minute after, not the same minute, purely so the two jobs don't hit Kite's API in the same instant. Trade-off accepted: paper fills now use the same same-day intraday price basis as the real rebalance rather than the end-of-day close backtest.py assumed, so paper results are no longer directly comparable to the validated backtest's CAGR/Sharpe numbers.
 
 [Timer]
-OnCalendar=Mon..Fri 16:15
+OnCalendar=Mon..Fri 14:56
 Persistent=false
 Unit=nse-paper-trade.service
 
