@@ -43,6 +43,7 @@ import kite_client
 import live_rebalance as lr
 import notify
 import nse_holidays
+import paper_page
 import screener
 import sector_universe as su
 from background_jobs import clear_background_job, get_background_job, start_background_job
@@ -4962,6 +4963,12 @@ page_job_log_p = st.Page(page_job_log, title="Job Log", icon="🗂️")
 page_rebalance_history_p = st.Page(page_rebalance_history, title="Rebalance History", icon="📜")
 page_ledger_p = st.Page(page_ledger, title="Ledger", icon="💰")
 page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
+# Experimental, fully isolated from the real portfolio -- see paper_page.py
+# / paper_engine.py / paper_db.py's own docstrings for the containment
+# story (separate cache/state_paper.db, no kite_client import anywhere in
+# that trio, never places a real order).
+page_paper_p = st.Page(lambda: paper_page.render(_ov_table_html, _ov_metric_html),
+                       title="Paper Trading", icon="🧻")
 
 # Injected before the sidebar (not per-page) so every page -- not just
 # Overview, where this design system started -- gets the same compact
@@ -4993,6 +5000,7 @@ with st.sidebar:
 
     st.markdown('<p class="ov-side-label">Testing</p>', unsafe_allow_html=True)
     st.page_link(page_backtest_p)
+    st.page_link(page_paper_p)
 
     # Streamlit gives the current page's link no stable DOM marker (just an
     # unstable emotion class with a faint default tint), so CSS alone can't
@@ -5112,5 +5120,5 @@ with st.container(key="ov-topbar"):
 nav = st.navigation([page_cockpit_p, page_live_rebalance_p, page_positions_trade_p,
                     page_screener_p, page_fundamentals_p, page_tradebook_p,
                     page_job_log_p, page_rebalance_history_p, page_backtest_p,
-                    page_admin_p, page_ledger_p], position="hidden")
+                    page_admin_p, page_ledger_p, page_paper_p], position="hidden")
 nav.run()
