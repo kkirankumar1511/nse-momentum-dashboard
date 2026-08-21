@@ -3,7 +3,10 @@ Description=Run the weekly fundamentals refresh Monday 08:00
 
 [Timer]
 OnCalendar=Mon 08:00
-Persistent=false
+# 2026-08-21: true -- a missed weekly refresh (only one shot a week, so a
+# down box that week would otherwise mean a full extra week on stale
+# fundamentals data) should catch up rather than silently wait a week.
+Persistent=true
 Unit=nse-fundamentals.service
 
 [Install]

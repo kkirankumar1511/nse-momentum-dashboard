@@ -3,7 +3,16 @@ Description=Run the NSE rebalance scan daily at 14:55 (weekdays, ~20min before F
 
 [Timer]
 OnCalendar=Mon..Fri 14:55
-Persistent=false
+# 2026-08-21: true, not false -- a VPS-provider-forced reboot right around
+# today's 14:55 slot caused this timer to simply miss the day entirely
+# (Persistent=false never catches up a missed occurrence, it just waits
+# for the next scheduled one). live_rebalance.py's run_rebalance_scan()
+# already no-ops on a non-trading day (nse_holidays.is_trading_day()), and
+# an odd-hours catch-up attempt (e.g. the box coming back up before market
+# open) would have any real order attempt rejected by Kite itself (market
+# closed) rather than doing anything unsafe -- so catching up outweighs
+# the small risk of an off-hours proposal-only run.
+Persistent=true
 Unit=nse-rebalance.service
 
 [Install]

@@ -3,7 +3,12 @@ Description=Run the NSE paper-trade scan daily at 14:56 (weekdays, right alongsi
 
 [Timer]
 OnCalendar=Mon..Fri 14:56
-Persistent=false
+# 2026-08-21: true -- same reasoning as nse-rebalance.timer (a missed day
+# from an unexpected reboot should catch up, not silently wait for the
+# next scheduled day). paper_engine.py's own catch-up loop (replays every
+# missed trading day since paper_db.last_scan_date()) makes this doubly
+# safe here -- even a multi-day gap resolves correctly.
+Persistent=true
 Unit=nse-paper-trade.service
 
 [Install]

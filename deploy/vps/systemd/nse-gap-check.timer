@@ -3,7 +3,10 @@ Description=Run the gap-down safety check daily at 09:16 (weekdays, shortly afte
 
 [Timer]
 OnCalendar=Mon..Fri 09:16
-Persistent=false
+# 2026-08-21: true -- see nse-rebalance.timer's comment. main_gap_check()
+# already no-ops on a non-trading day, so a catch-up run outside its
+# normal window is safe.
+Persistent=true
 Unit=nse-gap-check.service
 
 [Install]

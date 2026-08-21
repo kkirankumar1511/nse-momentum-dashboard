@@ -3,7 +3,10 @@ Description=Check the Kite login daily at 07:00 (weekdays) -- well after the ~6 
 
 [Timer]
 OnCalendar=Mon..Fri 07:00
-Persistent=false
+# 2026-08-21: true -- a missed check (e.g. box down over an unexpected
+# reboot) should still catch up and notify if the token needs a login,
+# rather than silently skip straight to the next scheduled day.
+Persistent=true
 Unit=nse-token-check.service
 
 [Install]
