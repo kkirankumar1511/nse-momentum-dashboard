@@ -353,6 +353,25 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
         unsettled_proceeds += price * unsettled_qty
     cash_pool = available_cash + sell_proceeds
 
+    # Sector diversification cap (backtest.py:521-557, _apply_sector_cap)
+    # -- filters which NEW-entry candidates are even eligible before any
+    # of the three sizing paths below run, counting current sector-group
+    # occupancy from `still_held` first (same as backtest counting from
+    # its in-memory `positions`). Never touches already-held symbols --
+    # no forced exit, only blocks new entries into an already-at-cap
+    # group. No-op (returns the input unchanged) whenever sector_
+    # diversification_enabled is off or "sector_group" wasn't attached
+    # to `ranked` this run (screener.run_screen() only attaches it when
+    # sector_bonus_weight/sector_diversification_enabled fetched sector
+    # data) -- byte-identical to before this existed in that case.
+    # Deferred import: backtest.py already imports screener at module
+    # level, so importing backtest here at call-time avoids a circular
+    # import.
+    import backtest as bt
+    new_candidate_order = [sym for sym in candidates.index if sym not in still_held]
+    capped_new_candidates = set(bt._apply_sector_cap(
+        new_candidate_order, still_held, ranked, cfg))
+
     buys = []
     top_ups = []
     open_positions_now = state_db.get_open_positions()
@@ -370,7 +389,7 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
         for sym, row in candidates.iterrows():
             if len(still_held) + len(buys) >= effective_max_positions:
                 break
-            if sym in still_held:
+            if sym in still_held or sym not in capped_new_candidates:
                 continue
             price = float(row["price"])
             stop = float(row["suggested_stop"])
@@ -401,7 +420,8 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
         # New candidates (not held), rank order, plus held-but-still-
         # gate-passing symbols (eligible for topping up, not for a fresh
         # entry -- allocate_equal_weight_buys() filters that itself).
-        new_candidate_syms = [sym for sym in candidates.index if sym not in still_held]
+        new_candidate_syms = [sym for sym in candidates.index
+                             if sym not in still_held and sym in capped_new_candidates]
         held_still_candidates = [sym for sym in candidates.index if sym in still_held]
         allocator_syms = new_candidate_syms + held_still_candidates
         prices = {sym: float(candidates.loc[sym, "price"]) for sym in allocator_syms}
@@ -453,7 +473,7 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
         for sym, row in candidates.iterrows():
             if len(buys) >= open_slots:
                 break
-            if sym in still_held:
+            if sym in still_held or sym not in capped_new_candidates:
                 continue
             price = float(row["price"])
             stop = float(row["suggested_stop"])

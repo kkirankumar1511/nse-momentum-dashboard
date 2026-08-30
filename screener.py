@@ -27,6 +27,7 @@ import config
 import indicators
 import kite_client
 import fundamentals_agent as fa
+import sector_universe
 import state_db
 
 
@@ -567,6 +568,52 @@ def run_screen(with_fundamentals: bool = True,
             fundamentals = fa.fno_value_scan(list(tech.index))
     elif not with_fundamentals:
         fundamentals = None
+
+    # BACKTEST-ONLY-until-now sector relative-strength tilt (sector_bonus_
+    # weight) and hard diversification cap (sector_diversification_enabled
+    # + top_n_sectors/max_positions_per_sector/sector_composite_score_
+    # enabled). Mirrors backtest.rank_universe_asof's own attach block
+    # (backtest.py:452-502) almost verbatim -- one shared fetch/RS
+    # computation serves both features (already proven safe for a single
+    # live "today" call: paper_engine.load_market_data() and the Screener
+    # page's own "Fetch current sector rankings" button already call
+    # sector_membership_and_candles()/sector_rs_asof() exactly this way,
+    # live, outside any backtest). Real cost when either is on: ~20-35
+    # Kite index-candle fetches, ~15-30s -- only paid when actually
+    # enabled (both off in production today). Placed AFTER fundamentals
+    # resolve above (not before) so the composite-score branch's pre-gates
+    # breadth check sees real fundamental data, matching backtest's own
+    # ordering (fundamentals resolved before its sector block runs).
+    if config.STRATEGY.get("sector_bonus_weight", 0.0) or \
+            config.STRATEGY.get("sector_diversification_enabled", False):
+        report("Fetching sector index data...", 0.93)
+        sector_membership, sector_candles = sector_universe.sector_membership_and_candles(
+            config.UNIVERSE, days=days, verbose=False)
+        sector_rank = sector_universe.sector_rs_asof(
+            sector_candles, bench, bench.index[-1],
+            config.STRATEGY.get("sector_rs_lookback_days", 126))
+        tech["sector_rs"] = [
+            sector_universe.stock_sector_rs(sym, sector_membership, sector_rank)
+            for sym in tech.index]
+        tech["top_sector"] = [
+            sector_universe.stock_top_sector(sym, sector_membership, sector_rank)
+            for sym in tech.index]
+        tech["sector_group"] = tech["top_sector"].apply(
+            lambda s: sector_universe.industry_group(s) if s else s)
+        if config.STRATEGY.get("sector_diversification_enabled", False):
+            top_n = config.STRATEGY.get("top_n_sectors", 3)
+            if config.STRATEGY.get("sector_composite_score_enabled", False):
+                pre_gates = apply_gates(tech, fundamentals=fundamentals)
+                breadth = sector_universe.sector_breadth(sector_membership, pre_gates["all_gates"])
+                composite = sector_universe.sector_composite_score(
+                    sector_rank, sector_candles, bench.index[-1], breadth)
+                group_rank = composite.groupby(
+                    composite.index.to_series().apply(sector_universe.industry_group)).max()
+            else:
+                group_rank = sector_rank.groupby(
+                    sector_rank.index.to_series().apply(sector_universe.industry_group)).max()
+            top_group_names = set(group_rank.sort_values(ascending=False).head(top_n).index)
+            tech["sector_diversify_ok"] = tech["sector_group"].isin(top_group_names)
 
     report("Scoring & gating...", 0.95)
     t = apply_gates(tech, fundamentals)
