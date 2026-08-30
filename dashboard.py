@@ -4061,6 +4061,34 @@ def page_backtest():
                      "capital deployed, since each filled slot is still "
                      "sized off the full max_positions).")
 
+        cf1, cf2 = st.columns(2)
+        with cf1:
+            entry_confirm_days_v = st.number_input(
+                "Entry confirmation (consecutive rebalance events)",
+                min_value=0, max_value=10,
+                value=int(config.STRATEGY.get("entry_confirm_days", 0) or 0), step=1,
+                key="bt_entry_confirm_days",
+                help="0 = OFF (default). Requires a stock to have stayed in the "
+                     "confirm-pool (right) for this many CONSECUTIVE rebalance "
+                     "events before a NEW buy is allowed -- filters out one-event "
+                     "'wonder' ranks that reverse right after qualifying. Never "
+                     "affects sells. TESTED AND NOT RECOMMENDED: a 5.6yr PDF-style "
+                     "config backtest (2021-2026, regime filter already ON) found "
+                     "0 -> 2 made every headline metric worse at once -- CAGR "
+                     "38.65%->37.26%, Sharpe 1.64->1.60, max drawdown "
+                     "-30.67%->-33.10% -- despite a small win-rate lift. Left here "
+                     "as a re-testable toggle in case a different config responds "
+                     "differently, not because it's expected to help.")
+        with cf2:
+            entry_confirm_pool_size_v = st.number_input(
+                "Confirm-pool size", min_value=1, max_value=100,
+                value=int(config.STRATEGY.get("entry_confirm_pool_size") or (bt_max_positions * 2)),
+                step=1, disabled=entry_confirm_days_v == 0, key="bt_entry_confirm_pool_size",
+                help="How many top-scored candidates count as the confirm-pool "
+                     "each rebalance -- defaults to 2x portfolio size (e.g. "
+                     "top-20 for a 10-position portfolio, same convention as the "
+                     "sell-side keep zone).")
+
         st.caption("No per-trade cost is modeled — Zerodha charges no brokerage "
                   "on equity delivery (CNC). Statutory costs (STT, stamp duty, "
                   "exchange/SEBI charges) still apply in reality (~5-7 bps round "
@@ -4122,6 +4150,8 @@ def page_backtest():
         run_cfg["resistance_zone_weight"] = float(resistance_zone_weight_v)
         run_cfg["regime_filter_enabled"] = use_regime_filter
         run_cfg["regime_position_multiplier"] = float(regime_position_multiplier_v)
+        run_cfg["entry_confirm_days"] = int(entry_confirm_days_v)
+        run_cfg["entry_confirm_pool_size"] = int(entry_confirm_pool_size_v)
         run_cfg["history_days"] = int(history_days_v)
         run_cfg["rebalance_cadence"] = rebalance_cadence_v
         start_background_job(
@@ -4230,6 +4260,9 @@ def page_backtest():
             _rg = "ON" if _bt_cfg.get("regime_filter_enabled") else "OFF"
             st.metric("Market regime filter", f"{_rg} (x{_bt_cfg.get('regime_position_multiplier', 0.5)} "
                      f"positions when NIFTY < {_bt_cfg.get('regime_ema_period', 200)}EMA)")
+            _ecd = _bt_cfg.get("entry_confirm_days", 0)
+            _ec = f"{_ecd}d (pool {_bt_cfg.get('entry_confirm_pool_size')})" if _ecd else "OFF"
+            st.metric("Entry confirmation", _ec)
 
     with st.container(border=True, key="ov-card-bt-pdf"):
         pdf_col1, pdf_col2 = st.columns([3, 2])

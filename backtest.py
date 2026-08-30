@@ -613,6 +613,16 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     fewer names -- e.g. 5 of 10 original slots filled leaves ~50% in cash,
     not the same capital concentrated into 5 names.
 
+    entry confirmation: config.STRATEGY["entry_confirm_days"] (0/off by
+    default) requires a stock to have stayed in the confirm-pool (top
+    entry_confirm_pool_size candidates by score each rebalance event,
+    default max_positions*2) for this many CONSECUTIVE rebalance events
+    before it's eligible for a NEW buy -- filters out one-event "wonder"
+    ranks that reverse right after qualifying. Never affects sells. Tested
+    and NOT recommended (see config.py's own comment) -- a 5.6yr PDF-config
+    backtest with the regime filter already on found 0 -> 2 made CAGR,
+    Sharpe, and max drawdown all worse at once.
+
     trailing stop: config.STRATEGY["trailing_stop_enabled"] (False by
     default) ratchets each position's stop up to highest_close_since_entry
     - trailing_atr_multiple*ATR as it gains, never back down -- see the
@@ -747,6 +757,11 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     # held positions are still legitimately good candidates this month, not
     # just which ones are newly biddable.
     current_candidate_syms: list[str] = []
+    # Entry-confirmation streak (see config.py's entry_confirm_days) -- how
+    # many CONSECUTIVE rebalance events each symbol has stayed in the
+    # confirm-pool, reset to 0 the event it drops out. Persists across the
+    # whole backtest, updated once per rebalance event below.
+    candidate_streak: dict[str, int] = {}
 
     def close_position(sym, price, date, reason):
         nonlocal cash
@@ -899,6 +914,25 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 watchlist = {sym: row for sym, row in candidates.iterrows()
                             if sym not in positions}
                 current_candidate_syms = list(candidates.index)
+
+                # Entry confirmation (config.py's entry_confirm_days, off by
+                # default): track the consecutive-event streak against the
+                # confirm-pool, then filter `watchlist` itself so BOTH entry
+                # paths below (the advanced allocator and the simple greedy
+                # loop) get it uniformly. Only gates NEW entries -- keep_zone/
+                # sell_check and current_candidate_syms above are unaffected.
+                confirm_days = cfg.get("entry_confirm_days", 0)
+                if confirm_days:
+                    confirm_pool_size = cfg.get("entry_confirm_pool_size") \
+                        or cfg["max_positions"] * 2
+                    confirm_syms_now = set(candidates.head(confirm_pool_size).index)
+                    for sym in list(candidate_streak.keys()):
+                        if sym not in confirm_syms_now:
+                            candidate_streak[sym] = 0
+                    for sym in confirm_syms_now:
+                        candidate_streak[sym] = candidate_streak.get(sym, 0) + 1
+                    watchlist = {sym: row for sym, row in watchlist.items()
+                                if candidate_streak.get(sym, 0) >= confirm_days}
 
         # 2b) fill any open slot from the standing watchlist -- every day,
         # not just at rebalance, so freed-up capital gets redeployed right

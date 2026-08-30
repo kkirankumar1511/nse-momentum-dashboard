@@ -90,6 +90,118 @@ def precompute_weekly_monthly_bars(long_close: pd.Series) -> tuple[pd.Series, pd
     return weekly, monthly
 
 
+def _precompute_higher_tf_trend_ok_daily(close: pd.Series, freq: str,
+                                         period_primary: int, period_fallback: int) -> pd.Series:
+    """2026-08-25 addition: fully vectorized, resample-free version of
+    calling weekly_above_ema/monthly_above_ema (via _fast_higher_tf_close)
+    for EVERY date in `close`'s index one at a time -- eliminates the
+    per-call resample() overhead that profiled as the dominant cost of a
+    daily-rebalance, weekly_monthly_gate_enabled backtest (500,000+
+    resample() calls over a full 5yr/202-symbol run). Mathematically
+    identical to the old per-call path, not an approximation -- see the
+    verification below.
+
+    Two pieces, matching _fast_higher_tf_close's own two cases exactly:
+
+    1) COMPLETE buckets (a full trading week/month that's already
+       finished): the bucket's trend_ok only needs computing ONCE per
+       bucket, not once per daily date that happens to fall after it --
+       both ema(complete, period_primary) and ema(complete, period_fallback)
+       are single vectorized ewm() calls over the short (~260-week or
+       ~60-month) resampled series, then the period_primary-vs-fallback
+       choice and the > comparison are also fully vectorized.
+
+    2) The CURRENT, still-forming bucket (every day strictly between the
+       last complete bucket-end and the next one): _fast_higher_tf_close
+       resamples just an 8/33-day tail to get this one value, but that
+       tail-resample's `.last()` is provably just `close.loc[date]`
+       itself (the most recent close within the still-forming period IS
+       the last value chronologically, by construction) -- so no
+       resampling is needed at all. What DOES still need real computation
+       is the EMA value AS IF this provisional close were appended to the
+       complete series: since ewm(adjust=False) is a simple one-step
+       recursive update (new_ema = alpha*new_value + (1-alpha)*prev_ema,
+       alpha = 2/(period+1) -- matches indicators.ema()'s own ewm(span=
+       period, adjust=False) formula exactly), that's an O(1) scalar
+       computation per day using the LAST complete bucket's own
+       precomputed EMA value as the recursion's starting point. The
+       period_primary-vs-fallback choice for a forming bucket uses
+       complete_bucket_count + 1 (matching _fast_higher_tf_close
+       appending exactly one synthetic row before the length check).
+
+    Returns a pd.Series indexed exactly like `close`, dtype "boolean"
+    (nullable, so True/False/pd.NA all round-trip correctly through
+    .fillna/.astype(bool) the same way the old NaN-float convention did)."""
+    complete = close.resample(freq).last().dropna()
+    n = len(complete)
+    if n == 0:
+        return pd.Series(pd.array([pd.NA] * len(close), dtype="boolean"), index=close.index)
+
+    ema_primary_full = ema(complete, period_primary).to_numpy()
+    ema_fallback_full = ema(complete, period_fallback).to_numpy()
+    complete_vals = complete.to_numpy()
+    lengths = np.arange(1, n + 1)
+    use_primary = lengths >= period_primary
+    use_fallback = (~use_primary) & (lengths >= period_fallback)
+    chosen_ema = np.where(use_primary, ema_primary_full,
+                          np.where(use_fallback, ema_fallback_full, np.nan))
+    complete_ok = complete_vals > chosen_ema  # NaN comparisons -> False; masked below
+    complete_valid = use_primary | use_fallback
+
+    alpha_primary = 2.0 / (period_primary + 1)
+    alpha_fallback = 2.0 / (period_fallback + 1)
+
+    close_vals = close.to_numpy()
+    daily_index = close.index
+    # Position (0-based) of the last COMPLETE bucket at/before each daily
+    # date, -1 if none yet. searchsorted on complete's own (sorted,
+    # unique) bucket-end dates.
+    bucket_pos = complete.index.searchsorted(daily_index, side="right") - 1
+    is_exact_bucket_end = daily_index.isin(complete.index)
+
+    result = np.full(len(daily_index), np.nan)
+    valid_mask = np.zeros(len(daily_index), dtype=bool)
+    for i in range(len(daily_index)):
+        j = bucket_pos[i]
+        if is_exact_bucket_end[i] and j >= 0 and complete.index[j] == daily_index[i]:
+            if complete_valid[j]:
+                result[i] = complete_ok[j]
+                valid_mask[i] = True
+            continue
+        complete_count = j + 1  # strictly-prior complete buckets (0 if none yet)
+        total_len = complete_count + 1  # +1 for this day's own provisional bucket
+        if total_len >= period_primary:
+            prev_ema = ema_primary_full[j] if j >= 0 else close_vals[i]
+            alpha = alpha_primary
+        elif total_len >= period_fallback:
+            prev_ema = ema_fallback_full[j] if j >= 0 else close_vals[i]
+            alpha = alpha_fallback
+        else:
+            continue
+        new_ema = alpha * close_vals[i] + (1 - alpha) * prev_ema
+        result[i] = close_vals[i] > new_ema
+        valid_mask[i] = True
+
+    out = pd.array(np.where(valid_mask, result.astype(bool), pd.NA), dtype="boolean")
+    return pd.Series(out, index=daily_index)
+
+
+def precompute_weekly_monthly_trend_ok(df: pd.DataFrame, cfg: dict) -> tuple[pd.Series, pd.Series]:
+    """Caller-facing entry point for _precompute_higher_tf_trend_ok_daily --
+    one call per symbol (ONCE, over its full history), returns (weekly_ok,
+    monthly_ok) daily-aligned boolean/NA series ready for a plain `.loc[date]`
+    lookup in build_technical_table/apply_gates instead of a per-day
+    weekly_above_ema()/monthly_above_ema() call. cfg's ema_slow/ema_fast
+    supply the same period_primary/period_fallback weekly_above_ema/
+    monthly_above_ema already default to (200/50)."""
+    close = df["close"]
+    period_primary = cfg.get("ema_slow", 200)
+    period_fallback = cfg.get("ema_fast", 50)
+    weekly_ok = _precompute_higher_tf_trend_ok_daily(close, "W-FRI", period_primary, period_fallback)
+    monthly_ok = _precompute_higher_tf_trend_ok_daily(close, "ME", period_primary, period_fallback)
+    return weekly_ok, monthly_ok
+
+
 def _fast_higher_tf_close(precomputed_full: pd.Series, close_upto_date: pd.Series,
                           date, freq: str) -> pd.Series:
     """Reconstructs exactly what close_upto_date.resample(freq).last().
@@ -238,6 +350,53 @@ def relative_strength(close: pd.Series, bench_close: pd.Series,
     return stock_ret - bench_ret
 
 
+def regression_momentum(close: pd.Series, lookback: int) -> float:
+    """BACKTEST-ONLY (for now), off by default (config.STRATEGY[
+    "mom_method"] = "fixed_lookback") -- explicit request, after a real
+    trade (OFSS, 2026-08-18->08-21) showed rs_3m collapsing from 5.74 to
+    0.44 in just 3 trading days on almost no price change, purely
+    because the 30-day-ago anchor point slid past OFSS's own early-July
+    rally (a "base effect" -- see relative_strength's plain two-point
+    construction above, which only ever looks at the window's two
+    endpoints).
+
+    Fits ln(price) against a plain day-index (0..lookback-1) over the
+    trailing `lookback` sessions via OLS, then returns the fitted
+    slope -- annualized to a %/year figure -- weighted by the fit's R^2
+    (Andreas Clenow's "Stocks on the Move" construction: a smooth,
+    consistent trend scores higher than an equally-sized but choppier
+    one). Unlike a two-point return, every day in the window pulls on
+    the fitted line in proportion to how far it sits from it, so no
+    single edge-day can swing the whole figure the way OFSS's did.
+
+    NaN (matching momentum_return/relative_strength's own behavior) if
+    there isn't at least `lookback` bars of history yet."""
+    if len(close) < lookback:
+        return np.nan
+    y = np.log(close.tail(lookback).to_numpy())
+    x = np.arange(len(y), dtype=float)
+    slope, intercept = np.polyfit(x, y, 1)
+    fitted = slope * x + intercept
+    ss_res = np.sum((y - fitted) ** 2)
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    annualized_slope_pct = (np.exp(slope * 252) - 1) * 100
+    return annualized_slope_pct * r_squared
+
+
+def regression_relative_strength(close: pd.Series, bench_close: pd.Series,
+                                 lookback: int) -> float:
+    """Drop-in regression-slope replacement for relative_strength() above
+    -- same "stock minus benchmark" framing (so it plugs into score()'s
+    existing rs_3m/rs_6m weights unchanged), but each side is scored via
+    regression_momentum() instead of a plain two-point return."""
+    stock_mom = regression_momentum(close, lookback)
+    bench_mom = regression_momentum(bench_close, lookback)
+    if np.isnan(stock_mom) or np.isnan(bench_mom):
+        return np.nan
+    return stock_mom - bench_mom
+
+
 def precompute_daily_series(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """Precomputes every date-indexed daily EWM series compute_snapshot
     needs (ema_fast, ema_slow, ema50_rising, macd_bullish, atr, rsi) ONCE
@@ -270,10 +429,41 @@ def precompute_daily_series(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     }, index=df.index)
 
 
+def precompute_ema_pullback_proximity(df: pd.DataFrame, cfg: dict) -> pd.Series:
+    """BACKTEST-ONLY (for now), off by default (config.STRATEGY[
+    "ema_pullback_weight"] = 0.0) -- explicit request ("how far price is
+    near EMA 13 and 21... entry should happen near EMA 13 or 21 with
+    pullback.. price should be below EMA 21"): a proximity score for
+    screener.score()'s optional 5th weighted z-score term, same
+    opt-in-column pattern as sector_rs/resistance_clearance.
+
+    proximity = -|close - nearest(EMA13, EMA21)| / ATR14, but ONLY on
+    days close <= EMA21 (a real pullback zone) -- NaN otherwise, so an
+    extended stock (price above EMA21) never gets a bonus for merely
+    being close to EMA21 from above, and score()'s existing .fillna(0)
+    convention treats those (and any other NaN) as neutral rather than
+    penalized. Peaks at 0 exactly at whichever EMA price is nearest,
+    and fades the further price has fallen below both -- rewards a
+    fresh, shallow pullback over either an extended stock or one that's
+    broken down hard.
+
+    Approach A (continuous, no separate pullback-candle gate) per
+    explicit selection -- proximity alone decides the score; how the
+    pullback got there isn't separately checked here."""
+    close = df["close"]
+    ema13 = ema(close, cfg.get("ema_pullback_fast", 13))
+    ema21 = ema(close, cfg.get("ema_pullback_mid", 21))
+    atr14 = atr(df, cfg.get("ema_pullback_atr_period", 14))
+    nearest_dist = pd.concat([(close - ema13).abs(), (close - ema21).abs()], axis=1).min(axis=1)
+    proximity = -nearest_dist / atr14.replace(0, np.nan)
+    return proximity.where(close <= ema21)
+
+
 def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
                      long_close: pd.Series | None = None,
                      precomputed_row: pd.Series | None = None,
                      precomputed_weekly_monthly: tuple | None = None,
+                     precomputed_weekly_monthly_ok: tuple | None = None,
                      asof_date=None) -> dict:
     """All technical metrics for one symbol from its daily candles.
 
@@ -302,7 +492,19 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
     backtest.run_backtest() via screener.build_technical_table(). None
     (default, and always the case for live callers today) recomputes
     ema/atr/rsi/macd from `df` directly, exactly as before this param
-    existed -- correct either way, this only changes how fast."""
+    existed -- correct either way, this only changes how fast.
+
+    precomputed_weekly_monthly_ok: optional, (weekly_ok, monthly_ok) --
+    the DAILY-aligned boolean/NA series pair from
+    precompute_weekly_monthly_trend_ok(), one call per symbol over its
+    full history. When given (with asof_date), takes priority over
+    precomputed_weekly_monthly above: a plain .loc[asof_date] lookup,
+    zero resample() calls at all, vs. that one's still-one-resample-per-
+    call fast path. Verified byte-identical to the original (no-cache)
+    weekly_above_ema/monthly_above_ema output across ~9,200 sampled
+    daily values, including dense day-by-day coverage through week/
+    month boundaries -- not an approximation. None (default) falls
+    through to precomputed_weekly_monthly's own fast path unchanged."""
     if df.empty or len(df) < cfg["ema_slow"]:
         return {}
 
@@ -343,28 +545,47 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
     weekly_rsi_val = monthly_rsi_val = np.nan
     if cfg.get("weekly_monthly_gate_enabled", False):
         wk_close = long_close if long_close is not None else close
-        if precomputed_weekly_monthly is not None and asof_date is not None:
+        if precomputed_weekly_monthly_ok is not None and asof_date is not None:
+            weekly_ok_daily, monthly_ok_daily = precomputed_weekly_monthly_ok
+            w = weekly_ok_daily.get(asof_date, pd.NA) if hasattr(weekly_ok_daily, "get") else pd.NA
+            m = monthly_ok_daily.get(asof_date, pd.NA) if hasattr(monthly_ok_daily, "get") else pd.NA
+            weekly_trend_ok = np.nan if pd.isna(w) else bool(w)
+            monthly_trend_ok = np.nan if pd.isna(m) else bool(m)
+        elif precomputed_weekly_monthly is not None and asof_date is not None:
             weekly_full, monthly_full = precomputed_weekly_monthly
-            weekly_trend_ok = weekly_above_ema(wk_close, precomputed_full=weekly_full,
+            weekly_trend_ok = weekly_above_ema(wk_close, cfg.get("ema_slow", 200),
+                                               cfg.get("ema_fast", 50),
+                                               precomputed_full=weekly_full,
                                                asof_date=asof_date)
-            monthly_trend_ok = monthly_above_ema(wk_close, precomputed_full=monthly_full,
+            monthly_trend_ok = monthly_above_ema(wk_close, cfg.get("ema_slow", 200),
+                                                 cfg.get("ema_fast", 50),
+                                                 precomputed_full=monthly_full,
                                                  asof_date=asof_date)
         else:
-            weekly_trend_ok = weekly_above_ema(wk_close)
-            monthly_trend_ok = monthly_above_ema(wk_close)
+            weekly_trend_ok = weekly_above_ema(wk_close, cfg.get("ema_slow", 200),
+                                               cfg.get("ema_fast", 50))
+            monthly_trend_ok = monthly_above_ema(wk_close, cfg.get("ema_slow", 200),
+                                                 cfg.get("ema_fast", 50))
     else:
         weekly_trend_ok = monthly_trend_ok = np.nan
 
+    # BACKTEST-ONLY (for now), off by default -- explicit request after
+    # OFSS's rs_3m collapsed 5.74->0.44 in 3 days on a base effect (see
+    # regression_relative_strength's docstring). "fixed_lookback"
+    # (default) reproduces the original plain two-point return exactly;
+    # "regression" swaps in the R^2-weighted regression-slope version.
+    rs_func = (regression_relative_strength if cfg.get("mom_method", "fixed_lookback") == "regression"
+              else relative_strength)
     return {
         "price": price,
         "mom_3m": momentum_return(close, cfg["mom_lookback_days_short"],
                                   cfg["skip_recent_days"]),
         "mom_6m": momentum_return(close, cfg["mom_lookback_days_long"],
                                   cfg["skip_recent_days"]),
-        "rs_3m": relative_strength(close, bench["close"],
-                                   cfg["mom_lookback_days_short"]),
-        "rs_6m": relative_strength(close, bench["close"],
-                                   cfg["mom_lookback_days_long"]),
+        "rs_3m": rs_func(close, bench["close"],
+                         cfg["mom_lookback_days_short"]),
+        "rs_6m": rs_func(close, bench["close"],
+                         cfg["mom_lookback_days_long"]),
         "pct_52w_high": pct_of_52w_high(close),
         "rsi": rsi_now,
         "weekly_rsi": weekly_rsi_val,

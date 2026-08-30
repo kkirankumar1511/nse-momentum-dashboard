@@ -291,6 +291,24 @@ _STRATEGY_DEFAULTS = {
     "regime_ema_period": 200,
     "regime_position_multiplier": 0.5,
 
+    # Entry confirmation (backtest-only for now): requires a stock to have
+    # stayed in the confirm-pool (top entry_confirm_pool_size candidates by
+    # score, default max_positions*2 -- same convention as keep_zone) for
+    # this many CONSECUTIVE rebalance events before a NEW buy is allowed.
+    # Filters out one-day/one-rebalance "wonder" ranks that reverse right
+    # after qualifying. Never affects sells -- only gates new entries, same
+    # "blocks new entries only" philosophy as the regime filter above.
+    # TESTED AND DISCARDED as a default, same as beta scoring and the first
+    # regime-filter attempt: a 5.6yr PDF-config backtest (2021-2026, regime
+    # filter above already ON) found 0 -> 2 made every headline metric
+    # WORSE at once -- CAGR 38.65%->37.26%, Sharpe 1.64->1.60, max drawdown
+    # -30.67%->-33.10% -- despite a small win-rate lift (35.6%->37.6%).
+    # Kept here, off by default, as a re-testable toggle from the Backtest
+    # UI rather than deleted outright, in case a different config responds
+    # differently -- but do not expect it to help.
+    "entry_confirm_days": 0,
+    "entry_confirm_pool_size": None,
+
     "history_days": 1200,              # calendar days of candles to fetch
 
     # Equal-weight capital allocation (screener.capital_position_size) vs.

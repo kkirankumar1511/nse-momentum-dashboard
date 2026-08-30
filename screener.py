@@ -38,7 +38,8 @@ def build_technical_table(candles: dict[str, pd.DataFrame],
                           cfg: dict | None = None,
                           long_candles: dict[str, pd.DataFrame] | None = None,
                           precomputed: dict[str, pd.Series] | None = None,
-                          precomputed_weekly_monthly: dict | None = None) -> pd.DataFrame:
+                          precomputed_weekly_monthly: dict | None = None,
+                          precomputed_weekly_monthly_ok: dict | None = None) -> pd.DataFrame:
     """cfg: BUG FIX -- this used to be hardcoded to config.STRATEGY
     internally, silently ignoring any custom cfg a caller (i.e. every
     Backtest UI run) actually passed, the same class of bug apply_gates()/
@@ -79,7 +80,16 @@ def build_technical_table(candles: dict[str, pd.DataFrame],
     reproduces the original behavior exactly -- correct either way, this
     only changes speed. The as-of date itself is read from `bench`'s own
     last index entry (rank_universe_asof always passes bench already
-    sliced to exactly `:date`, so this is never a guess)."""
+    sliced to exactly `:date`, so this is never a guess).
+
+    precomputed_weekly_monthly_ok: optional, {symbol: (weekly_ok,
+    monthly_ok)} from indicators.precompute_weekly_monthly_trend_ok() via
+    backtest.run_backtest() -- takes priority over precomputed_weekly_
+    monthly above (a plain daily-indexed lookup, zero resample() calls,
+    vs. that one's still-one-resample-per-call fast path). None (default)
+    falls through to precomputed_weekly_monthly's own fast path
+    unchanged -- see compute_snapshot's own docstring for the
+    byte-identical verification."""
     cfg = cfg if cfg is not None else config.STRATEGY
     asof_date = bench.index[-1] if not bench.empty else None
     rows = {}
@@ -88,9 +98,12 @@ def build_technical_table(candles: dict[str, pd.DataFrame],
         long_close = long_df["close"] if long_df is not None and not long_df.empty else None
         precomputed_row = precomputed.get(sym) if precomputed else None
         precomputed_wm = precomputed_weekly_monthly.get(sym) if precomputed_weekly_monthly else None
+        precomputed_wm_ok = (precomputed_weekly_monthly_ok.get(sym)
+                             if precomputed_weekly_monthly_ok else None)
         snap = indicators.compute_snapshot(df, bench, cfg, long_close=long_close,
                                           precomputed_row=precomputed_row,
                                           precomputed_weekly_monthly=precomputed_wm,
+                                          precomputed_weekly_monthly_ok=precomputed_wm_ok,
                                           asof_date=asof_date)
         if snap:
             rows[sym] = snap
@@ -249,6 +262,18 @@ def score(t: pd.DataFrame, cfg: dict = config.STRATEGY) -> pd.DataFrame:
     if cfg.get("fundamental_bonus_weight", 0.0) and "fundamental_score" in t.columns:
         t["score"] += (cfg["fundamental_bonus_weight"]
                        * _zscore(t["fundamental_score"].astype(float)).fillna(0))
+
+    # BACKTEST-ONLY (for now), off by default -- EMA13/21 pullback-
+    # proximity tilt (see indicators.precompute_ema_pullback_proximity).
+    # Same opt-in-column mechanic as sector_rs/resistance_clearance
+    # above: only present when the caller attached an
+    # "ema_pullback_proximity" column, only counted when the weight is
+    # nonzero. A stock already extended above EMA21 has NaN here
+    # (fillna(0) below -> neutral, not penalized); one sitting right at
+    # EMA13/21 from below after a pullback scores highest.
+    if cfg.get("ema_pullback_weight", 0.0) and "ema_pullback_proximity" in t.columns:
+        t["score"] += (cfg["ema_pullback_weight"]
+                       * _zscore(t["ema_pullback_proximity"].astype(float)).fillna(0))
 
     return t.sort_values("score", ascending=False)
 
