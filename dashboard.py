@@ -3674,16 +3674,17 @@ def page_backtest():
         '<span class="ov-sub">calendar-entry momentum system</span>'
         f'<span class="ov-info-icon" title="{_backtest_tip}">ℹ️</span></div></div>',
         unsafe_allow_html=True)
-    _bt_hdr_r1, _bt_hdr_r2, _bt_hdr_r3 = st.columns([2, 1, 1])
+    _bt_hdr_spacer, _bt_hdr_r1, _bt_hdr_r2, _bt_hdr_r3 = st.columns(
+        [5, 2, 1.2, 1.2])
     _build_fh_clicked = _bt_hdr_r1.button(
         "Build/Refresh fundamentals history", key="bt_build_fh_hdr",
-        disabled=backtest_running, use_container_width=True)
+        disabled=backtest_running)
     _run_backtest_clicked = _bt_hdr_r2.button(
         "Run backtest", type="primary", key="bt_run_hdr",
-        disabled=backtest_running, use_container_width=True)
+        disabled=backtest_running)
     _stop_backtest_clicked = _bt_hdr_r3.button(
         "⏹️ Stop backtest", key="bt_stop_hdr",
-        disabled=not backtest_running, use_container_width=True)
+        disabled=not backtest_running)
     if _stop_backtest_clicked:
         cancel_background_job("backtest_run")
         st.toast("Stopping backtest — this can take a few seconds to "
