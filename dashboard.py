@@ -46,7 +46,8 @@ import nse_holidays
 import paper_page
 import screener
 import sector_universe as su
-from background_jobs import clear_background_job, get_background_job, start_background_job
+from background_jobs import (cancel_background_job, clear_background_job,
+                             get_background_job, start_background_job)
 
 
 # Windows' asyncio ProactorEventLoop logs a spurious traceback whenever a
@@ -3676,13 +3677,20 @@ def page_backtest():
             f'<span class="ov-info-icon" title="{_backtest_tip}">ℹ️</span></div></div>',
             unsafe_allow_html=True)
     with _bt_hdr_r:
-        _bt_hdr_r1, _bt_hdr_r2 = st.columns(2)
+        _bt_hdr_r1, _bt_hdr_r2, _bt_hdr_r3 = st.columns(3)
         _build_fh_clicked = _bt_hdr_r1.button(
             "Build/Refresh fundamentals history", key="bt_build_fh_hdr",
             disabled=backtest_running)
         _run_backtest_clicked = _bt_hdr_r2.button(
             "Run backtest", type="primary", key="bt_run_hdr",
             disabled=backtest_running)
+        _stop_backtest_clicked = _bt_hdr_r3.button(
+            "⏹️ Stop backtest", key="bt_stop_hdr",
+            disabled=not backtest_running)
+        if _stop_backtest_clicked:
+            cancel_background_job("backtest_run")
+            st.toast("Stopping backtest — this can take a few seconds to "
+                    "take effect.", icon="⏹️")
 
     if "bt_result" not in st.session_state and os.path.exists(BACKTEST_CACHE):
         _cached_bt = pd.read_pickle(BACKTEST_CACHE)
@@ -4227,7 +4235,9 @@ def page_backtest():
             frac, stage = job["progress"]
             st.progress(frac, text=f"{stage} — started {job['started_at']:%H:%M:%S}")
             return
-        if job["error"]:
+        if job.get("cancelled"):
+            st.warning("⏹️ Backtest stopped.")
+        elif job["error"]:
             st.error(f"Backtest failed: {job['error']}")
         else:
             result = job["result"]

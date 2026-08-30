@@ -31,6 +31,15 @@ import state_db
 
 _JOBS: dict[str, dict] = {}
 
+
+class JobCancelled(Exception):
+    """Raised inside a job's own progress_cb once cancel_background_job() has
+    been called for its key. Cooperative, not instant: it only takes effect
+    the next time the job's fn actually calls progress_cb (e.g. backtest.
+    run_backtest's day loop calls it every ~1% of the date range) -- a job
+    whose fn never calls progress_cb has no way in and just runs to
+    completion, same as before this existed."""
+
 # Runs exactly once per dashboard process (module-level code, not re-run on
 # Streamlit's repeated script reruns thanks to Python's import cache -- same
 # mechanism _JOBS itself relies on, see the module docstring above). Any
@@ -60,9 +69,12 @@ def start_background_job(key: str, fn, *args, job_type: str | None = None,
         return False
 
     job = {"thread": None, "done": False, "result": None, "error": None,
+          "cancelled": False, "cancel_requested": False,
           "progress": (0.0, "Starting..."), "started_at": dt.datetime.now()}
 
     def _progress_cb(stage, frac):
+        if job["cancel_requested"]:
+            raise JobCancelled("Stopped by user.")
         job["progress"] = (frac, stage)
 
     def _run_fn():
@@ -78,6 +90,8 @@ def start_background_job(key: str, fn, *args, job_type: str | None = None,
                         jr["summary"] = summarize_fn(result)
             else:
                 _run_fn()
+        except JobCancelled:
+            job["cancelled"] = True
         except Exception as e:
             job["error"] = e
         finally:
@@ -95,3 +109,14 @@ def get_background_job(key: str) -> dict | None:
 
 def clear_background_job(key: str) -> None:
     _JOBS.pop(key, None)
+
+
+def cancel_background_job(key: str) -> bool:
+    """Requests cooperative cancellation of a running job. Takes effect the
+    next time the job's fn calls progress_cb, not instantly. Returns False
+    if no job with this key is currently running."""
+    job = _JOBS.get(key)
+    if job is None or not job["thread"].is_alive():
+        return False
+    job["cancel_requested"] = True
+    return True
