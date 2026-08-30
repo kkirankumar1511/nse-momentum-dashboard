@@ -1997,30 +1997,36 @@ def page_admin():
                      "drawdown -30.67%->-28.81% at once, verified against "
                      "this exact production engine -- verify against your "
                      "own config in Backtest before relying on it live.")
-            if mad_stop_enabled:
-                mad_c1, mad_c2, mad_c3, mad_c4 = st.columns(4)
-                mad_stop_med_len = mad_c1.number_input(
-                    "Median length", min_value=5, max_value=100,
-                    value=int(cfg.get("mad_stop_med_len", 21)), step=1,
-                    help="Rolling window for the trail's median center line.")
-                mad_stop_mad_len = mad_c2.number_input(
-                    "MAD length", min_value=5, max_value=100,
-                    value=int(cfg.get("mad_stop_mad_len", 21)), step=1,
-                    help="Rolling window for the median-absolute-deviation band width.")
-                mad_stop_dev_factor = mad_c3.number_input(
-                    "Deviation factor", min_value=0.5, max_value=5.0,
-                    value=float(cfg.get("mad_stop_dev_factor", 2.0)), step=0.1,
-                    help="MAD band half-width multiplier -- wider band = looser stop.")
-                mad_stop_atr_floor_mult = mad_c4.number_input(
-                    "ATR floor ×", min_value=0.5, max_value=5.0,
-                    value=float(cfg.get("mad_stop_atr_floor_mult", 2.0)), step=0.1,
-                    help="Floors the band width at this × ATR(14) so it never "
-                         "gets unrealistically tight in a low-volatility lull.")
-            else:
-                mad_stop_med_len = cfg.get("mad_stop_med_len", 21)
-                mad_stop_mad_len = cfg.get("mad_stop_mad_len", 21)
-                mad_stop_dev_factor = cfg.get("mad_stop_dev_factor", 2.0)
-                mad_stop_atr_floor_mult = cfg.get("mad_stop_atr_floor_mult", 2.0)
+            # Always rendered (greyed out when off), never conditionally
+            # shown/hidden -- widgets inside st.form() don't trigger a
+            # rerun on their own, only the submit button does, so an
+            # `if mad_stop_enabled:` guard here would never reveal these
+            # fields until AFTER "Save strategy settings" was clicked,
+            # by which point it's too late to edit them. Same disabled=
+            # pattern already used for every other conditional field in
+            # this form (rsi_exit_max, equal_weight_tolerance_pct, etc.)
+            mad_c1, mad_c2, mad_c3, mad_c4 = st.columns(4)
+            mad_stop_med_len = mad_c1.number_input(
+                "Median length", min_value=5, max_value=100,
+                value=int(cfg.get("mad_stop_med_len", 21)), step=1,
+                disabled=not mad_stop_enabled,
+                help="Rolling window for the trail's median center line.")
+            mad_stop_mad_len = mad_c2.number_input(
+                "MAD length", min_value=5, max_value=100,
+                value=int(cfg.get("mad_stop_mad_len", 21)), step=1,
+                disabled=not mad_stop_enabled,
+                help="Rolling window for the median-absolute-deviation band width.")
+            mad_stop_dev_factor = mad_c3.number_input(
+                "Deviation factor", min_value=0.5, max_value=5.0,
+                value=float(cfg.get("mad_stop_dev_factor", 2.0)), step=0.1,
+                disabled=not mad_stop_enabled,
+                help="MAD band half-width multiplier -- wider band = looser stop.")
+            mad_stop_atr_floor_mult = mad_c4.number_input(
+                "ATR floor ×", min_value=0.5, max_value=5.0,
+                value=float(cfg.get("mad_stop_atr_floor_mult", 2.0)), step=0.1,
+                disabled=not mad_stop_enabled,
+                help="Floors the band width at this × ATR(14) so it never "
+                     "gets unrealistically tight in a low-volatility lull.")
 
             st.markdown('<p class="ov-muted">Automation</p>', unsafe_allow_html=True)
             c4b, c4c, c4d = st.columns(3)
