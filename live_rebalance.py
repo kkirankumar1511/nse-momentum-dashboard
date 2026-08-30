@@ -47,7 +47,7 @@ LOG_PATH = os.path.join("cache", "live_rebalance_log.txt")
 
 
 def _trailing_stop_candidate(df: pd.DataFrame, highest_close: float,
-                             atr_now: float, cfg: dict) -> float:
+                             atr_now: float, cfg: dict) -> float | None:
     """The ongoing ratchet's candidate stop -- the ATR chandelier formula,
     unless mad_stop_enabled, in which case the MAD volatility trail's own
     current lower band takes over (same precedence as backtest.py's
@@ -58,28 +58,46 @@ def _trailing_stop_candidate(df: pd.DataFrame, highest_close: float,
     one-sided-rise property doesn't need separate handling here. Deferred
     import: mad_trail_strategy imports indicators at module level; safe
     as a call-time import since both are already fully loaded by the
-    time this runs."""
-    atr_stop = highest_close - cfg["trailing_atr_multiple"] * atr_now
-    if not cfg.get("mad_stop_enabled", False):
-        return atr_stop
-    import mad_trail_strategy
-    mad_cfg = mad_trail_strategy.cfg_from_strategy(cfg)
-    mad_df = mad_trail_strategy.precompute_mad_trail(df, mad_cfg)
-    if mad_df.empty:
-        return atr_stop
-    last = mad_df.iloc[-1]
-    if last["regime"] == 1 and not pd.isna(last["lower"]):
-        return float(last["lower"])
-    return atr_stop
+    time this runs.
+
+    Returns None when there's no ratchet candidate to apply this run --
+    matches backtest.py's own day-loop exactly (backtest.py:955-972):
+    `if mad_stop_enabled: ... (no regime check, no ATR fallback -- just
+    skip this symbol this run if the MAD value isn't available) elif
+    trailing_stop_enabled: ...` (no else). Note this deliberately differs
+    from indicators._suggested_stop()'s INITIAL-stop logic, which DOES
+    check MAD's regime (you don't want to enter a brand-new position
+    anchored to a currently-bearish trail value) -- for an ALREADY-HELD
+    position's ongoing ratchet, backtest just tries the current lower
+    band regardless of regime, relying on the "only rise" comparison in
+    the caller to naturally protect against ratcheting down. Previously
+    this always computed the ATR formula regardless of trailing_stop_
+    enabled's value, silently ignoring that toggle, and (a separate bug)
+    added a regime check + ATR fallback for the MAD case that backtest.py
+    doesn't actually have."""
+    if cfg.get("mad_stop_enabled", False):
+        import mad_trail_strategy
+        mad_cfg = mad_trail_strategy.cfg_from_strategy(cfg)
+        mad_df = mad_trail_strategy.precompute_mad_trail(df, mad_cfg)
+        if mad_df.empty:
+            return None
+        last = mad_df.iloc[-1]
+        return None if pd.isna(last["lower"]) else float(last["lower"])
+    if not cfg.get("trailing_stop_enabled", False):
+        return None
+    return highest_close - cfg["trailing_atr_multiple"] * atr_now
 
 
 def compute_stop_updates(held_symbols: set[str], cfg: dict) -> list[dict]:
     """Recomputes each held position's trailing stop using the exact same
     formula as backtest.py's step 1b (highest_close_since_entry -
     trailing_atr_multiple*ATR, ratchet up only) -- so live and backtest
-    logic can never quietly drift apart. highest_close/current_stop are
-    persisted back to state_db regardless of whether anything ratchets
-    this run, since that bookkeeping needs to continue every day.
+    logic can never quietly drift apart. highest_close/atr bookkeeping is
+    persisted back to state_db every run a ratchet CANDIDATE exists
+    (whether or not it actually ratchets this run) -- skipped entirely
+    for a symbol only when neither mad_stop_enabled nor trailing_stop_
+    enabled is on (see _trailing_stop_candidate's None case), matching
+    backtest.py having no ratchet mechanism active at all in that state.
 
     cfg["auto_apply_stop_updates"] (True by default): when a stop
     genuinely ratchets, immediately pushes it to the real broker GTT
@@ -112,6 +130,9 @@ def compute_stop_updates(held_symbols: set[str], cfg: dict) -> list[dict]:
         highest_close = max(pos["highest_close"], today_close)
         atr_now = float(indicators.atr(df, cfg["atr_period"]).iloc[-1])
         new_stop = _trailing_stop_candidate(df, highest_close, atr_now, cfg)
+        if new_stop is None:
+            continue  # neither mad_stop nor trailing_stop is enabled (or
+                      # MAD has no value yet) -- nothing to log or apply
         state_db.update_position_stop(sym, highest_close, atr_now, new_stop)
         if new_stop <= pos["current_stop"]:
             continue  # no ratchet this run -- nothing to apply or report
