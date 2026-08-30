@@ -558,15 +558,11 @@ def _apply_sector_cap(ordered_syms: list[str], positions: dict, ranked: pd.DataF
 
 
 def _mad_stop_cfg(cfg: dict) -> dict:
-    """Maps config.STRATEGY's mad_stop_* keys onto mad_trail_strategy's own
-    mt_* naming (see MAD_TRAIL_DEFAULTS) -- kept as a single small function
-    so the mapping only has to be written once."""
-    d = dict(mad_trail_strategy.MAD_TRAIL_DEFAULTS)
-    d["mt_med_len"] = cfg.get("mad_stop_med_len", d["mt_med_len"])
-    d["mt_mad_len"] = cfg.get("mad_stop_mad_len", d["mt_mad_len"])
-    d["mt_dev_factor"] = cfg.get("mad_stop_dev_factor", d["mt_dev_factor"])
-    d["mt_atr_floor_mult"] = cfg.get("mad_stop_atr_floor_mult", d["mt_atr_floor_mult"])
-    return d
+    """Thin alias -- the actual mapping now lives in mad_trail_strategy.
+    cfg_from_strategy() so indicators.compute_snapshot() and live_
+    rebalance.py's stop ratchet (both wired in later, neither of which can
+    import backtest.py without a circular import) can share it too."""
+    return mad_trail_strategy.cfg_from_strategy(cfg)
 
 
 def _initial_stop(entry_price: float, atr_now: float, cfg: dict, sym: str, date,

@@ -600,8 +600,35 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
         "avg_volume_3m": float(volume.tail(cfg["mom_lookback_days_short"]).mean()),
         "atr": atr_now,
         "atr_pct": atr_now / price * 100,
-        "suggested_stop": price - cfg["atr_stop_multiple"] * atr_now,
+        "suggested_stop": _suggested_stop(df, price, atr_now, cfg),
     }
+
+
+def _suggested_stop(df: pd.DataFrame, price: float, atr_now: float, cfg: dict) -> float:
+    """Initial stop for a NEW buy -- the ATR distance below, unless
+    mad_stop_enabled and the MAD volatility trail's own lower band is a
+    sensible support (bull MAD-regime, sitting below price), same
+    fallback rule as backtest.py's _initial_stop(). Computed inline from
+    `df` (this symbol's own candles, already in hand) rather than a
+    precomputed dict -- unlike the weekly/monthly gate, MAD's default
+    ~21-bar windows don't need deep multi-year history, so there's no
+    extra fetch to wire in here, just the trail calc itself. Deferred
+    import: mad_trail_strategy imports indicators at module level, so an
+    import at the top of this file would be circular; safe as a call-time
+    import since both modules are already fully loaded by the time this
+    function actually runs."""
+    atr_stop = price - cfg["atr_stop_multiple"] * atr_now
+    if not cfg.get("mad_stop_enabled", False):
+        return atr_stop
+    import mad_trail_strategy
+    mad_cfg = mad_trail_strategy.cfg_from_strategy(cfg)
+    mad_df = mad_trail_strategy.precompute_mad_trail(df, mad_cfg)
+    if mad_df.empty:
+        return atr_stop
+    last = mad_df.iloc[-1]
+    if last["regime"] == 1 and not pd.isna(last["lower"]) and last["lower"] < price:
+        return float(last["lower"])
+    return atr_stop
 
 
 def xirr(cash_flows: list[tuple[dt.date, float]]) -> float | None:

@@ -46,6 +46,33 @@ import state_db
 LOG_PATH = os.path.join("cache", "live_rebalance_log.txt")
 
 
+def _trailing_stop_candidate(df: pd.DataFrame, highest_close: float,
+                             atr_now: float, cfg: dict) -> float:
+    """The ongoing ratchet's candidate stop -- the ATR chandelier formula,
+    unless mad_stop_enabled, in which case the MAD volatility trail's own
+    current lower band takes over (same precedence as backtest.py's
+    trailing-ratchet block and indicators._suggested_stop's initial-stop
+    fallback). compute_stop_updates()'s caller already enforces "ratchet
+    up only" via `if new_stop <= pos["current_stop"]: continue`,
+    regardless of which formula computed this candidate -- MAD's own
+    one-sided-rise property doesn't need separate handling here. Deferred
+    import: mad_trail_strategy imports indicators at module level; safe
+    as a call-time import since both are already fully loaded by the
+    time this runs."""
+    atr_stop = highest_close - cfg["trailing_atr_multiple"] * atr_now
+    if not cfg.get("mad_stop_enabled", False):
+        return atr_stop
+    import mad_trail_strategy
+    mad_cfg = mad_trail_strategy.cfg_from_strategy(cfg)
+    mad_df = mad_trail_strategy.precompute_mad_trail(df, mad_cfg)
+    if mad_df.empty:
+        return atr_stop
+    last = mad_df.iloc[-1]
+    if last["regime"] == 1 and not pd.isna(last["lower"]):
+        return float(last["lower"])
+    return atr_stop
+
+
 def compute_stop_updates(held_symbols: set[str], cfg: dict) -> list[dict]:
     """Recomputes each held position's trailing stop using the exact same
     formula as backtest.py's step 1b (highest_close_since_entry -
@@ -84,7 +111,7 @@ def compute_stop_updates(held_symbols: set[str], cfg: dict) -> list[dict]:
         today_close = float(df["close"].iloc[-1])
         highest_close = max(pos["highest_close"], today_close)
         atr_now = float(indicators.atr(df, cfg["atr_period"]).iloc[-1])
-        new_stop = highest_close - cfg["trailing_atr_multiple"] * atr_now
+        new_stop = _trailing_stop_candidate(df, highest_close, atr_now, cfg)
         state_db.update_position_stop(sym, highest_close, atr_now, new_stop)
         if new_stop <= pos["current_stop"]:
             continue  # no ratchet this run -- nothing to apply or report

@@ -36,6 +36,19 @@ MAD_TRAIL_DEFAULTS = {
 }
 
 
+def cfg_from_strategy(cfg: dict) -> dict:
+    """Maps config.STRATEGY's mad_stop_* keys onto this module's own mt_*
+    naming (see MAD_TRAIL_DEFAULTS) -- the single shared mapping every
+    caller (backtest.py, indicators.compute_snapshot, live_rebalance.py)
+    uses, so their MAD-stop parameters can never quietly drift apart."""
+    d = dict(MAD_TRAIL_DEFAULTS)
+    d["mt_med_len"] = cfg.get("mad_stop_med_len", d["mt_med_len"])
+    d["mt_mad_len"] = cfg.get("mad_stop_mad_len", d["mt_mad_len"])
+    d["mt_dev_factor"] = cfg.get("mad_stop_dev_factor", d["mt_dev_factor"])
+    d["mt_atr_floor_mult"] = cfg.get("mad_stop_atr_floor_mult", d["mt_atr_floor_mult"])
+    return d
+
+
 def _rolling_mad(close: pd.Series, med: pd.Series, n: int) -> pd.Series:
     """Median of |close - median_t| over the trailing n bars, deviations
     measured from the CURRENT median at each point (per the spec) -- can't
