@@ -370,7 +370,8 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
                        long_candles: dict | None = None,
                        precomputed: dict | None = None,
                        precomputed_pivots: dict | None = None,
-                       precomputed_weekly_monthly: dict | None = None) -> pd.DataFrame:
+                       precomputed_weekly_monthly: dict | None = None,
+                       precomputed_weekly_monthly_ok: dict | None = None) -> pd.DataFrame:
     """Point-in-time ranking: identical pipeline to the live screener, fed
     only data up to `date`. Fundamental gate is off by default (fundamentals_
     history=None reproduces that exactly); pass a fundamentals_history dict
@@ -413,7 +414,19 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
     monthly confirmation gate (see that function and indicators.
     weekly_above_ema's docstrings). None (default) reproduces the
     original full-resample-every-call behavior exactly -- correct either
-    way, this only changes speed."""
+    way, this only changes speed.
+
+    precomputed_weekly_monthly_ok: optional, {symbol: (weekly_ok, monthly_ok)}
+    from indicators.precompute_weekly_monthly_trend_ok() -- the fully
+    vectorized, resample-free fast path (see its own docstring). Takes
+    priority over precomputed_weekly_monthly above when both are given --
+    a plain daily-indexed lookup instead of even the reduced per-call
+    resample _fast_higher_tf_close does, profiled (2026-08-30) at ~66% of
+    a gate-enabled backtest's total runtime from pandas.resample()'s own
+    per-call frequency-inference overhead alone. Verified byte-identical
+    to the slow path after fixing compute_snapshot to thread cfg's ema_
+    slow/ema_fast through consistently. None (default) falls through to
+    precomputed_weekly_monthly's own path unchanged."""
     sliced = {s: df.loc[:date] for s, df in candles.items()
               if not df.empty and date in df.index}
     bench_slice = bench.loc[:date]
@@ -427,7 +440,8 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
                             if s in precomputed and date in precomputed[s].index}
     tech = screener.build_technical_table(sliced, bench_slice, cfg=cfg, long_candles=long_sliced,
                                           precomputed=precomputed_rows,
-                                          precomputed_weekly_monthly=precomputed_weekly_monthly)
+                                          precomputed_weekly_monthly=precomputed_weekly_monthly,
+                                          precomputed_weekly_monthly_ok=precomputed_weekly_monthly_ok)
     if tech.empty:
         return tech
     fundamentals = None
@@ -695,10 +709,20 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     # long_candles from scratch for every symbol on every single rebalance
     # day below, profiled as ~45% of a gate-enabled backtest's runtime.
     precomputed_weekly_monthly: dict = {}
+    # 2026-08-30 addition: the fully vectorized, resample-free fast path
+    # (indicators.precompute_weekly_monthly_trend_ok) -- see rank_universe_
+    # asof's own docstring for why this replaces the line above's per-call
+    # resample() entirely, profiled at ~66% of a gate-enabled backtest's
+    # total runtime by itself. precomputed_weekly_monthly above is kept
+    # (built alongside, unconditionally when the gate is on) only as the
+    # fallback for any other caller of build_technical_table that doesn't
+    # pass this newer param.
+    precomputed_weekly_monthly_ok: dict = {}
     if long_candles is not None and cfg.get("weekly_monthly_gate_enabled", False):
         for sym, df in long_candles.items():
             if not df.empty:
                 precomputed_weekly_monthly[sym] = indicators.precompute_weekly_monthly_bars(df["close"])
+                precomputed_weekly_monthly_ok[sym] = indicators.precompute_weekly_monthly_trend_ok(df, cfg)
 
     # One-time precompute of the market-regime filter (see module docstring
     # on regime_filter_enabled below) -- NIFTY's own close vs. its causal
@@ -894,7 +918,8 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                                        fundamentals_history, score_cache,
                                        sector_candles, sector_membership,
                                        long_candles, precomputed,
-                                       precomputed_pivots, precomputed_weekly_monthly)
+                                       precomputed_pivots, precomputed_weekly_monthly,
+                                       precomputed_weekly_monthly_ok)
             if not ranked.empty:
                 candidates = ranked[ranked["all_gates"]]
                 keep_zone = set(candidates.head(cfg["max_positions"] * 2).index)
