@@ -3890,8 +3890,8 @@ def page_backtest():
         '<span class="ov-sub">calendar-entry momentum system</span>'
         f'<span class="ov-info-icon" title="{_backtest_tip}">ℹ️</span></div></div>',
         unsafe_allow_html=True)
-    _bt_hdr_spacer, _bt_hdr_r1, _bt_hdr_r2, _bt_hdr_r3, _bt_hdr_r4 = st.columns(
-        [3.5, 2, 1.2, 1.2, 1.5])
+    _bt_hdr_spacer, _bt_hdr_r1, _bt_hdr_r2, _bt_hdr_r3 = st.columns(
+        [5, 2, 1.2, 1.2])
     _build_fh_clicked = _bt_hdr_r1.button(
         "Build/Refresh fundamentals history", key="bt_build_fh_hdr",
         disabled=backtest_running)
@@ -3905,14 +3905,6 @@ def page_backtest():
         cancel_background_job("backtest_run")
         st.toast("Stopping backtest — this can take a few seconds to "
                 "take effect.", icon="⏹️")
-    _apply_live_clicked = _bt_hdr_r4.button(
-        "🚀 Apply to live", key="bt_apply_live_hdr",
-        disabled=st.session_state.get("bt_cfg") is None,
-        help="Run a backtest first — no config recorded for this result yet."
-        if st.session_state.get("bt_cfg") is None else
-        "Review and push this run's parameters to the live strategy config.")
-    if _apply_live_clicked:
-        st.session_state["bt_apply_live_open"] = True
 
     if "bt_result" not in st.session_state and os.path.exists(BACKTEST_CACHE):
         _cached_bt = pd.read_pickle(BACKTEST_CACHE)
@@ -4555,8 +4547,7 @@ def page_backtest():
                      f"floor×={_bt_cfg.get('mad_stop_atr_floor_mult')})")
 
     if _bt_cfg:
-        with st.expander("🚀 Apply this run's config to live",
-                         expanded=st.session_state.get("bt_apply_live_open", False)):
+        with st.expander("🚀 Apply this run's config to live", expanded=False):
             _live_diff = _strategy_config_diff(
                 config.STRATEGY, _bt_cfg, config.BACKTEST_TUNABLE_KEYS)
             if not _live_diff:
@@ -4588,7 +4579,6 @@ def page_backtest():
                         f"Applied {len(_live_updates)} parameter(s) to "
                         "live — takes effect on the next scheduled or "
                         "manual rebalance run (no restart needed).")
-                    st.session_state["bt_apply_live_open"] = False
                     st.rerun()
 
     with st.container(border=True, key="ov-card-bt-pdf"):
