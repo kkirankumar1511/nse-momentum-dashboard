@@ -17,6 +17,7 @@ Hard gates (a stock must pass ALL to appear as a candidate):
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 
 import numpy as np
@@ -505,8 +506,28 @@ def run_screen(with_fundamentals: bool = True,
     report("Fetching universe candles from Kite (~3 years each)...", 0.15)
     candles = kite_client.fetch_universe_candles(config.UNIVERSE, days)
 
+    # weekly_monthly_gate_enabled needs a 200-bar (or 50-bar fallback)
+    # weekly/monthly EMA, which `candles` above (history_days, ~3 years by
+    # default) can't supply -- even the 50-bar monthly fallback needs
+    # ~4.2 years. Without this, weekly_above_ema/monthly_above_ema read
+    # NaN for every symbol, screener.apply_gates() below fills that NaN
+    # as False (fail-closed, not fail-open), and weekly_monthly_gate_ok
+    # ANDs straight into all_gates -- so every stock, including every
+    # currently-held position, would fail every gate at once. Deferred
+    # import: backtest.py imports screener at module level, so importing
+    # backtest here at module level would be circular; safe as a
+    # call-time import since both modules are already fully loaded by
+    # the time run_screen() actually runs.
+    long_candles = None
+    if config.STRATEGY.get("weekly_monthly_gate_enabled", False):
+        import backtest as bt
+        report("Fetching deep history for weekly/monthly trend gate...", 0.35)
+        long_candles = bt.load_long_history_cached(
+            config.UNIVERSE, end_date=dt.date.today() - dt.timedelta(days=1),
+            progress_cb=lambda s, f: report(s, 0.35 + f * 0.2))
+
     report("Computing technicals...", 0.60)
-    tech = build_technical_table(candles, bench)
+    tech = build_technical_table(candles, bench, long_candles=long_candles)
 
     if with_fundamentals and fundamentals is None:
         cache_path = os.path.join("cache", "fno_value_scores.pkl")
