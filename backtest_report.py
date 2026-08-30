@@ -191,9 +191,13 @@ def build_pdf(res: dict, bench: pd.DataFrame, cfg: dict, run_meta: dict,
     story.append(Spacer(1, 6))
     story.append(Paragraph("Trade management", ss["Meta"]))
     trail = "ON" if cfg.get("trailing_stop_enabled") else "OFF"
+    mad_on = "ON" if cfg.get("mad_stop_enabled") else "OFF"
     story.append(_kv_table([
         ("Initial stop (x ATR)", str(cfg.get("atr_stop_multiple"))),
         ("Trailing stop", f"{trail} ({cfg.get('trailing_atr_multiple')}x)"),
+        ("MAD trail stop", f"{mad_on} (med={cfg.get('mad_stop_med_len')}, "
+        f"mad={cfg.get('mad_stop_mad_len')}, dev={cfg.get('mad_stop_dev_factor')}, "
+        f"floor x={cfg.get('mad_stop_atr_floor_mult')})"),
         ("Risk per trade (%)", str(cfg.get("risk_per_trade_pct"))),
         ("History fetched (days)", str(cfg.get("history_days"))),
     ]))
