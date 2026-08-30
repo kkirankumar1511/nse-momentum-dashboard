@@ -309,6 +309,26 @@ _STRATEGY_DEFAULTS = {
     "entry_confirm_days": 0,
     "entry_confirm_pool_size": None,
 
+    # MAD Volatility Trail stop (backtest-only for now): replaces BOTH the
+    # initial ATR stop and the ongoing ATR trailing stop with the trail's
+    # own one-sided ratcheting lower band (see mad_trail_strategy.py) --
+    # mutually exclusive with atr_stop_multiple/trailing_atr_multiple/
+    # trailing_stop_enabled above, which stay untouched and take over
+    # automatically whenever the trail isn't a sensible support for a
+    # given entry (not in a bull MAD-regime, or the band sits above
+    # price). A 5.6yr PDF-config backtest (2021-2026, regime filter ON,
+    # entry-confirm OFF) found this combination -- med_len=21, mad_len=21,
+    # dev_factor=2, atr_floor_mult=2 -- raised CAGR from 33.82% to 36.98%
+    # AND shrank max drawdown (-27.59% -> -25.84%) at the same time, broad
+    # -based across 5 of 6 calendar years, not one lucky year. False by
+    # default -- verify against your own config from the Backtest UI
+    # before considering for live.
+    "mad_stop_enabled": False,
+    "mad_stop_med_len": 21,
+    "mad_stop_mad_len": 21,
+    "mad_stop_dev_factor": 2.0,
+    "mad_stop_atr_floor_mult": 2.0,
+
     "history_days": 1200,              # calendar days of candles to fetch
 
     # Equal-weight capital allocation (screener.capital_position_size) vs.

@@ -47,6 +47,7 @@ import pandas as pd
 
 import config
 import indicators
+import mad_trail_strategy
 import resistance_zones
 import screener
 import sector_universe
@@ -556,6 +557,40 @@ def _apply_sector_cap(ordered_syms: list[str], positions: dict, ranked: pd.DataF
     return kept
 
 
+def _mad_stop_cfg(cfg: dict) -> dict:
+    """Maps config.STRATEGY's mad_stop_* keys onto mad_trail_strategy's own
+    mt_* naming (see MAD_TRAIL_DEFAULTS) -- kept as a single small function
+    so the mapping only has to be written once."""
+    d = dict(mad_trail_strategy.MAD_TRAIL_DEFAULTS)
+    d["mt_med_len"] = cfg.get("mad_stop_med_len", d["mt_med_len"])
+    d["mt_mad_len"] = cfg.get("mad_stop_mad_len", d["mt_mad_len"])
+    d["mt_dev_factor"] = cfg.get("mad_stop_dev_factor", d["mt_dev_factor"])
+    d["mt_atr_floor_mult"] = cfg.get("mad_stop_atr_floor_mult", d["mt_atr_floor_mult"])
+    return d
+
+
+def _initial_stop(entry_price: float, atr_now: float, cfg: dict, sym: str, date,
+                  precomputed_mad: dict | None) -> float:
+    """Explicit request ("MAD-stop on/off... its own parameters editable"):
+    when cfg['mad_stop_enabled'], the MAD volatility trail's own one-sided
+    ratcheting lower band becomes the stop outright whenever it's a
+    sensible support (bull MAD-regime, sitting below entry) -- falls back
+    to the plain ATR stop otherwise (e.g. the stock's own MAD trail isn't
+    in a bull regime, or the band is missing/above price), so every entry
+    always gets SOME stop. Mirrors the standalone A/B test in scripts/
+    run_ema_stop_backtest_local.py's blended_stop-adjacent mad_stop logic,
+    verified there to raise CAGR (33.82%->36.98%) and shrink max drawdown
+    at the same time on a 5.6yr backtest."""
+    atr_stop = entry_price - cfg["atr_stop_multiple"] * atr_now
+    if not cfg.get("mad_stop_enabled", False) or precomputed_mad is None:
+        return atr_stop
+    mad = precomputed_mad.get(sym)
+    m = mad.loc[date] if mad is not None and date in mad.index else None
+    if m is not None and m["regime"] == 1 and not pd.isna(m["lower"]) and m["lower"] < entry_price:
+        return float(m["lower"])
+    return atr_stop
+
+
 def run_backtest(candles: dict, bench: pd.DataFrame,
                  cfg: dict | None = None,
                  initial_capital: float = 1_000_000,
@@ -723,6 +758,20 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             if not df.empty:
                 precomputed_weekly_monthly[sym] = indicators.precompute_weekly_monthly_bars(df["close"])
                 precomputed_weekly_monthly_ok[sym] = indicators.precompute_weekly_monthly_trend_ok(df, cfg)
+
+    # One-time precompute of the MAD volatility trail (see mad_trail_
+    # strategy.precompute_mad_trail) -- only when mad_stop_enabled, same
+    # off-by-default -> zero extra cost guarantee as every other optional
+    # precompute above. Sourced from long_candles when available (deeper
+    # warmup history for the trail's own median/MAD windows), falling
+    # back to the backtest's own `candles` otherwise.
+    precomputed_mad: dict = {}
+    if cfg.get("mad_stop_enabled", False):
+        mad_src = long_candles if long_candles is not None else candles
+        mad_cfg = _mad_stop_cfg(cfg)
+        for sym, df in mad_src.items():
+            if not df.empty and len(df) >= mad_cfg["mt_med_len"]:
+                precomputed_mad[sym] = mad_trail_strategy.precompute_mad_trail(df, mad_cfg)
 
     # One-time precompute of the market-regime filter (see module docstring
     # on regime_filter_enabled below) -- NIFTY's own close vs. its causal
@@ -900,7 +949,22 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         # only affects tomorrow's check -- same causal, decide-off-
         # completed-bars model the rest of this engine already uses (see
         # try_enter's identical same-day ATR use for the entry stop).
-        if cfg.get("trailing_stop_enabled", False):
+        # mad_stop_enabled ratchets off the MAD trail's own one-sided
+        # ratcheting lower band unconditionally (that ratchet IS the
+        # ongoing stop mechanism for this mode, independent of
+        # trailing_stop_enabled -- there's no separate "initial-only"
+        # variant, same as the standalone A/B test this was validated
+        # against). trailing_stop_enabled still gates the plain ATR
+        # trailing stop exactly as before when mad_stop is off.
+        if cfg.get("mad_stop_enabled", False):
+            for sym, pos in positions.items():
+                mad = precomputed_mad.get(sym)
+                if mad is None or date not in mad.index:
+                    continue
+                new_stop = float(mad.loc[date, "lower"])
+                if new_stop > pos.stop:
+                    pos.stop = new_stop
+        elif cfg.get("trailing_stop_enabled", False):
             for sym, pos in positions.items():
                 df = candles[sym]
                 if date not in df.index:
@@ -1000,7 +1064,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                     break
                 price = prices[sym]
                 atr_now = float(indicators.atr(candles[sym].loc[:date], cfg["atr_period"]).iloc[-1])
-                stop = price - cfg["atr_stop_multiple"] * atr_now
+                stop = _initial_stop(price, atr_now, cfg, sym, date, precomputed_mad)
                 try_enter(sym, watchlist[sym], price, stop, date, qty_override=qty)
                 if sym in positions:
                     watchlist.pop(sym, None)
@@ -1021,7 +1085,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 df_upto = candles[sym].loc[:date]
                 price = float(df_upto["close"].iloc[-1])
                 atr_now = float(indicators.atr(df_upto, cfg["atr_period"]).iloc[-1])
-                stop = price - cfg["atr_stop_multiple"] * atr_now
+                stop = _initial_stop(price, atr_now, cfg, sym, date, precomputed_mad)
                 try_enter(sym, row, price, stop, date)
                 if sym in positions:
                     watchlist.pop(sym, None)

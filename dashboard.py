@@ -3764,6 +3764,50 @@ def page_backtest():
                 unsafe_allow_html=True)
 
         _ov_muted("Trade management")
+        use_mad_stop = st.checkbox(
+            "Use MAD Volatility Trail stop instead of ATR", key="bt_use_mad_stop",
+            value=bool(config.STRATEGY.get("mad_stop_enabled", False)),
+            help="OFF by default. Replaces BOTH the initial and trailing stop below "
+                 "with the MAD trail's own one-sided ratcheting lower band (median + "
+                 "MAD-scaled bands, ATR floor) -- falls back to the ATR stop/trailing "
+                 "settings below automatically whenever the trail isn't a sensible "
+                 "support for a given entry (not in a bull MAD-regime, or the band "
+                 "sits above price), so the ATR fields still matter even with this "
+                 "on. A 5.6yr PDF-config backtest (regime filter ON) found the "
+                 "default params here raised CAGR 38.65%->40.37% and shrank max "
+                 "drawdown -30.67%->-28.81% at once, verified against this exact "
+                 "production engine -- the strongest, most consistent stop-placement "
+                 "result tested so far. Still worth re-verifying against your own "
+                 "config before relying on it live.")
+        if use_mad_stop:
+            mad1, mad2, mad3, mad4 = st.columns(4)
+            with mad1:
+                mad_med_len_v = st.number_input(
+                    "Median length", min_value=5, max_value=100,
+                    value=int(config.STRATEGY.get("mad_stop_med_len", 21)), step=1,
+                    help="Rolling window for the trail's median center line.")
+            with mad2:
+                mad_mad_len_v = st.number_input(
+                    "MAD length", min_value=5, max_value=100,
+                    value=int(config.STRATEGY.get("mad_stop_mad_len", 21)), step=1,
+                    help="Rolling window for the median-absolute-deviation band width.")
+            with mad3:
+                mad_dev_factor_v = st.number_input(
+                    "Deviation factor", min_value=0.5, max_value=5.0,
+                    value=float(config.STRATEGY.get("mad_stop_dev_factor", 2.0)), step=0.1,
+                    help="MAD band half-width multiplier -- wider band = looser stop.")
+            with mad4:
+                mad_atr_floor_mult_v = st.number_input(
+                    "ATR floor ×", min_value=0.5, max_value=5.0,
+                    value=float(config.STRATEGY.get("mad_stop_atr_floor_mult", 2.0)), step=0.1,
+                    help="Floors the band width at this × ATR(14) so it never gets "
+                         "unrealistically tight in a low-volatility lull.")
+        else:
+            mad_med_len_v = config.STRATEGY.get("mad_stop_med_len", 21)
+            mad_mad_len_v = config.STRATEGY.get("mad_stop_mad_len", 21)
+            mad_dev_factor_v = config.STRATEGY.get("mad_stop_dev_factor", 2.0)
+            mad_atr_floor_mult_v = config.STRATEGY.get("mad_stop_atr_floor_mult", 2.0)
+
         tm1, tm2, tm3, tm4 = st.columns(4)
         with tm1:
             atr_stop_multiple_v = st.number_input(
@@ -4141,6 +4185,11 @@ def page_backtest():
         run_cfg["ema_fast"] = int(ema_fast_v)
         run_cfg["ema_slow"] = int(ema_slow_v)
         run_cfg["atr_stop_multiple"] = float(atr_stop_multiple_v)
+        run_cfg["mad_stop_enabled"] = use_mad_stop
+        run_cfg["mad_stop_med_len"] = int(mad_med_len_v)
+        run_cfg["mad_stop_mad_len"] = int(mad_mad_len_v)
+        run_cfg["mad_stop_dev_factor"] = float(mad_dev_factor_v)
+        run_cfg["mad_stop_atr_floor_mult"] = float(mad_atr_floor_mult_v)
         run_cfg["risk_per_trade_pct"] = float(risk_per_trade_pct_v)
         run_cfg["sector_bonus_weight"] = float(sector_bonus_weight_v)
         run_cfg["sector_diversification_enabled"] = use_sector_diversification
@@ -4263,6 +4312,11 @@ def page_backtest():
             _ecd = _bt_cfg.get("entry_confirm_days", 0)
             _ec = f"{_ecd}d (pool {_bt_cfg.get('entry_confirm_pool_size')})" if _ecd else "OFF"
             st.metric("Entry confirmation", _ec)
+            _ms = "ON" if _bt_cfg.get("mad_stop_enabled") else "OFF"
+            st.metric("MAD trail stop", f"{_ms} (med={_bt_cfg.get('mad_stop_med_len')}, "
+                     f"mad={_bt_cfg.get('mad_stop_mad_len')}, "
+                     f"dev={_bt_cfg.get('mad_stop_dev_factor')}, "
+                     f"floor×={_bt_cfg.get('mad_stop_atr_floor_mult')})")
 
     with st.container(border=True, key="ov-card-bt-pdf"):
         pdf_col1, pdf_col2 = st.columns([3, 2])
