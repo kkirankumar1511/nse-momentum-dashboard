@@ -4569,7 +4569,8 @@ def page_backtest():
                     "does not run a scan or place any trade. Go to the "
                     "Live Rebalance tab to actually run/execute one.")
                 _diff_rows = [
-                    {"Parameter": k, "Live now": old, "Would become": new}
+                    {"Parameter": k, "Live now": str(old),
+                     "Would become": str(new)}
                     for k, old, new in _live_diff]
                 st.dataframe(pd.DataFrame(_diff_rows), hide_index=True,
                             use_container_width=True)
