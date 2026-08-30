@@ -396,4 +396,34 @@ _STRATEGY_DEFAULTS = {
     "rebalance_cadence": "daily",
 }
 
+# Keys the Backtest page's run_cfg-builder overrides from its own widgets
+# (dashboard.py's run_cfg block) -- also the exact set "Apply to live" is
+# allowed to push from a completed backtest run, so the two can never
+# silently drift apart. Everything else in _STRATEGY_DEFAULTS is either an
+# Admin-only automation toggle (ADMIN_ONLY_KEYS) or a fixed research
+# constant with no UI anywhere (rsi_period, atr_period, regime_ema_period,
+# sector_rs_lookback_days, the resistance_zone_* internal knobs,
+# capital_equal_weight_sizing) -- neither category may ever be overwritten
+# by a stale backtest snapshot.
+BACKTEST_TUNABLE_KEYS = (
+    "max_positions", "rsi_min", "rsi_max", "trailing_stop_enabled",
+    "trailing_atr_multiple", "advanced_equal_weight_sizing",
+    "equal_weight_tolerance_pct", "fundamental_gate_enabled",
+    "fundamental_bonus_weight", "min_fundamental_score",
+    "mom_lookback_days_short", "mom_lookback_days_long", "skip_recent_days",
+    "rsi_exit_gate_enabled", "rsi_exit_max", "weekly_monthly_gate_enabled",
+    "near_high_threshold", "ema_fast", "ema_slow", "atr_stop_multiple",
+    "mad_stop_enabled", "mad_stop_med_len", "mad_stop_mad_len",
+    "mad_stop_dev_factor", "mad_stop_atr_floor_mult", "risk_per_trade_pct",
+    "sector_bonus_weight", "sector_diversification_enabled", "top_n_sectors",
+    "max_positions_per_sector", "sector_composite_score_enabled",
+    "resistance_zone_weight", "regime_filter_enabled",
+    "regime_position_multiplier", "entry_confirm_days",
+    "entry_confirm_pool_size", "history_days", "rebalance_cadence",
+)
+# Admin-only automation toggles, on top of BACKTEST_TUNABLE_KEYS, that make
+# up everything the Admin form should render/edit.
+ADMIN_ONLY_KEYS = ("auto_apply_stop_updates", "auto_execute_trades")
+ADMIN_EDITABLE_KEYS = BACKTEST_TUNABLE_KEYS + ADMIN_ONLY_KEYS
+
 STRATEGY = state_db.get_strategy_config(_STRATEGY_DEFAULTS)

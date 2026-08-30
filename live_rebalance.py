@@ -224,16 +224,22 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
 
     # ---- Sells: same rebalance rule as the backtest (200 EMA / rank) ----
     # Gated by cfg["rebalance_cadence"]: "daily" (default) evaluates this
-    # every run; "monthly" only evaluates it on the first trading day of
-    # the month (nse_holidays.is_month_start_trading_day), same definition
-    # backtest.py's monthly rb_dates uses. Buys/top-ups below are NOT
-    # gated by this -- a slot that's already open (from an earlier sell,
-    # or just fewer than max_positions currently held) still gets filled
-    # today regardless of cadence, matching backtest.py's own daily
-    # slot-fill-from-watchlist behavior.
+    # every run; "weekly" only on the last trading day of the ISO week
+    # (nse_holidays.is_week_end_trading_day); "monthly" only on the first
+    # trading day of the month (nse_holidays.is_month_start_trading_day) --
+    # same definitions backtest.py's weekly/monthly rb_dates use. Buys/
+    # top-ups below are NOT gated by this -- a slot that's already open
+    # (from an earlier sell, or just fewer than max_positions currently
+    # held) still gets filled today regardless of cadence, matching
+    # backtest.py's own daily slot-fill-from-watchlist behavior.
     report("Checking held positions against the rebalance rule...", 0.85)
-    is_rebalance_day = (cfg.get("rebalance_cadence", "daily") == "daily"
-                        or nse_holidays.is_month_start_trading_day(dt.date.today()))
+    _cadence = cfg.get("rebalance_cadence", "daily")
+    if _cadence == "daily":
+        is_rebalance_day = True
+    elif _cadence == "weekly":
+        is_rebalance_day = nse_holidays.is_week_end_trading_day(dt.date.today())
+    else:  # "monthly" (and any unrecognized value, same fallback as before)
+        is_rebalance_day = nse_holidays.is_month_start_trading_day(dt.date.today())
     sells = []
     if is_rebalance_day:
         for sym, row in held.iterrows():

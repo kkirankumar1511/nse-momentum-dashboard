@@ -133,6 +133,28 @@ def is_month_start_trading_day(date: dt.date) -> bool:
     return True
 
 
+def is_week_end_trading_day(date: dt.date) -> bool:
+    """True if `date` is the LAST trading day of its ISO calendar week --
+    same definition backtest.py's rb_dates uses for its weekly rebalance
+    schedule (dates restricted to Mon-Fri, grouped by ISO (year, week),
+    taking the max), so live's "Weekly" cadence option evaluates the sell/
+    keep-zone rule on exactly the day the backtest that validated it did.
+    Forward-looking (the opposite shape of is_month_start_trading_day's
+    backward walk above) since "last day of the week" requires knowing
+    whether any later day in the same ISO week is still a trading day."""
+    if not is_trading_day(date):
+        return False
+    iso_year, iso_week, _ = date.isocalendar()
+    d = date + dt.timedelta(days=1)
+    while True:
+        d_iso_year, d_iso_week, _ = d.isocalendar()
+        if (d_iso_year, d_iso_week) != (iso_year, iso_week):
+            return True
+        if is_trading_day(d):
+            return False
+        d += dt.timedelta(days=1)
+
+
 if __name__ == "__main__":
     import sys
     dates = get_holidays(force_refresh="--refresh" in sys.argv)

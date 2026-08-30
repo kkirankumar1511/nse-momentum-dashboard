@@ -1982,6 +1982,46 @@ def page_admin():
                 "Trailing stop (× ATR)", min_value=0.5, max_value=10.0,
                 value=float(cfg["trailing_atr_multiple"]), step=0.1)
 
+            mad_stop_enabled = st.checkbox(
+                "Use MAD Volatility Trail stop instead of ATR",
+                key="admin_use_mad_stop",
+                value=bool(cfg.get("mad_stop_enabled", False)),
+                help="OFF by default. Replaces BOTH the initial and trailing "
+                     "stop above with the MAD trail's own one-sided "
+                     "ratcheting lower band (median + MAD-scaled bands, ATR "
+                     "floor) -- falls back to the ATR stop/trailing settings "
+                     "above automatically whenever the trail isn't a "
+                     "sensible support for a given entry. A 5.6yr PDF-config "
+                     "backtest (regime filter ON) found the default params "
+                     "here raised CAGR 38.65%->40.37% and shrank max "
+                     "drawdown -30.67%->-28.81% at once, verified against "
+                     "this exact production engine -- verify against your "
+                     "own config in Backtest before relying on it live.")
+            if mad_stop_enabled:
+                mad_c1, mad_c2, mad_c3, mad_c4 = st.columns(4)
+                mad_stop_med_len = mad_c1.number_input(
+                    "Median length", min_value=5, max_value=100,
+                    value=int(cfg.get("mad_stop_med_len", 21)), step=1,
+                    help="Rolling window for the trail's median center line.")
+                mad_stop_mad_len = mad_c2.number_input(
+                    "MAD length", min_value=5, max_value=100,
+                    value=int(cfg.get("mad_stop_mad_len", 21)), step=1,
+                    help="Rolling window for the median-absolute-deviation band width.")
+                mad_stop_dev_factor = mad_c3.number_input(
+                    "Deviation factor", min_value=0.5, max_value=5.0,
+                    value=float(cfg.get("mad_stop_dev_factor", 2.0)), step=0.1,
+                    help="MAD band half-width multiplier -- wider band = looser stop.")
+                mad_stop_atr_floor_mult = mad_c4.number_input(
+                    "ATR floor ×", min_value=0.5, max_value=5.0,
+                    value=float(cfg.get("mad_stop_atr_floor_mult", 2.0)), step=0.1,
+                    help="Floors the band width at this × ATR(14) so it never "
+                         "gets unrealistically tight in a low-volatility lull.")
+            else:
+                mad_stop_med_len = cfg.get("mad_stop_med_len", 21)
+                mad_stop_mad_len = cfg.get("mad_stop_mad_len", 21)
+                mad_stop_dev_factor = cfg.get("mad_stop_dev_factor", 2.0)
+                mad_stop_atr_floor_mult = cfg.get("mad_stop_atr_floor_mult", 2.0)
+
             st.markdown('<p class="ov-muted">Automation</p>', unsafe_allow_html=True)
             c4b, c4c, c4d = st.columns(3)
             auto_apply_stop_updates = c4b.checkbox(
@@ -2000,15 +2040,18 @@ def page_admin():
                      "capital and exits real positions, so it's a deliberate "
                      "opt-in once you trust the proposal quality.")
             rebalance_cadence = c4d.segmented_control(
-                "Rebalance cadence", ["daily", "monthly"],
+                "Rebalance cadence", ["daily", "weekly", "monthly"],
                 default=cfg.get("rebalance_cadence", "daily"), key="admin_rebalance_cadence",
                 help="How often the SELL/keep-zone decision is re-evaluated. "
-                     "'daily' checks every scheduled run; 'monthly' only on "
-                     "the first trading day of each month (matching the "
-                     "backtest's own monthly rb_dates). Either way, new buys "
-                     "still fill any already-open slot the same day it opens "
-                     "-- only the sell decision is gated. Real 2016-2026 data "
-                     "+ a 5-seed synthetic test both found daily meaningfully "
+                     "'daily' checks every scheduled run; 'weekly' only on "
+                     "the last trading day of each ISO week (Friday, or the "
+                     "prior trading day if Friday is a market holiday); "
+                     "'monthly' only on the first trading day of each month "
+                     "-- both match backtest.py's own weekly/monthly "
+                     "rb_dates. Either way, new buys still fill any "
+                     "already-open slot the same day it opens -- only the "
+                     "sell decision is gated. Real 2016-2026 data + a "
+                     "5-seed synthetic test both found daily meaningfully "
                      "reduces max drawdown (~-50% to ~-35% over 10 years) at "
                      "a real but smaller cost to CAGR -- a priced trade-off, "
                      "not a free win.")
@@ -2056,6 +2099,34 @@ def page_admin():
                 "RSI min", min_value=0, max_value=100, value=int(cfg["rsi_min"]), step=1)
             rsi_max = c13.number_input(
                 "RSI max", min_value=0, max_value=100, value=int(cfg["rsi_max"]), step=1)
+            c13b, c13c = st.columns([1, 1])
+            rsi_exit_gate_enabled = c13b.checkbox(
+                "Separate exit RSI ceiling", key="admin_use_rsi_exit_gate",
+                value=bool(cfg.get("rsi_exit_gate_enabled", False)),
+                help="OFF by default. When on, a held position whose only "
+                     "failing gate is the entry-band RSI max above stays "
+                     "held (instead of being force-sold) as long as RSI is "
+                     "still under the separate ceiling to the right -- lets "
+                     "a hot winner keep running instead of selling the "
+                     "moment it crosses the entry ceiling. Note: this exact "
+                     "idea was already A/B tested once and made every "
+                     "metric worse -- verify against current data in "
+                     "Backtest before relying on it live.")
+            rsi_exit_max = c13c.number_input(
+                "Exit RSI ceiling", min_value=0.0, max_value=100.0,
+                value=float(cfg.get("rsi_exit_max", cfg["rsi_max"])),
+                step=1.0, format="%.2f", disabled=not rsi_exit_gate_enabled)
+            weekly_monthly_gate_enabled = st.checkbox(
+                "Weekly/monthly EMA trend gate", key="admin_use_wm_rsi_gate",
+                value=bool(cfg.get("weekly_monthly_gate_enabled", False)),
+                help="OFF by default. Extra entry gate on top of the daily "
+                     "checks above: weekly close must be above its own "
+                     "200-EMA, AND monthly close above its own 200-EMA "
+                     "(each falls back to a 50-EMA when there isn't enough "
+                     "resampled history for 200 yet). Needs deep (~16-year) "
+                     "history per symbol, fetched and cached the first time "
+                     "this is checked (slow, one-time). Untested -- verify "
+                     "in Backtest before relying on it live.")
 
             st.markdown('<p class="ov-muted">Fundamental gate &amp; sector bonus (opt-in features)</p>',
                        unsafe_allow_html=True)
@@ -2095,6 +2166,106 @@ def page_admin():
                 "Candle history fetched (days)", min_value=300, max_value=3000,
                 value=int(cfg["history_days"]), step=100)
 
+            with st.expander("⚠️ Advanced / experimental (verify in Backtest first)",
+                             expanded=False):
+                ew_c1, ew_c2 = st.columns([1, 1])
+                advanced_equal_weight_sizing = ew_c1.checkbox(
+                    "Equal-weight allocator", key="admin_use_equal_weight",
+                    value=bool(cfg["advanced_equal_weight_sizing"]),
+                    help="LIVE default is ON. Sizes the whole day's buys in "
+                         "one pass -- cross-slot borrowing within tolerance, "
+                         "partial fill on shortfall, hard-stop-not-"
+                         "substitute, top-up of under-target holdings -- "
+                         "instead of one-symbol-at-a-time greedy sizing.")
+                equal_weight_tolerance_pct = ew_c2.number_input(
+                    "Tolerance", min_value=0.0, max_value=1.0,
+                    value=float(cfg["equal_weight_tolerance_pct"]), step=0.01,
+                    format="%.2f", disabled=not advanced_equal_weight_sizing,
+                    help="A 5-year A/B found 0.20 (the live default) beats "
+                         "the original one-at-a-time fill on every metric "
+                         "at once.")
+
+                sd_c1, sd_c2, sd_c3 = st.columns([1, 1, 1])
+                sector_diversification_enabled = sd_c1.checkbox(
+                    "Sector diversification cap", key="admin_use_sector_diversification",
+                    value=bool(cfg.get("sector_diversification_enabled", False)),
+                    help="OFF by default. Hard constraint: a stock only "
+                         "qualifies if its best-matching sector GROUP is "
+                         "currently among the top N strongest (right), AND "
+                         "no single group can hold more than the position "
+                         "cap (right) at once -- enforced at buy time, "
+                         "never forces an exit. Untested -- verify in "
+                         "Backtest before relying on it live.")
+                top_n_sectors = sd_c2.number_input(
+                    "Top N sectors", min_value=1, max_value=10,
+                    value=int(cfg.get("top_n_sectors", 3)), step=1,
+                    disabled=not sector_diversification_enabled)
+                max_positions_per_sector = sd_c3.number_input(
+                    "Max positions / sector", min_value=1, max_value=10,
+                    value=int(cfg.get("max_positions_per_sector", 3)), step=1,
+                    disabled=not sector_diversification_enabled)
+                sector_composite_score_enabled = st.checkbox(
+                    "Use composite sector score (RS + 52w-high + breadth) "
+                    "instead of RS alone", key="admin_use_sector_composite",
+                    value=bool(cfg.get("sector_composite_score_enabled", False)),
+                    disabled=not sector_diversification_enabled,
+                    help="Only affects which sectors count as 'top N' "
+                         "above -- OFF ranks sectors on relative strength "
+                         "alone; ON blends in 52-week-high proximity and "
+                         "breadth too. Untested -- A/B against RS-alone in "
+                         "Backtest first.")
+
+                resistance_zone_weight = st.number_input(
+                    "Resistance zone weight", min_value=0.0, max_value=1.0,
+                    value=float(cfg.get("resistance_zone_weight", 0.0)), step=0.05,
+                    help="0 = off. Tilts ranking toward stocks with more "
+                         "clean room before the nearest strong multi-year "
+                         "price zone above them. Untested -- verify in "
+                         "Backtest before relying on it live.")
+
+                rg_c1, rg_c2 = st.columns(2)
+                regime_filter_enabled = rg_c1.checkbox(
+                    "Market regime filter", key="admin_use_regime_filter",
+                    value=bool(cfg.get("regime_filter_enabled", False)),
+                    help="OFF by default. When NIFTY 50's own close is "
+                         "below its 200 EMA, caps how many NEW positions "
+                         "may open to max_positions x the multiplier "
+                         "(right) -- never force-sells an existing "
+                         "position purely because the regime flipped. A "
+                         "real 5-year A/B improved every headline metric "
+                         "at once, but wasn't uniform year to year -- "
+                         "verify against your own fuller config before "
+                         "relying on it live.")
+                regime_position_multiplier = rg_c2.number_input(
+                    "Regime position multiplier", min_value=0.1, max_value=1.0,
+                    value=float(cfg.get("regime_position_multiplier", 0.5)),
+                    step=0.05, disabled=not regime_filter_enabled,
+                    help="Fraction of max_positions allowed while NIFTY is "
+                         "below its 200 EMA.")
+
+                cf_c1, cf_c2 = st.columns(2)
+                entry_confirm_days = cf_c1.number_input(
+                    "Entry confirmation (consecutive rebalance events)",
+                    min_value=0, max_value=10,
+                    value=int(cfg.get("entry_confirm_days", 0) or 0), step=1,
+                    key="admin_entry_confirm_days",
+                    help="0 = OFF (default). Requires a stock to have "
+                         "stayed in the confirm-pool (right) for this many "
+                         "CONSECUTIVE rebalance events before a NEW buy is "
+                         "allowed. TESTED AND NOT RECOMMENDED: a 5.6yr "
+                         "PDF-style config backtest found 0 -> 2 made every "
+                         "headline metric worse at once. Left here as a "
+                         "re-testable toggle, not because it's expected to "
+                         "help.")
+                entry_confirm_pool_size = cf_c2.number_input(
+                    "Confirm-pool size", min_value=1, max_value=100,
+                    value=int(cfg.get("entry_confirm_pool_size") or (int(max_positions) * 2)),
+                    step=1, disabled=entry_confirm_days == 0,
+                    key="admin_entry_confirm_pool_size",
+                    help="How many top-scored candidates count as the "
+                         "confirm-pool each rebalance -- defaults to 2x "
+                         "portfolio size.")
+
             strategy_submitted = st.form_submit_button("Save strategy settings", type="primary")
 
         if strategy_submitted:
@@ -2120,7 +2291,32 @@ def page_admin():
                 "fundamental_bonus_weight": float(fundamental_bonus_weight),
                 "sector_bonus_weight": float(sector_bonus_weight),
                 "history_days": int(history_days),
+                "mad_stop_enabled": bool(mad_stop_enabled),
+                "mad_stop_med_len": int(mad_stop_med_len),
+                "mad_stop_mad_len": int(mad_stop_mad_len),
+                "mad_stop_dev_factor": float(mad_stop_dev_factor),
+                "mad_stop_atr_floor_mult": float(mad_stop_atr_floor_mult),
+                "rsi_exit_gate_enabled": bool(rsi_exit_gate_enabled),
+                "rsi_exit_max": float(rsi_exit_max),
+                "weekly_monthly_gate_enabled": bool(weekly_monthly_gate_enabled),
+                "advanced_equal_weight_sizing": bool(advanced_equal_weight_sizing),
+                "equal_weight_tolerance_pct": float(equal_weight_tolerance_pct),
+                "sector_diversification_enabled": bool(sector_diversification_enabled),
+                "top_n_sectors": int(top_n_sectors),
+                "max_positions_per_sector": int(max_positions_per_sector),
+                "sector_composite_score_enabled": bool(sector_composite_score_enabled),
+                "resistance_zone_weight": float(resistance_zone_weight),
+                "regime_filter_enabled": bool(regime_filter_enabled),
+                "regime_position_multiplier": float(regime_position_multiplier),
+                "entry_confirm_days": int(entry_confirm_days),
+                "entry_confirm_pool_size": int(entry_confirm_pool_size),
             }
+            # Keeps this form honest against config.ADMIN_EDITABLE_KEYS -- if
+            # a new field is added to the form without adding its key here
+            # (or vice versa), this trips instead of the two silently
+            # drifting apart.
+            assert set(updates.keys()) == set(config.ADMIN_EDITABLE_KEYS), (
+                set(updates.keys()) ^ set(config.ADMIN_EDITABLE_KEYS))
             state_db.update_strategy_config(updates)
             config.STRATEGY.update(updates)  # live for this process -- no restart needed
             st.success("Strategy settings saved — in effect immediately.")
@@ -3650,6 +3846,26 @@ def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
     return result
 
 
+def _strategy_config_diff(live_cfg: dict, new_cfg: dict, keys) -> list[tuple[str, object, object]]:
+    """[(key, live_value, new_value), ...] for keys where they differ, used
+    by "Apply to live"'s confirmation panel. Float-tolerant: near_high_
+    threshold and similar percent fields round-trip through *100/100 in
+    both the Admin and Backtest widgets, which can leave float noise
+    (0.8500000000000001 vs 0.85) that would otherwise show up as a fake
+    pending change."""
+    out = []
+    for k in keys:
+        old, new = live_cfg.get(k), new_cfg.get(k)
+        if isinstance(old, float) or isinstance(new, float):
+            if (old is not None and new is not None
+                    and round(float(old), 6) == round(float(new), 6)):
+                continue
+        elif old == new:
+            continue
+        out.append((k, old, new))
+    return out
+
+
 def page_backtest():
     backtest_job = get_background_job("backtest_run")
     backtest_running = backtest_job is not None and not backtest_job["done"]
@@ -3674,8 +3890,8 @@ def page_backtest():
         '<span class="ov-sub">calendar-entry momentum system</span>'
         f'<span class="ov-info-icon" title="{_backtest_tip}">ℹ️</span></div></div>',
         unsafe_allow_html=True)
-    _bt_hdr_spacer, _bt_hdr_r1, _bt_hdr_r2, _bt_hdr_r3 = st.columns(
-        [5, 2, 1.2, 1.2])
+    _bt_hdr_spacer, _bt_hdr_r1, _bt_hdr_r2, _bt_hdr_r3, _bt_hdr_r4 = st.columns(
+        [3.5, 2, 1.2, 1.2, 1.5])
     _build_fh_clicked = _bt_hdr_r1.button(
         "Build/Refresh fundamentals history", key="bt_build_fh_hdr",
         disabled=backtest_running)
@@ -3689,6 +3905,14 @@ def page_backtest():
         cancel_background_job("backtest_run")
         st.toast("Stopping backtest — this can take a few seconds to "
                 "take effect.", icon="⏹️")
+    _apply_live_clicked = _bt_hdr_r4.button(
+        "🚀 Apply to live", key="bt_apply_live_hdr",
+        disabled=st.session_state.get("bt_cfg") is None,
+        help="Run a backtest first — no config recorded for this result yet."
+        if st.session_state.get("bt_cfg") is None else
+        "Review and push this run's parameters to the live strategy config.")
+    if _apply_live_clicked:
+        st.session_state["bt_apply_live_open"] = True
 
     if "bt_result" not in st.session_state and os.path.exists(BACKTEST_CACHE):
         _cached_bt = pd.read_pickle(BACKTEST_CACHE)
@@ -3845,16 +4069,15 @@ def page_backtest():
                 "Rebalance cadence", ["daily", "weekly", "monthly"],
                 default=config.STRATEGY.get("rebalance_cadence", "daily"),
                 key="bt_rebalance_cadence",
-                help="'daily' and 'monthly' mirror the LIVE Admin setting -- "
+                help="All three mirror the LIVE Admin setting exactly -- "
                      "'daily' re-checks the sell/keep-zone rule every trading "
-                     "day (matches the live default); 'monthly' only on the "
-                     "first trading day of each month. 'weekly' is "
-                     "backtest-only for now (no live scheduled job runs this "
-                     "cadence yet) -- re-checks on the last trading day of "
-                     "each week (Friday, or the prior trading day if Friday "
-                     "is a market holiday). Buys/top-ups always fill open "
-                     "slots daily regardless of which is chosen -- only the "
-                     "sell decision's frequency changes.")
+                     "day (matches the live default); 'weekly' only on the "
+                     "last trading day of each week (Friday, or the prior "
+                     "trading day if Friday is a market holiday); 'monthly' "
+                     "only on the first trading day of each month. Buys/"
+                     "top-ups always fill open slots daily regardless of "
+                     "which is chosen -- only the sell decision's frequency "
+                     "changes.")
 
         _ov_muted("Technical indicator")
         ti1, ti2, ti3 = st.columns(3)
@@ -4209,6 +4432,11 @@ def page_backtest():
         run_cfg["entry_confirm_pool_size"] = int(entry_confirm_pool_size_v)
         run_cfg["history_days"] = int(history_days_v)
         run_cfg["rebalance_cadence"] = rebalance_cadence_v
+        # Keeps this block honest against config.BACKTEST_TUNABLE_KEYS (the
+        # allow-list "Apply to live" pushes from) -- if a new widget is added
+        # here without adding its key to that tuple too, this trips instead
+        # of the two silently drifting apart.
+        assert all(k in run_cfg for k in config.BACKTEST_TUNABLE_KEYS)
         start_background_job(
             "backtest_run", _run_backtest_job,
             range_mode, years, start_date, end_date, use_fundamentals,
@@ -4325,6 +4553,42 @@ def page_backtest():
                      f"mad={_bt_cfg.get('mad_stop_mad_len')}, "
                      f"dev={_bt_cfg.get('mad_stop_dev_factor')}, "
                      f"floor×={_bt_cfg.get('mad_stop_atr_floor_mult')})")
+
+    if _bt_cfg:
+        with st.expander("🚀 Apply this run's config to live",
+                         expanded=st.session_state.get("bt_apply_live_open", False)):
+            _live_diff = _strategy_config_diff(
+                config.STRATEGY, _bt_cfg, config.BACKTEST_TUNABLE_KEYS)
+            if not _live_diff:
+                st.info("Live config already matches this run's settings — "
+                       "nothing to apply.")
+            else:
+                st.caption(
+                    "This only updates the parameters the next Live "
+                    "Rebalance run (scheduled or manual) will use — it "
+                    "does not run a scan or place any trade. Go to the "
+                    "Live Rebalance tab to actually run/execute one.")
+                _diff_rows = [
+                    {"Parameter": k, "Live now": old, "Would become": new}
+                    for k, old, new in _live_diff]
+                st.dataframe(pd.DataFrame(_diff_rows), hide_index=True,
+                            use_container_width=True)
+                _confirm_apply_live = st.checkbox(
+                    f"I confirm I want to push these {len(_live_diff)} "
+                    "changed parameter(s) to the LIVE strategy config",
+                    key="bt_confirm_apply_live")
+                if st.button("🚀 Apply to live", type="primary",
+                            disabled=not _confirm_apply_live,
+                            key="bt_apply_live_btn"):
+                    _live_updates = {k: new for k, old, new in _live_diff}
+                    state_db.update_strategy_config(_live_updates)
+                    config.STRATEGY.update(_live_updates)
+                    st.success(
+                        f"Applied {len(_live_updates)} parameter(s) to "
+                        "live — takes effect on the next scheduled or "
+                        "manual rebalance run (no restart needed).")
+                    st.session_state["bt_apply_live_open"] = False
+                    st.rerun()
 
     with st.container(border=True, key="ov-card-bt-pdf"):
         pdf_col1, pdf_col2 = st.columns([3, 2])
