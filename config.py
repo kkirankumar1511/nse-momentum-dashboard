@@ -402,12 +402,12 @@ _STRATEGY_DEFAULTS = {
 # silently drift apart. Everything else in _STRATEGY_DEFAULTS is either an
 # Admin-only automation toggle (ADMIN_ONLY_KEYS) or a fixed research
 # constant with no UI anywhere (rsi_period, atr_period, regime_ema_period,
-# sector_rs_lookback_days, the resistance_zone_* internal knobs,
-# capital_equal_weight_sizing) -- neither category may ever be overwritten
-# by a stale backtest snapshot.
+# sector_rs_lookback_days, the resistance_zone_* internal knobs) -- neither
+# category may ever be overwritten by a stale backtest snapshot.
 BACKTEST_TUNABLE_KEYS = (
     "max_positions", "rsi_min", "rsi_max", "trailing_stop_enabled",
     "trailing_atr_multiple", "advanced_equal_weight_sizing",
+    "capital_equal_weight_sizing",
     "equal_weight_tolerance_pct", "fundamental_gate_enabled",
     "fundamental_bonus_weight", "min_fundamental_score",
     "mom_lookback_days_short", "mom_lookback_days_long", "skip_recent_days",

@@ -2212,6 +2212,18 @@ def page_admin():
                     help="A 5-year A/B found 0.20 (the live default) beats "
                          "the original one-at-a-time fill on every metric "
                          "at once.")
+                capital_equal_weight_sizing = st.checkbox(
+                    "Capital-weighted sizing (uncheck for risk-based)",
+                    key="admin_use_capital_equal_weight",
+                    value=bool(cfg.get("capital_equal_weight_sizing", True)),
+                    help="ON by default -- sizes each position off capital/"
+                         "portfolio value (the allocator above, or the "
+                         "one-at-a-time fallback when it's off). Uncheck to "
+                         "size off risk instead: risk_per_trade_pct of "
+                         "capital, position width = (entry - stop) -- can "
+                         "come out arbitrarily small on modest capital "
+                         "combined with a wide ATR stop. Verify in Backtest "
+                         "before switching this live.")
 
                 sd_c1, sd_c2, sd_c3 = st.columns([1, 1, 1])
                 sector_diversification_enabled = sd_c1.checkbox(
@@ -2325,6 +2337,7 @@ def page_admin():
                 "rsi_exit_max": float(rsi_exit_max),
                 "weekly_monthly_gate_enabled": bool(weekly_monthly_gate_enabled),
                 "advanced_equal_weight_sizing": bool(advanced_equal_weight_sizing),
+                "capital_equal_weight_sizing": bool(capital_equal_weight_sizing),
                 "equal_weight_tolerance_pct": float(equal_weight_tolerance_pct),
                 "sector_diversification_enabled": bool(sector_diversification_enabled),
                 "top_n_sectors": int(top_n_sectors),
@@ -4207,6 +4220,19 @@ def page_backtest():
                          "original one-at-a-time fill on every metric at once: CAGR "
                          "43.06->44.39%, Sharpe 1.64->1.67, max drawdown "
                          "-20.30->-19.58%, profit factor 2.10->2.12.")
+            use_capital_equal_weight = st.checkbox(
+                "Capital-weighted sizing (uncheck for risk-based)",
+                key="bt_use_capital_equal_weight",
+                value=bool(config.STRATEGY.get("capital_equal_weight_sizing", True)),
+                help="ON by default, matches live. Sizes each position off "
+                     "capital/portfolio value (the allocator above, or the "
+                     "one-at-a-time fallback when it's off). Uncheck to size "
+                     "off risk instead: risk_per_trade_pct of capital, "
+                     "position width = (entry - stop) -- can come out "
+                     "arbitrarily small on modest capital combined with a "
+                     "wide ATR stop (e.g. 1-2 share positions that don't "
+                     "grow with your account size). Off by default for "
+                     "exactly that reason; verify here before switching live.")
         with sc2:
             use_fundamentals = st.checkbox(
                 "Fundamental gate",
@@ -4413,6 +4439,7 @@ def page_backtest():
         run_cfg["trailing_stop_enabled"] = use_trailing
         run_cfg["trailing_atr_multiple"] = trailing_mult_v
         run_cfg["advanced_equal_weight_sizing"] = use_equal_weight
+        run_cfg["capital_equal_weight_sizing"] = use_capital_equal_weight
         run_cfg["equal_weight_tolerance_pct"] = equal_weight_tolerance_v
         # fundamental_gate_enabled is set explicitly too, even though the
         # gate is already a no-op without fundamentals_history (see

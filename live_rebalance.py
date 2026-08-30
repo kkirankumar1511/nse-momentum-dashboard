@@ -356,7 +356,48 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     buys = []
     top_ups = []
     open_positions_now = state_db.get_open_positions()
-    if cfg.get("advanced_equal_weight_sizing", True):
+    if not cfg.get("capital_equal_weight_sizing", True):
+        # Risk-based path: screener.position_size() sizes off risk_per_
+        # trade_pct of capital between entry and stop, instead of capital/
+        # portfolio value -- the exact function backtest.py calls in the
+        # same cfg state (backtest.py:873), now available live behind this
+        # explicit opt-in. Default True (capital-weighted) reproduces
+        # today's behavior exactly; only this branch changes when someone
+        # deliberately switches it off. No top-up concept here, matching
+        # backtest.py's own try_enter()/position_size() scope -- top-ups
+        # are an equal-weight-allocator-only feature.
+        remaining_cash = available_cash
+        for sym, row in candidates.iterrows():
+            if len(still_held) + len(buys) >= effective_max_positions:
+                break
+            if sym in still_held:
+                continue
+            price = float(row["price"])
+            stop = float(row["suggested_stop"])
+            qty = screener.position_size(total_equity, price, stop, cfg)
+            qty = min(qty, int(remaining_cash / price)) if price > 0 else 0
+            if qty <= 0:
+                continue
+            remaining_cash -= qty * price
+            fscore = row.get("fundamental_score")
+            fscore = None if pd.isna(fscore) else round(float(fscore), 1)
+            rank = candidates.index.get_loc(sym) + 1
+            reason = (f"Ranked #{rank} of {len(candidates)} momentum candidates "
+                     f"(score {row['score']:.2f}); RSI {row['rsi']:.0f}, "
+                     f"{row['pct_52w_high'] * 100:.0f}% of 52w high, "
+                     f"vol expansion {row['vol_expansion']:.2f}x; risk-based sizing")
+            if fscore is not None:
+                reason += f"; fundamental score {fscore:.0f}/100"
+            buys.append({
+                "symbol": sym, "qty": qty, "price": round(price, 2),
+                "stop": round(stop, 2), "score": float(row["score"]), "rank": rank,
+                "rsi": float(row["rsi"]), "pct_52w_high": float(row["pct_52w_high"]),
+                "vol_expansion": float(row["vol_expansion"]),
+                "fundamental_score": fscore,
+                "fundamental_rubric": row.get("fundamental_rubric"),
+                "reason": reason,
+            })
+    elif cfg.get("advanced_equal_weight_sizing", True):
         # New candidates (not held), rank order, plus held-but-still-
         # gate-passing symbols (eligible for topping up, not for a fresh
         # entry -- allocate_equal_weight_buys() filters that itself).
