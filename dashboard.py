@@ -1997,34 +1997,34 @@ def page_admin():
                      "drawdown -30.67%->-28.81% at once, verified against "
                      "this exact production engine -- verify against your "
                      "own config in Backtest before relying on it live.")
-            # Always rendered (greyed out when off), never conditionally
-            # shown/hidden -- widgets inside st.form() don't trigger a
-            # rerun on their own, only the submit button does, so an
-            # `if mad_stop_enabled:` guard here would never reveal these
-            # fields until AFTER "Save strategy settings" was clicked,
-            # by which point it's too late to edit them. Same disabled=
-            # pattern already used for every other conditional field in
-            # this form (rsi_exit_max, equal_weight_tolerance_pct, etc.)
+            # Always rendered AND always editable, regardless of the
+            # checkbox above -- same convention this form already uses for
+            # min_fundamental_score/fundamental_bonus_weight (editable
+            # regardless of the fundamental gate checkbox). Deliberately
+            # NOT disabled=not mad_stop_enabled: widgets inside st.form()
+            # don't trigger a rerun on their own (only the submit button
+            # does), so a disabled= tied to a checkbox in this same form
+            # can't update live either -- ticking the box wouldn't actually
+            # make these editable until after "Save strategy settings" was
+            # already clicked once. These four values simply have no
+            # effect unless mad_stop_enabled is on, same as every other
+            # gated-but-not-greyed-out field here.
             mad_c1, mad_c2, mad_c3, mad_c4 = st.columns(4)
             mad_stop_med_len = mad_c1.number_input(
                 "Median length", min_value=5, max_value=100,
                 value=int(cfg.get("mad_stop_med_len", 21)), step=1,
-                disabled=not mad_stop_enabled,
                 help="Rolling window for the trail's median center line.")
             mad_stop_mad_len = mad_c2.number_input(
                 "MAD length", min_value=5, max_value=100,
                 value=int(cfg.get("mad_stop_mad_len", 21)), step=1,
-                disabled=not mad_stop_enabled,
                 help="Rolling window for the median-absolute-deviation band width.")
             mad_stop_dev_factor = mad_c3.number_input(
                 "Deviation factor", min_value=0.5, max_value=5.0,
                 value=float(cfg.get("mad_stop_dev_factor", 2.0)), step=0.1,
-                disabled=not mad_stop_enabled,
                 help="MAD band half-width multiplier -- wider band = looser stop.")
             mad_stop_atr_floor_mult = mad_c4.number_input(
                 "ATR floor ×", min_value=0.5, max_value=5.0,
                 value=float(cfg.get("mad_stop_atr_floor_mult", 2.0)), step=0.1,
-                disabled=not mad_stop_enabled,
                 help="Floors the band width at this × ATR(14) so it never "
                      "gets unrealistically tight in a low-volatility lull.")
 
@@ -2121,7 +2121,7 @@ def page_admin():
             rsi_exit_max = c13c.number_input(
                 "Exit RSI ceiling", min_value=0.0, max_value=100.0,
                 value=float(cfg.get("rsi_exit_max", cfg["rsi_max"])),
-                step=1.0, format="%.2f", disabled=not rsi_exit_gate_enabled)
+                step=1.0, format="%.2f")
             weekly_monthly_gate_enabled = st.checkbox(
                 "Weekly/monthly EMA trend gate", key="admin_use_wm_rsi_gate",
                 value=bool(cfg.get("weekly_monthly_gate_enabled", False)),
@@ -2186,7 +2186,7 @@ def page_admin():
                 equal_weight_tolerance_pct = ew_c2.number_input(
                     "Tolerance", min_value=0.0, max_value=1.0,
                     value=float(cfg["equal_weight_tolerance_pct"]), step=0.01,
-                    format="%.2f", disabled=not advanced_equal_weight_sizing,
+                    format="%.2f",
                     help="A 5-year A/B found 0.20 (the live default) beats "
                          "the original one-at-a-time fill on every metric "
                          "at once.")
@@ -2204,17 +2204,14 @@ def page_admin():
                          "Backtest before relying on it live.")
                 top_n_sectors = sd_c2.number_input(
                     "Top N sectors", min_value=1, max_value=10,
-                    value=int(cfg.get("top_n_sectors", 3)), step=1,
-                    disabled=not sector_diversification_enabled)
+                    value=int(cfg.get("top_n_sectors", 3)), step=1)
                 max_positions_per_sector = sd_c3.number_input(
                     "Max positions / sector", min_value=1, max_value=10,
-                    value=int(cfg.get("max_positions_per_sector", 3)), step=1,
-                    disabled=not sector_diversification_enabled)
+                    value=int(cfg.get("max_positions_per_sector", 3)), step=1)
                 sector_composite_score_enabled = st.checkbox(
                     "Use composite sector score (RS + 52w-high + breadth) "
                     "instead of RS alone", key="admin_use_sector_composite",
                     value=bool(cfg.get("sector_composite_score_enabled", False)),
-                    disabled=not sector_diversification_enabled,
                     help="Only affects which sectors count as 'top N' "
                          "above -- OFF ranks sectors on relative strength "
                          "alone; ON blends in 52-week-high proximity and "
@@ -2245,7 +2242,7 @@ def page_admin():
                 regime_position_multiplier = rg_c2.number_input(
                     "Regime position multiplier", min_value=0.1, max_value=1.0,
                     value=float(cfg.get("regime_position_multiplier", 0.5)),
-                    step=0.05, disabled=not regime_filter_enabled,
+                    step=0.05,
                     help="Fraction of max_positions allowed while NIFTY is "
                          "below its 200 EMA.")
 
@@ -2266,7 +2263,7 @@ def page_admin():
                 entry_confirm_pool_size = cf_c2.number_input(
                     "Confirm-pool size", min_value=1, max_value=100,
                     value=int(cfg.get("entry_confirm_pool_size") or (int(max_positions) * 2)),
-                    step=1, disabled=entry_confirm_days == 0,
+                    step=1,
                     key="admin_entry_confirm_pool_size",
                     help="How many top-scored candidates count as the "
                          "confirm-pool each rebalance -- defaults to 2x "
