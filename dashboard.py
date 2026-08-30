@@ -1961,6 +1961,50 @@ def page_admin():
         unsafe_allow_html=True)
     cfg = config.STRATEGY
     with st.container(border=True, key="ov-card-admin-strategy"):
+        # Stop mechanism: mutually exclusive (MAD replaces BOTH the initial
+        # and trailing ATR stop entirely when on -- backtest.py's
+        # _initial_stop()/trailing-ratchet block ignore atr_stop_multiple/
+        # trailing_atr_multiple outright whenever mad_stop_enabled is True).
+        # Rendered OUTSIDE st.form() deliberately: widgets inside a form
+        # don't trigger a rerun on their own (only the submit button does),
+        # so neither the mutual-exclusion callback nor a disabled= tied to
+        # these checkboxes could update live from inside one -- toggling
+        # either would visibly do nothing until "Save strategy settings"
+        # was already clicked once. Out here, both react instantly.
+        st.markdown('<p class="ov-muted">Trade management — stop mechanism '
+                   '(choose one)</p>', unsafe_allow_html=True)
+        stop_c1, stop_c2 = st.columns(2)
+
+        def _on_toggle_admin_trailing():
+            if st.session_state.get("admin_trailing_stop_enabled"):
+                st.session_state["admin_use_mad_stop"] = False
+
+        def _on_toggle_admin_mad_stop():
+            if st.session_state.get("admin_use_mad_stop"):
+                st.session_state["admin_trailing_stop_enabled"] = False
+
+        trailing_stop_enabled = stop_c1.checkbox(
+            "Use ATR trailing stop", key="admin_trailing_stop_enabled",
+            value=bool(cfg["trailing_stop_enabled"]),
+            on_change=_on_toggle_admin_trailing,
+            help="Ratchets the stop up to highest_close_since_entry - "
+                 "multiple*ATR as a position gains, never back down. "
+                 "Mutually exclusive with the MAD trail stop to the right "
+                 "-- turning one on turns the other off.")
+        mad_stop_enabled = stop_c2.checkbox(
+            "Use MAD Volatility Trail stop instead of ATR",
+            key="admin_use_mad_stop",
+            value=bool(cfg.get("mad_stop_enabled", False)),
+            on_change=_on_toggle_admin_mad_stop,
+            help="Replaces BOTH the initial and trailing ATR stop below "
+                 "with the MAD trail's own one-sided ratcheting lower band "
+                 "(median + MAD-scaled bands, ATR floor). A 5.6yr "
+                 "PDF-config backtest (regime filter ON) found the default "
+                 "params here raised CAGR 38.65%->40.37% and shrank max "
+                 "drawdown -30.67%->-28.81% at once, verified against this "
+                 "exact production engine -- verify against your own "
+                 "config in Backtest before relying on it live.")
+
         with st.form("strategy_config_form"):
             st.markdown('<p class="ov-muted">Portfolio &amp; risk</p>', unsafe_allow_html=True)
             c1, c2, c3 = st.columns(3)
@@ -1972,59 +2016,37 @@ def page_admin():
                 value=float(cfg["risk_per_trade_pct"]), step=0.1)
             atr_stop_multiple = c3.number_input(
                 "Initial stop (× ATR)", min_value=0.5, max_value=10.0,
-                value=float(cfg["atr_stop_multiple"]), step=0.1)
+                value=float(cfg["atr_stop_multiple"]), step=0.1,
+                disabled=mad_stop_enabled,
+                help="Unused while the MAD trail stop is active above.")
 
             st.markdown('<p class="ov-muted">Trailing stop</p>', unsafe_allow_html=True)
-            c4, c5 = st.columns(2)
-            trailing_stop_enabled = c4.checkbox(
-                "Enabled", value=bool(cfg["trailing_stop_enabled"]))
-            trailing_atr_multiple = c5.number_input(
+            trailing_atr_multiple = st.number_input(
                 "Trailing stop (× ATR)", min_value=0.5, max_value=10.0,
-                value=float(cfg["trailing_atr_multiple"]), step=0.1)
+                value=float(cfg["trailing_atr_multiple"]), step=0.1,
+                disabled=not trailing_stop_enabled,
+                help="Only used while 'Use ATR trailing stop' is checked above.")
 
-            mad_stop_enabled = st.checkbox(
-                "Use MAD Volatility Trail stop instead of ATR",
-                key="admin_use_mad_stop",
-                value=bool(cfg.get("mad_stop_enabled", False)),
-                help="OFF by default. Replaces BOTH the initial and trailing "
-                     "stop above with the MAD trail's own one-sided "
-                     "ratcheting lower band (median + MAD-scaled bands, ATR "
-                     "floor) -- falls back to the ATR stop/trailing settings "
-                     "above automatically whenever the trail isn't a "
-                     "sensible support for a given entry. A 5.6yr PDF-config "
-                     "backtest (regime filter ON) found the default params "
-                     "here raised CAGR 38.65%->40.37% and shrank max "
-                     "drawdown -30.67%->-28.81% at once, verified against "
-                     "this exact production engine -- verify against your "
-                     "own config in Backtest before relying on it live.")
-            # Always rendered AND always editable, regardless of the
-            # checkbox above -- same convention this form already uses for
-            # min_fundamental_score/fundamental_bonus_weight (editable
-            # regardless of the fundamental gate checkbox). Deliberately
-            # NOT disabled=not mad_stop_enabled: widgets inside st.form()
-            # don't trigger a rerun on their own (only the submit button
-            # does), so a disabled= tied to a checkbox in this same form
-            # can't update live either -- ticking the box wouldn't actually
-            # make these editable until after "Save strategy settings" was
-            # already clicked once. These four values simply have no
-            # effect unless mad_stop_enabled is on, same as every other
-            # gated-but-not-greyed-out field here.
             mad_c1, mad_c2, mad_c3, mad_c4 = st.columns(4)
             mad_stop_med_len = mad_c1.number_input(
                 "Median length", min_value=5, max_value=100,
                 value=int(cfg.get("mad_stop_med_len", 21)), step=1,
+                disabled=not mad_stop_enabled,
                 help="Rolling window for the trail's median center line.")
             mad_stop_mad_len = mad_c2.number_input(
                 "MAD length", min_value=5, max_value=100,
                 value=int(cfg.get("mad_stop_mad_len", 21)), step=1,
+                disabled=not mad_stop_enabled,
                 help="Rolling window for the median-absolute-deviation band width.")
             mad_stop_dev_factor = mad_c3.number_input(
                 "Deviation factor", min_value=0.5, max_value=5.0,
                 value=float(cfg.get("mad_stop_dev_factor", 2.0)), step=0.1,
+                disabled=not mad_stop_enabled,
                 help="MAD band half-width multiplier -- wider band = looser stop.")
             mad_stop_atr_floor_mult = mad_c4.number_input(
                 "ATR floor ×", min_value=0.5, max_value=5.0,
                 value=float(cfg.get("mad_stop_atr_floor_mult", 2.0)), step=0.1,
+                disabled=not mad_stop_enabled,
                 help="Floors the band width at this × ATR(14) so it never "
                      "gets unrealistically tight in a low-volatility lull.")
 
