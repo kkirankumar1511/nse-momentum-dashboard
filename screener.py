@@ -519,15 +519,43 @@ def run_screen(with_fundamentals: bool = True,
     # call-time import since both modules are already fully loaded by
     # the time run_screen() actually runs.
     long_candles = None
-    if config.STRATEGY.get("weekly_monthly_gate_enabled", False):
+    if (config.STRATEGY.get("weekly_monthly_gate_enabled", False)
+            or config.STRATEGY.get("resistance_zone_weight", 0.0)):
         import backtest as bt
-        report("Fetching deep history for weekly/monthly trend gate...", 0.35)
+        report("Fetching deep history for weekly/monthly trend gate "
+              "and/or resistance zones...", 0.35)
         long_candles = bt.load_long_history_cached(
             config.UNIVERSE, end_date=dt.date.today() - dt.timedelta(days=1),
             progress_cb=lambda s, f: report(s, 0.35 + f * 0.2))
 
     report("Computing technicals...", 0.60)
     tech = build_technical_table(candles, bench, long_candles=long_candles)
+
+    # BACKTEST-ONLY-until-now overhead-resistance score tilt (see
+    # resistance_zones.py) -- mirrors backtest.rank_universe_asof's own
+    # attach block (backtest.py:508-516) almost verbatim. Cheap to compute
+    # fresh per day (a single vectorized rolling-window pass per symbol,
+    # no resample()-style per-call cost like the weekly/monthly gate had)
+    # -- reuses the SAME long_candles fetched above rather than a second
+    # fetch when both gates are on. No-op (column absent, score()'s guard
+    # never fires) whenever resistance_zone_weight is 0 or long_candles
+    # wasn't fetched, same pattern as every other optional column here.
+    if long_candles is not None and config.STRATEGY.get("resistance_zone_weight", 0.0):
+        import resistance_zones
+        pivot_window = config.STRATEGY.get("resistance_zone_pivot_window", 10)
+        clearances = []
+        for sym in tech.index:
+            long_df = long_candles.get(sym)
+            if long_df is None or long_df.empty:
+                clearances.append(None)
+                continue
+            pivots = resistance_zones.precompute_pivots(long_df, window=pivot_window)
+            clearances.append(resistance_zones.resistance_clearance_asof(
+                pivots, float(tech.loc[sym, "price"]), pd.Timestamp(dt.date.today()),
+                lookback_years=config.STRATEGY.get("resistance_zone_lookback_years", 5.0),
+                tolerance_pct=config.STRATEGY.get("resistance_zone_cluster_tolerance_pct", 0.03),
+                search_pct=config.STRATEGY.get("resistance_zone_search_pct", 0.20)))
+        tech["resistance_clearance"] = clearances
 
     if with_fundamentals and fundamentals is None:
         cache_path = os.path.join("cache", "fno_value_scores.pkl")
