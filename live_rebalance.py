@@ -372,6 +372,33 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     capped_new_candidates = set(bt._apply_sector_cap(
         new_candidate_order, still_held, ranked, cfg))
 
+    # Entry confirmation (backtest.py:1009-1020) -- requires a stock to
+    # have stayed in the confirm-pool (top entry_confirm_pool_size
+    # candidates by score) for entry_confirm_days CONSECUTIVE rebalance
+    # events before a NEW buy is allowed. Only gates NEW entries --
+    # keep_zone/sell_check above are unaffected, same "blocks new entries
+    # only" philosophy as the regime filter and sector cap. Streak state
+    # is persisted (state_db.entry_confirm_streak) since live has no
+    # day-loop to hold it in memory across separate runs -- updated only
+    # on an actual rebalance day (same is_rebalance_day gate the sell
+    # rule above uses, matching backtest's "updated only inside the
+    # monthly-rebalance block"), and only once per calendar day even if
+    # called again (state_db.update_entry_confirm_streaks' own
+    # idempotency guard) -- a manual "Run today's scan" re-click can't
+    # double-increment every streak. entry_confirm_days=0 (default) skips
+    # this block entirely: zero new queries, zero new writes,
+    # byte-identical to before this existed.
+    confirm_days = cfg.get("entry_confirm_days", 0)
+    if confirm_days:
+        confirm_pool_size = cfg.get("entry_confirm_pool_size") or cfg["max_positions"] * 2
+        confirm_syms_now = set(candidates.head(confirm_pool_size).index)
+        if is_rebalance_day:
+            state_db.update_entry_confirm_streaks(confirm_syms_now, dt.date.today().isoformat())
+        streaks = state_db.get_entry_confirm_streaks()
+        capped_new_candidates = {
+            sym for sym in capped_new_candidates
+            if streaks.get(sym, 0) >= confirm_days}
+
     buys = []
     top_ups = []
     open_positions_now = state_db.get_open_positions()

@@ -252,6 +252,26 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     auth TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Entry-confirmation streak (cfg["entry_confirm_days"]) -- backtest.py
+-- tracks this as a plain in-memory dict across its own day-loop
+-- (backtest.py:833, 1009-1020); live has no day-loop to hold that in
+-- (every run is a fresh subprocess or a freshly-rebuilt background
+-- thread), so it has to be persisted here instead. One row per symbol
+-- CURRENTLY in the confirm-pool or that was at some point (a streak
+-- resets to 0 rather than deleting the row, matching backtest's own
+-- "sym not in confirm_syms_now -> streak = 0" reset, not removal).
+-- last_confirmed_date is the idempotency key: update_entry_confirm_
+-- streaks() no-ops for the whole batch if it already ran today, so a
+-- double-fire (e.g. clicking "Run today's scan" twice) can't double-
+-- increment every streak by mistake, same idea as paper_db.py's
+-- paper_scans.scan_date UNIQUE guard, applied to a once-per-day batch
+-- update instead of a per-scan row.
+CREATE TABLE IF NOT EXISTS entry_confirm_streak (
+    symbol TEXT PRIMARY KEY,
+    streak INTEGER NOT NULL DEFAULT 0,
+    last_confirmed_date TEXT NOT NULL
+);
 """
 
 
@@ -1803,3 +1823,52 @@ def get_push_subscriptions() -> list[dict]:
     conn.close()
     return [{"endpoint": r["endpoint"],
              "keys": {"p256dh": r["p256dh"], "auth": r["auth"]}} for r in rows]
+
+
+def get_entry_confirm_streaks() -> dict[str, int]:
+    """{symbol: streak} for every symbol with any recorded streak (0 or
+    more -- a 0 row means it was in the confirm-pool at some point but
+    isn't right now, kept rather than deleted so its history doesn't
+    silently vanish). live_rebalance.py filters new-buy eligibility on
+    `streak >= entry_confirm_days`, exactly matching backtest.py's own
+    `candidate_streak.get(sym, 0) >= confirm_days` check."""
+    conn = get_conn()
+    rows = conn.execute("SELECT symbol, streak FROM entry_confirm_streak").fetchall()
+    conn.close()
+    return {r["symbol"]: r["streak"] for r in rows}
+
+
+def update_entry_confirm_streaks(confirm_syms_now: set[str], today: str) -> bool:
+    """Once-per-day batch update, mirroring backtest.py's own logic
+    (backtest.py:1009-1020) exactly: every symbol NOT in confirm_syms_now
+    this time resets to 0 (not deleted); every symbol IN it increments by
+    1 (starting from 0 if never seen before). Idempotent per calendar
+    day -- if EVERY existing row already has last_confirmed_date ==
+    today, this is a no-op (returns False) rather than double-
+    incrementing everyone, protecting against a double-fire (e.g.
+    clicking "Run today's scan" twice, or both the scheduled job and a
+    manual click landing the same day). Only meaningful once at least
+    one row exists; the very first call of all always proceeds (nothing
+    to have already been updated today). Returns True if it actually
+    updated, False if it was a no-op."""
+    conn = get_conn()
+    rows = conn.execute("SELECT symbol, streak, last_confirmed_date "
+                        "FROM entry_confirm_streak").fetchall()
+    if rows and all(r["last_confirmed_date"] == today for r in rows):
+        conn.close()
+        return False
+    existing = {r["symbol"]: r["streak"] for r in rows}
+    updates = []
+    for sym in existing:
+        if sym not in confirm_syms_now:
+            updates.append((sym, 0, today))
+    for sym in confirm_syms_now:
+        updates.append((sym, existing.get(sym, 0) + 1, today))
+    conn.executemany(
+        "INSERT INTO entry_confirm_streak (symbol, streak, last_confirmed_date) "
+        "VALUES (?, ?, ?) ON CONFLICT(symbol) DO UPDATE SET "
+        "streak = excluded.streak, last_confirmed_date = excluded.last_confirmed_date",
+        updates)
+    conn.commit()
+    conn.close()
+    return True
