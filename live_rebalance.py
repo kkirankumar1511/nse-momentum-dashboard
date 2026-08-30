@@ -255,6 +255,29 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     report("Loading current holdings...", 0.05)
     held = get_live_holdings()
 
+    # Market regime filter (backtest.py:817, 926-929): when NIFTY's own
+    # close is below its own regime_ema_period EMA, caps how many NEW
+    # positions may open to max_positions * regime_position_multiplier --
+    # never force-sells anything, and the SIZING denominator (target_
+    # per_slot/allocate_equal_weight_buys' max_positions below) stays the
+    # full, unreduced cfg["max_positions"] throughout, exactly matching
+    # backtest's two-variable split (a regime-halved slot count leaves the
+    # unused capital in cash, not redistributed into fewer/larger
+    # positions). Off by default -- effective_max_positions == max_
+    # positions whenever this is off, byte-identical to before this
+    # existed. Fetches its own cheap NIFTY copy rather than threading one
+    # out of screener.run_screen() below, to avoid changing that
+    # function's return contract for its other two callers.
+    effective_max_positions = cfg["max_positions"]
+    if cfg.get("regime_filter_enabled", False):
+        bench_regime = kite_client.benchmark_candles(cfg["history_days"])
+        regime_ema = indicators.ema(bench_regime["close"],
+                                    cfg.get("regime_ema_period", 200))
+        regime_ok = bool(bench_regime["close"].iloc[-1] > regime_ema.iloc[-1])
+        if not regime_ok:
+            effective_max_positions = max(
+                1, int(cfg["max_positions"] * cfg.get("regime_position_multiplier", 0.5)))
+
     report("Scanning universe (screener pipeline)...", 0.10)
     ranked = screener.run_screen(
         with_fundamentals=True, fundamentals=fundamentals,
@@ -302,7 +325,7 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     report("Sizing new candidates...", 0.92)
     sold_syms = set(sells_df["symbol"]) if not sells_df.empty else set()
     still_held = set(held.index) - sold_syms
-    open_slots = max(cfg["max_positions"] - len(still_held), 0)
+    open_slots = max(effective_max_positions - len(still_held), 0)
 
     # Total portfolio value (cash + everything held, current prices) --
     # the equal-weight denominator, unchanged either sizing mode.
@@ -349,6 +372,10 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
             tolerance_pct=cfg.get("equal_weight_tolerance_pct", 0.20))
 
         for sym, (qty, size_reason) in alloc["new_buys"].items():
+            if len(still_held) + len(buys) >= effective_max_positions:
+                break  # regime filter -- allocator sized off the full
+                       # max_positions above, this is what actually caps
+                       # how many of its proposed buys get taken today
             row = candidates.loc[sym]
             price = float(row["price"])
             stop = float(row["suggested_stop"])
