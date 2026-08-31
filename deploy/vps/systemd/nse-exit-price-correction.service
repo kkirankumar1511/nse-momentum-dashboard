@@ -1,0 +1,8 @@
+[Unit]
+Description=NSE end-of-day exit-price correction (replaces LTP-approx exit prices with Kite's real fill prices -- see live_rebalance.correct_todays_exit_prices)
+
+[Service]
+Type=oneshot
+User=nseapp
+WorkingDirectory=/opt/nse-momentum-dashboard
+ExecStart=/opt/nse-momentum-dashboard/.venv/bin/python live_rebalance.py --correct-exit-prices

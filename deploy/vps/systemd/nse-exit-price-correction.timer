@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the exit-price correction daily at 15:31 (weekdays, shortly after NSE's 15:30 close)
+
+[Timer]
+OnCalendar=Mon..Fri 15:31
+Persistent=true
+Unit=nse-exit-price-correction.service
+
+[Install]
+WantedBy=timers.target
