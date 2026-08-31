@@ -1075,7 +1075,7 @@ COLUMN_LABELS = {
     "entry_rsi": "Entry RSI", "entry_pct_52w_high": "Entry % of 52W high",
     "entry_vol_expansion": "Entry vol expansion",
     "entry_fundamental_score": "Entry fundamental score",
-    "exit_reason": "Exit reason", "entry_reason": "Why this trade",
+    "exit_reason": "Exit reason", "exit_type": "Exit type", "entry_reason": "Why this trade",
     "latest_recommended_stop": "Latest stop",
     "extra_qty": "Extra qty",
     "trigger_price": "GTT trigger price", "updated_at": "Last updated",
@@ -5576,8 +5576,9 @@ def page_rebalance_history():
 
 def _exit_type_label(reason) -> str:
     """Collapses a trades row's raw exit_reason into a short, scannable
-    category for the Tradebook's Exit reason column/filter. Only four
-    kinds of value are ever actually written (state_db.close_trade()'s
+    category for the Tradebook's separate Exit type column/filter -- the
+    original exit_reason column/text is left untouched, this is additive.
+    Only four kinds of value are ever actually written (state_db.close_trade()'s
     call sites): screener.sell_check()'s two long rank/gate-drop
     explanations (rebalance sells), and three fixed internal keys
     (gap_down_stop, manual_square_off, gtt_fill_or_external -- the last
@@ -5666,7 +5667,7 @@ def page_tradebook():
                                            key="tb_status_filter")
         with f3:
             reason_types = sorted(trades["exit_reason"].dropna().map(_exit_type_label).unique())
-            reason_filter = st.multiselect("Exit reason", reason_types, key="tb_reason_filter")
+            reason_filter = st.multiselect("Exit type", reason_types, key="tb_reason_filter")
         with f4:
             since_date = st.date_input("Entered since",
                                        value=dt.date.today() - dt.timedelta(days=365),
@@ -5682,18 +5683,18 @@ def page_tradebook():
 
         st.caption(f"Showing {len(filtered)} of {len(trades)} trades")
         _priority_cols = ["symbol", "entry_date", "entry_price", "qty", "initial_stop",
-                         "latest_recommended_stop", "exit_date", "exit_price",
+                         "latest_recommended_stop", "exit_date", "exit_type", "exit_price",
                          "realized_pnl", "realized_ret_pct", "holding_days"]
-        _remaining_cols = [c for c in filtered.columns
-                          if c not in ("id", "position_id", "status") and c not in _priority_cols]
-        display_cols = (["status"] + [c for c in _priority_cols if c in filtered.columns]
-                       + _remaining_cols)
-        display_df = filtered[display_cols].copy()
+        display_df = filtered.copy()
         if "exit_reason" in display_df.columns:
-            display_df["exit_reason"] = display_df["exit_reason"].map(_exit_type_label)
+            display_df["exit_type"] = display_df["exit_reason"].map(_exit_type_label)
+        _remaining_cols = [c for c in display_df.columns
+                          if c not in ("id", "position_id", "status") and c not in _priority_cols]
+        display_cols = (["status"] + [c for c in _priority_cols if c in display_df.columns]
+                       + _remaining_cols)
         st.markdown(
             _ov_table_html(
-                display_df, sym_cols=["symbol"],
+                display_df[display_cols], sym_cols=["symbol"],
                 pnl_cols=["realized_pnl", "realized_ret_pct"],
                 num_fmt={"entry_price": "₹{:.2f}", "exit_price": "₹{:.2f}",
                         "initial_stop": "₹{:.2f}", "latest_recommended_stop": "₹{:.2f}",
@@ -5701,7 +5702,7 @@ def page_tradebook():
                         "entry_pct_52w_high": "{:.2f}", "entry_vol_expansion": "{:.2f}",
                         "entry_fundamental_score": "{:.1f}"},
                 badges={"status": {"open": "ov-badge-green", "closed": "ov-badge-gray"},
-                       "exit_reason": _EXIT_TYPE_BADGES}),
+                       "exit_type": _EXIT_TYPE_BADGES}),
             unsafe_allow_html=True)
         st.download_button("Download tradebook CSV (filtered view)",
                            filtered.to_csv(index=False), "tradebook.csv")
