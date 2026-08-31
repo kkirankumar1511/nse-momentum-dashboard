@@ -200,6 +200,7 @@ def build_pdf(res: dict, bench: pd.DataFrame, cfg: dict, run_meta: dict,
         f"floor x={cfg.get('mad_stop_atr_floor_mult')})"),
         ("Risk per trade (%)", str(cfg.get("risk_per_trade_pct"))),
         ("History fetched (days)", str(cfg.get("history_days"))),
+        ("Entry confirmation (days)", str(cfg.get("entry_confirm_days", 0))),
     ]))
     story.append(Spacer(1, 6))
     story.append(Paragraph("Technical indicator", ss["Meta"]))
