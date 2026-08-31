@@ -719,6 +719,24 @@ def get_open_positions() -> dict[str, dict]:
     return {r["symbol"]: dict(r) for r in rows}
 
 
+def get_stop_update_log(position_id: int) -> pd.DataFrame:
+    """Full daily stop-computation history for one position -- date,
+    old_stop, new_stop, atr_value, ratcheted, applied -- as written by
+    update_position_stop()/apply_stop_update(). One row per day the daily
+    job actually ran for this position; empty if the position predates
+    this log (added later than the position itself) or the daily job
+    never ran for it (e.g. a same-day-closed trade). Used by the
+    Tradebook's trade chart to show the REAL history live actually
+    computed and applied, instead of re-simulating it."""
+    conn = get_conn()
+    df = pd.read_sql(
+        "SELECT date, old_stop, new_stop, atr_value, ratcheted, applied "
+        "FROM stop_update_log WHERE position_id = ? ORDER BY date, id",
+        conn, params=(position_id,))
+    conn.close()
+    return df
+
+
 def top_up_trade(symbol: str, extra_qty: int, price: float) -> None:
     """Call right after buying MORE shares of an ALREADY-open position
     (screener.allocate_equal_weight_buys' top-up mechanic) succeeds --

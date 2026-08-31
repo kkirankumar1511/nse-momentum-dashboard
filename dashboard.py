@@ -82,6 +82,7 @@ if os.name == "nt":
         _ProactorBasePipeTransport._call_connection_lost = _call_connection_lost_quietly
         _ProactorBasePipeTransport._connection_reset_silenced = True
 import state_db
+import trade_chart
 
 st.set_page_config(page_title="KK Trading System", layout="wide",
                    page_icon="assets/logo.png" if os.path.exists("assets/logo.png") else "📈")
@@ -5521,6 +5522,115 @@ def page_tradebook():
             unsafe_allow_html=True)
         st.download_button("Download tradebook CSV (filtered view)",
                            filtered.to_csv(index=False), "tradebook.csv")
+
+    st.divider()
+    with st.container(border=True, key="ov-card-tb-chart"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-purple);"></span>Trade chart</p>',
+            unsafe_allow_html=True)
+        st.caption(
+            "Open positions: the amber line is your REAL applied-stop "
+            "history (state_db's daily stop-check log -- exactly what live "
+            "computed and applied each day, whether MAD or ATR-based -- "
+            "same mechanism as the Live Rebalance page). Closed trades: "
+            "shown with a plain ATR-based simulated stop line for "
+            "readability, regardless of what was actually enabled while "
+            "the trade was live. A symbol traded more than once shows "
+            "every occurrence, starting from its first entry in the "
+            "tradebook.")
+        if filtered.empty:
+            st.info("No trades match the filters above to chart.")
+        else:
+            _chart_syms = sorted(filtered["symbol"].unique())
+            _sym_sel = st.selectbox("Symbol", _chart_syms, key="tb_chart_sym")
+
+            _sym_trades = trades[trades["symbol"] == _sym_sel].sort_values("entry_date")
+            _first_entry = pd.Timestamp(_sym_trades["entry_date"].iloc[0])
+            _any_open = (_sym_trades["status"] == "open").any()
+            _last_relevant = (pd.Timestamp(dt.date.today()) if _any_open
+                             else pd.Timestamp(_sym_trades["exit_date"].max()))
+            _fetch_end = _last_relevant.date()
+
+            # load_long_history_cached, not load_candles_cached: the plain
+            # cache is sized to whatever `days` a call asks for and fully
+            # re-fetches once stale, so a different (often larger) window
+            # per symbol here kept missing that cache and paying a live
+            # Kite fetch every time. The long-history cache is a fixed
+            # ~16.7yr depth per symbol, incremental (only the missing gap
+            # is fetched), and shared with the weekly/monthly-gate feature
+            # -- always covers a trade's own entry date, no re-fetch churn.
+            with st.spinner(f"Loading {_sym_sel} candles... (first time for this "
+                           f"symbol can take up to a minute; instant after that)"):
+                _candles = bt.load_long_history_cached([_sym_sel], end_date=_fetch_end)
+            _df = _candles.get(_sym_sel)
+            if _df is None or _df.empty:
+                st.warning(f"No candle data available for {_sym_sel}.")
+            else:
+                _default_start = min(_first_entry, _last_relevant - pd.Timedelta(days=365))
+                _min_bound = min(_default_start, pd.Timestamp(_df.index.min())).date()
+                _max_bound = _last_relevant.date()
+                c1, c2 = st.columns(2)
+                with c1:
+                    _range_start = st.date_input(
+                        "From", value=_default_start.date(),
+                        min_value=_min_bound, max_value=_max_bound, key="tb_chart_from")
+                with c2:
+                    _range_end = st.date_input(
+                        "To", value=_max_bound,
+                        min_value=_min_bound, max_value=_max_bound, key="tb_chart_to")
+
+                # For now (per explicit request): open positions show only
+                # the REAL applied-stop history (state_db's daily log) --
+                # that line already reflects whatever's actually live (MAD
+                # or ATR), so a separate simulated "recommended" line is
+                # dropped to keep it a single source of truth. Closed
+                # trades always get the plain ATR-based simulated line,
+                # regardless of whether MAD was enabled while they were
+                # live -- keeps historical trades simple to read.
+                _cfg_atr_only = dict(config.STRATEGY)
+                _cfg_atr_only["mad_stop_enabled"] = False
+
+                _trade_list = []
+                for _, _tr in _sym_trades.iterrows():
+                    _entry_date = pd.Timestamp(_tr["entry_date"])
+                    _is_open = _tr["status"] == "open"
+                    _exit_date = (pd.Timestamp(_tr["exit_date"])
+                                 if not _is_open and pd.notna(_tr.get("exit_date"))
+                                 else None)
+
+                    _real_history = None
+                    if _is_open:
+                        _pos_id = _tr.get("position_id")
+                        if pd.notna(_pos_id):
+                            _log = state_db.get_stop_update_log(int(_pos_id))
+                            _rh = trade_chart.build_real_stop_history(
+                                _log, _entry_date, float(_tr["initial_stop"]), exit_date=None)
+                            if _rh is not None:
+                                _real_history = _rh[["applied"]]
+
+                    _overlay = trade_chart.build_trade_overlay(
+                        _df, _cfg_atr_only, _entry_date, float(_tr["entry_price"]),
+                        exit_date=_exit_date)
+                    _trade_list.append({
+                        "entry_date": _entry_date, "entry_price": float(_tr["entry_price"]),
+                        "exit_date": _exit_date,
+                        "exit_price": (float(_tr["exit_price"])
+                                      if _exit_date is not None and pd.notna(_tr.get("exit_price"))
+                                      else None),
+                        "overlay": _overlay, "real_history": _real_history,
+                    })
+
+                _n = len(_trade_list)
+                st.markdown(
+                    f"**{_sym_sel}** — {_n} trade{'s' if _n != 1 else ''} "
+                    f"since {_first_entry.date()}" if _n > 1
+                    else f"**{_sym_sel}** — entry {_first_entry.date()}")
+                fig = trade_chart.build_symbol_figure(
+                    _sym_sel, _df, _trade_list,
+                    chart_start=_range_start, chart_end=_range_end)
+                st.plotly_chart(fig, width="stretch",
+                                config={"displayModeBar": True, "scrollZoom": True})
 
 
 # ---------------------------------------------------------------------------
