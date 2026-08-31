@@ -465,6 +465,7 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
                      precomputed_weekly_monthly: tuple | None = None,
                      precomputed_weekly_monthly_ok: tuple | None = None,
                      precomputed_mad_df: pd.DataFrame | None = None,
+                     mad_precompute_active: bool = False,
                      asof_date=None) -> dict:
     """All technical metrics for one symbol from its daily candles.
 
@@ -507,9 +508,12 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
     month boundaries -- not an approximation. None (default) falls
     through to precomputed_weekly_monthly's own fast path unchanged.
 
-    precomputed_mad_df: optional, this symbol's full MAD trail -- see
-    _suggested_stop()'s own docstring for why this one matters more than
-    the other "None = only changes speed" params here."""
+    precomputed_mad_df/mad_precompute_active: optional -- see
+    _suggested_stop()'s own docstring, this pair distinguishes "backtest's
+    lazy cache is active but this symbol isn't in it yet" from "no
+    precompute infra at all" so the ranking-display suggested_stop field
+    never forces an expensive computation for a symbol that was never
+    actually entered."""
     if df.empty or len(df) < cfg["ema_slow"]:
         return {}
 
@@ -606,12 +610,14 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
         "atr": atr_now,
         "atr_pct": atr_now / price * 100,
         "suggested_stop": _suggested_stop(df, price, atr_now, cfg,
-                                          precomputed_mad_df, asof_date),
+                                          precomputed_mad_df, mad_precompute_active,
+                                          asof_date),
     }
 
 
 def _suggested_stop(df: pd.DataFrame, price: float, atr_now: float, cfg: dict,
                     precomputed_mad_df: pd.DataFrame | None = None,
+                    mad_precompute_active: bool = False,
                     asof_date=None) -> float:
     """Initial stop for a NEW buy -- the ATR distance below, unless
     mad_stop_enabled and the MAD volatility trail's own lower band is a
@@ -622,18 +628,21 @@ def _suggested_stop(df: pd.DataFrame, price: float, atr_now: float, cfg: dict,
     mad_trail_strategy.precompute_mad_trail(), via backtest.run_backtest()
     -> screener.build_technical_table()) -- a plain .loc[asof_date] lookup
     instead of recomputing the whole rolling median/MAD/ATR trail from
-    scratch on every call. This matters a lot here specifically: unlike
-    every other "None (default) = always the case for live callers today,
-    only changes speed" param in this function, compute_snapshot() runs
-    once per symbol per REBALANCE DATE in a backtest's day-loop (every
-    single trading day at daily cadence) -- recomputing the full trail
-    that often, only to have backtest.py's OWN _initial_stop()/
-    precomputed_mad (already built once per run) never even read this
-    field, was a real, measured slowdown, not just theoretical waste.
-    None (default, and always the case for live callers today, where
-    compute_snapshot() only runs once per symbol per scan) falls back to
-    the original full computation -- correct either way, this only
-    changes speed."""
+    scratch on every call.
+
+    mad_precompute_active: distinguishes "backtest's lazy per-run MAD
+    cache is in play, but this particular symbol hasn't been entered yet
+    so its trail was never computed" (precomputed_mad_df is None AND this
+    is True -> cheap atr_stop fallback, never trigger a fresh computation
+    here) from "no precompute infra at all, this is a live caller"
+    (precomputed_mad_df is None AND this is False -> the full from-
+    scratch computation below is correct and cheap, live only calls this
+    once per symbol per scan). This field is ranking-display-only in a
+    backtest context (backtest.py's OWN entry/ratchet decisions use their
+    own lazy get_mad(), not this one), so it's never worth forcing a
+    computation here purely to populate a column nobody reads mid-run --
+    see backtest.run_backtest()'s _get_mad() docstring for the lazy-cache
+    side of this."""
     atr_stop = price - cfg["atr_stop_multiple"] * atr_now
     if not cfg.get("mad_stop_enabled", False):
         return atr_stop
@@ -644,6 +653,8 @@ def _suggested_stop(df: pd.DataFrame, price: float, atr_now: float, cfg: dict,
             last = precomputed_mad_df.iloc[-1]
         else:
             return atr_stop
+    elif mad_precompute_active:
+        return atr_stop
     else:
         import mad_trail_strategy
         mad_cfg = mad_trail_strategy.cfg_from_strategy(cfg)

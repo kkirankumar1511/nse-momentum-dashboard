@@ -568,7 +568,7 @@ def _mad_stop_cfg(cfg: dict) -> dict:
 
 
 def _initial_stop(entry_price: float, atr_now: float, cfg: dict, sym: str, date,
-                  precomputed_mad: dict | None) -> float:
+                  get_mad) -> float:
     """Explicit request ("MAD-stop on/off... its own parameters editable"):
     when cfg['mad_stop_enabled'], the MAD volatility trail's own one-sided
     ratcheting lower band becomes the stop outright whenever it's a
@@ -578,11 +578,15 @@ def _initial_stop(entry_price: float, atr_now: float, cfg: dict, sym: str, date,
     always gets SOME stop. Mirrors the standalone A/B test in scripts/
     run_ema_stop_backtest_local.py's blended_stop-adjacent mad_stop logic,
     verified there to raise CAGR (33.82%->36.98%) and shrink max drawdown
-    at the same time on a 5.6yr backtest."""
+    at the same time on a 5.6yr backtest.
+
+    get_mad: run_backtest()'s _get_mad() lazy-cache getter (or None) --
+    called only here, i.e. only for symbols actually about to be
+    entered, not the whole universe."""
     atr_stop = entry_price - cfg["atr_stop_multiple"] * atr_now
-    if not cfg.get("mad_stop_enabled", False) or precomputed_mad is None:
+    if not cfg.get("mad_stop_enabled", False) or get_mad is None:
         return atr_stop
-    mad = precomputed_mad.get(sym)
+    mad = get_mad(sym)
     m = mad.loc[date] if mad is not None and date in mad.index else None
     if m is not None and m["regime"] == 1 and not pd.isna(m["lower"]) and m["lower"] < entry_price:
         return float(m["lower"])
@@ -757,19 +761,38 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 precomputed_weekly_monthly[sym] = indicators.precompute_weekly_monthly_bars(df["close"])
                 precomputed_weekly_monthly_ok[sym] = indicators.precompute_weekly_monthly_trend_ok(df, cfg)
 
-    # One-time precompute of the MAD volatility trail (see mad_trail_
-    # strategy.precompute_mad_trail) -- only when mad_stop_enabled, same
+    # Lazy, per-symbol cache of the MAD volatility trail (see mad_trail_
+    # strategy.precompute_mad_trail), only when mad_stop_enabled -- same
     # off-by-default -> zero extra cost guarantee as every other optional
-    # precompute above. Sourced from long_candles when available (deeper
-    # warmup history for the trail's own median/MAD windows), falling
-    # back to the backtest's own `candles` otherwise.
+    # precompute above. Computed on first actual need via _get_mad(), NOT
+    # eagerly for the whole universe: the only two consumers that affect
+    # backtest OUTPUT (_initial_stop() at entry, and the trailing-ratchet
+    # block below for currently-held positions) only ever need a symbol's
+    # trail once it's actually bought -- a small, dynamically-determined
+    # subset of the universe, not knowable before the day-loop runs. The
+    # third consumer, compute_snapshot()'s suggested_stop ranking-display
+    # field (never read by backtest's own trading decisions, and never
+    # shown anywhere in the Backtest UI either -- only the live Screener
+    # page displays it), reads this SAME dict passively via screener.
+    # build_technical_table()'s precomputed_mad param and just falls back
+    # to the plain ATR stop for a symbol that isn't cached yet, rather
+    # than forcing a computation nobody will read. Sourced from
+    # long_candles when available (deeper warmup history for the trail's
+    # own median/MAD windows), falling back to the backtest's own
+    # `candles` otherwise -- same source preference as before, just
+    # computed lazily instead of upfront for every universe symbol.
     precomputed_mad: dict = {}
-    if cfg.get("mad_stop_enabled", False):
-        mad_src = long_candles if long_candles is not None else candles
-        mad_cfg = _mad_stop_cfg(cfg)
-        for sym, df in mad_src.items():
-            if not df.empty and len(df) >= mad_cfg["mt_med_len"]:
-                precomputed_mad[sym] = mad_trail_strategy.precompute_mad_trail(df, mad_cfg)
+    _mad_cfg = _mad_stop_cfg(cfg) if cfg.get("mad_stop_enabled", False) else None
+
+    def _get_mad(sym: str) -> pd.DataFrame | None:
+        if sym not in precomputed_mad:
+            mad_src = long_candles if long_candles is not None else candles
+            df = mad_src.get(sym)
+            if df is not None and not df.empty and len(df) >= _mad_cfg["mt_med_len"]:
+                precomputed_mad[sym] = mad_trail_strategy.precompute_mad_trail(df, _mad_cfg)
+            else:
+                precomputed_mad[sym] = None
+        return precomputed_mad[sym]
 
     # One-time precompute of the market-regime filter (see module docstring
     # on regime_filter_enabled below) -- NIFTY's own close vs. its causal
@@ -1064,7 +1087,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                     break
                 price = prices[sym]
                 atr_now = float(indicators.atr(candles[sym].loc[:date], cfg["atr_period"]).iloc[-1])
-                stop = _initial_stop(price, atr_now, cfg, sym, date, precomputed_mad)
+                stop = _initial_stop(price, atr_now, cfg, sym, date, _get_mad)
                 try_enter(sym, watchlist[sym], price, stop, date, qty_override=qty)
                 if sym in positions:
                     watchlist.pop(sym, None)
@@ -1085,7 +1108,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 df_upto = candles[sym].loc[:date]
                 price = float(df_upto["close"].iloc[-1])
                 atr_now = float(indicators.atr(df_upto, cfg["atr_period"]).iloc[-1])
-                stop = _initial_stop(price, atr_now, cfg, sym, date, precomputed_mad)
+                stop = _initial_stop(price, atr_now, cfg, sym, date, _get_mad)
                 try_enter(sym, row, price, stop, date)
                 if sym in positions:
                     watchlist.pop(sym, None)

@@ -94,11 +94,15 @@ def build_technical_table(candles: dict[str, pd.DataFrame],
     unchanged -- see compute_snapshot's own docstring for the
     byte-identical verification.
 
-    precomputed_mad: optional, {symbol: DataFrame} from backtest.
-    run_backtest()'s own once-per-run mad_trail_strategy.
-    precompute_mad_trail() precompute -- turns compute_snapshot()'s
-    suggested_stop into a plain .loc[asof_date] lookup instead of
-    recomputing the whole rolling MAD trail from scratch on every call.
+    precomputed_mad: optional, {symbol: DataFrame} -- backtest.
+    run_backtest()'s own lazy, per-run mad_trail_strategy.
+    precompute_mad_trail() cache (see its _get_mad() docstring), only
+    ever populated for symbols actually entered so far this run, not the
+    whole universe. Passing this dict (even sparsely/empty-at-first, as
+    long as it's not None) turns compute_snapshot()'s suggested_stop into
+    a cheap .loc[asof_date] lookup on a hit, or a cheap ATR fallback on a
+    miss -- never a fresh full-trail recompute purely for this ranking-
+    display field.
     Matters more than the similar params above: unlike them, this one's
     absence was a REAL measured slowdown (compute_snapshot runs once per
     symbol per rebalance date -- every trading day at daily cadence --
@@ -124,6 +128,7 @@ def build_technical_table(candles: dict[str, pd.DataFrame],
                                           precomputed_weekly_monthly=precomputed_wm,
                                           precomputed_weekly_monthly_ok=precomputed_wm_ok,
                                           precomputed_mad_df=precomputed_mad_df,
+                                          mad_precompute_active=precomputed_mad is not None,
                                           asof_date=asof_date)
         if snap:
             rows[sym] = snap
