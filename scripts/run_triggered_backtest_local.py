@@ -4,9 +4,13 @@ experimental backtest_triggered.run_triggered_backtest(), over the same
 cached universe/period. Not wired into dashboard.py, not deployed to the
 VPS -- pure local research script, per "keep it in local for testing."
 
-Uses load_candles_cached(..., offline=True) so it works without a live
-Kite session (that only lives wherever the daily OAuth login flow runs,
-i.e. the VPS) -- reads whatever's already cached under cache/*.csv.
+Uses load_long_history_cached()'s cache/long/*.csv (append-only, never
+truncated) as its main candle source, so it works without a live Kite
+session (that only lives wherever the daily OAuth login flow runs, i.e.
+the VPS) -- NOT load_candles_cached()'s cache/*.csv, which gets fully
+overwritten by every live/online fetch elsewhere in the app and so can't
+be trusted to hold more than whatever the last such fetch happened to
+request.
 
 Run with:  python scripts/run_triggered_backtest_local.py --years 5
 """
@@ -23,7 +27,7 @@ os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 
 import config
-from backtest import load_candles_cached, load_long_history_cached, run_backtest
+from backtest import LONG_CACHE_DIR, _tz_naive, load_long_history_cached, run_backtest
 from backtest_triggered import run_triggered_backtest
 
 FUNDAMENTALS_HISTORY_CACHE = os.path.join("cache", "fundamentals_history.pkl")
@@ -231,10 +235,23 @@ def main():
     ap.add_argument("--rsi-max", type=float, default=None,
                     help="overrides FILTER_CFG_OVERRIDE's rsi_max gate threshold "
                         "(100 effectively removes the upper cap, RSI is bounded [0,100])")
-    ap.add_argument("--ha-stop-mode", choices=["ha_low", "atr", "fibonacci"], default=None,
+    ap.add_argument("--ha-stop-mode", choices=["ha_low", "atr", "fibonacci", "swing_ema50", "ema_tiered_fixed"], default=None,
                     help="overrides ha_stop_mode -- 'ha_low' (signal candle's HA low), "
-                        "'atr' (entry - multiple*ATR), or 'fibonacci' (swing retracement "
-                        "stop / extension target, see trigger_indicators.find_swing_for_fib)")
+                        "'atr' (entry - multiple*ATR), 'fibonacci' (swing retracement "
+                        "stop / extension target, see trigger_indicators.find_swing_for_fib), "
+                        "or 'swing_ema50' (initial stop = entry candle's own real low, "
+                        "trails UP to each newly-confirmed swing low, exits on EITHER the "
+                        "swing-low stop OR a real close below EMA50, whichever fires first "
+                        "-- no fixed target, pure trail. See --swing-low-window/"
+                        "--swing-stop-buffer-pct.)")
+    ap.add_argument("--swing-low-window", type=int, default=None,
+                    help="overrides swing_low_window (default 10) -- a low is confirmed as "
+                        "a swing low once this many trading days pass with no lower low on "
+                        "either side; only used by --ha-stop-mode swing_ema50")
+    ap.add_argument("--swing-stop-buffer-pct", type=float, default=None,
+                    help="overrides swing_stop_buffer_pct (default 0.3) -- %% below the "
+                        "entry candle's low / each confirmed swing low the stop sits at; "
+                        "only used by --ha-stop-mode swing_ema50")
     ap.add_argument("--strategy", choices=["ha_trend", "ha_ema21_bounce"], default=None,
                     help="switches which HA entry pattern is active -- 'ha_trend' (default, "
                         "red-signal-candle-then-breakout) or 'ha_ema21_bounce' (new, same-day "
@@ -268,6 +285,19 @@ def main():
     ap.add_argument("--top-n-sectors", type=int, default=None,
                     help="overrides top_n_sectors -- how many strongest sector groups are "
                         "eligible when --sector-diversification on (default 3)")
+    ap.add_argument("--ema-intact-gate", action="store_true",
+                    help="overrides ema_intact_gate_enabled -> True -- a candidate must "
+                        "not have closed below its own EMA50 or EMA200 (real close) at "
+                        "any point in the trailing --ema-intact-lookback days to be "
+                        "eligible for a NEW buy, over the same gate-passing pool the "
+                        "baseline watchlist already uses (existing ranking/sell logic "
+                        "untouched)")
+    ap.add_argument("--ema-intact-lookback", type=int, default=20,
+                    help="overrides ema_intact_lookback_days (default 20)")
+    ap.add_argument("--ema-intact-which", choices=["both", "ema50", "ema200"], default="both",
+                    help="which EMA(s) the ema_intact_gate checks -- 'both' (default) "
+                        "excludes a candidate that closed below EITHER its EMA50 or "
+                        "EMA200; 'ema50'/'ema200' isolates just one")
     ap.add_argument("--out-suffix", type=str, default="",
                     help="appended to the saved CSV filenames (e.g. '_atr1') so parallel "
                         "runs with different params don't overwrite each other's output")
@@ -316,22 +346,26 @@ def main():
     # the engine's actual behavior.
     TRIG_WARMUP_DAYS = 780
 
-    # Always request the deep-history depth (matches load_long_history_
-    # cached's own convention) -- offline mode has no network cost to
-    # over-requesting, load_candles_cached just returns whatever calendar-
-    # day window is actually on disk, capped by this. Using a fixed large
-    # number here (rather than deriving it from --years) means the actual
-    # available window is whatever the local cache holds, and the fairness
-    # logic below decides the real simulated start date from that -- not
-    # from a guessed calendar-to-trading-day conversion, which is exactly
-    # what silently broke the first version of this script (an "extra 800
-    # calendar days" buffer undershot the 780 TRADING-day warmup need,
-    # quietly truncating the triggered engine's simulated window to ~1
-    # year while production ran the full requested window in the same
-    # invocation -- caught by comparing the two saved equity curves'
-    # actual index ranges, not assumed correct).
-    days = 6100
-    candles, bench = load_candles_cached(config.UNIVERSE, days, offline=True)
+    # 2026-08-18: use long_candles (loaded above) as the MAIN candle source,
+    # not load_candles_cached(..., offline=True)'s own cache/*.csv --
+    # that cache is DESTRUCTIVELY overwritten in full by every live/online
+    # fetch (paper_engine.py's daily 1200-day request, live_rebalance.py,
+    # etc. all call load_candles_cached with offline=False elsewhere),
+    # discarding everything outside whatever window that particular call
+    # asked for. Caught for real: this session's local cache/*.csv had
+    # 5+ years of history until an unrelated paper-trading isolation
+    # check ran a single 1200-day (~3.3yr) online fetch and silently
+    # truncated every symbol's cache down to just that window.
+    # long_candles never has this problem -- load_long_history_cached
+    # only ever APPENDS the missing gap, never truncates (see its own
+    # docstring) -- so it's both the deeper AND the safer source. Same
+    # story for the benchmark: cache/long/_NIFTY.csv (fetched once via
+    # kite_client.fetch_index_candles("NIFTY 50", ...) on the VPS, scp'd
+    # down) instead of load_candles_cached's own truncation-prone
+    # cache/_NIFTY.csv.
+    candles = long_candles
+    bench_path = os.path.join(LONG_CACHE_DIR, "_NIFTY.csv")
+    bench = _tz_naive(pd.read_csv(bench_path, index_col=0, parse_dates=True))
 
     # Fixed calendar window (e.g. "only 2025") truncates candles/bench to
     # end_date BEFORE the engines ever see them -- neither run_backtest
@@ -404,6 +438,13 @@ def main():
     if args.ha_stop_mode is not None:
         trig_cfg["ha_stop_mode"] = args.ha_stop_mode
         print(f"Overriding ha_stop_mode -> {args.ha_stop_mode} (from --ha-stop-mode).")
+    if args.swing_low_window is not None:
+        trig_cfg["swing_low_window"] = args.swing_low_window
+        print(f"Overriding swing_low_window -> {args.swing_low_window} (from --swing-low-window).")
+    if args.swing_stop_buffer_pct is not None:
+        trig_cfg["swing_stop_buffer_pct"] = args.swing_stop_buffer_pct
+        print(f"Overriding swing_stop_buffer_pct -> {args.swing_stop_buffer_pct} "
+             f"(from --swing-stop-buffer-pct).")
     if args.strategy is not None:
         trig_cfg["heikin_ashi_enabled"] = (args.strategy == "ha_trend")
         trig_cfg["ha_ema21_bounce_enabled"] = (args.strategy == "ha_ema21_bounce")
@@ -437,6 +478,14 @@ def main():
     if args.top_n_sectors is not None:
         trig_cfg["top_n_sectors"] = args.top_n_sectors
         print(f"Overriding top_n_sectors -> {args.top_n_sectors} (from --top-n-sectors).")
+    if args.ema_intact_gate:
+        trig_cfg["ema_intact_gate_enabled"] = True
+        trig_cfg["ema_intact_lookback_days"] = args.ema_intact_lookback
+        trig_cfg["ema_intact_check_ema50"] = args.ema_intact_which in ("both", "ema50")
+        trig_cfg["ema_intact_check_ema200"] = args.ema_intact_which in ("both", "ema200")
+        print(f"Overriding ema_intact_gate_enabled -> True, ema_intact_lookback_days -> "
+             f"{args.ema_intact_lookback}, checking={args.ema_intact_which} "
+             f"(from --ema-intact-gate/--ema-intact-which).")
 
     prod = trig = None
     if run_prod:
@@ -474,15 +523,21 @@ def main():
              f"{t_eq.index.min().date()} to {t_eq.index.max().date()} ({len(t_eq)} days).")
 
     suf = args.out_suffix
+    out_dir = "result"
+    os.makedirs(out_dir, exist_ok=True)
     saved = []
     if prod is not None:
-        prod["equity_curve"].rename("equity").to_csv(f"backtest_equity_production{suf}.csv")
-        prod["trades"].to_csv(f"backtest_trades_production{suf}.csv", index=False)
-        saved += [f"backtest_equity_production{suf}.csv", f"backtest_trades_production{suf}.csv"]
+        eq_p = os.path.join(out_dir, f"backtest_equity_production{suf}.csv")
+        tr_p = os.path.join(out_dir, f"backtest_trades_production{suf}.csv")
+        prod["equity_curve"].rename("equity").to_csv(eq_p)
+        prod["trades"].to_csv(tr_p, index=False)
+        saved += [eq_p, tr_p]
     if trig is not None:
-        trig["equity_curve"].rename("equity").to_csv(f"backtest_equity_triggered{suf}.csv")
-        trig["trades"].to_csv(f"backtest_trades_triggered{suf}.csv", index=False)
-        saved += [f"backtest_equity_triggered{suf}.csv", f"backtest_trades_triggered{suf}.csv"]
+        eq_t = os.path.join(out_dir, f"backtest_equity_triggered{suf}.csv")
+        tr_t = os.path.join(out_dir, f"backtest_trades_triggered{suf}.csv")
+        trig["equity_curve"].rename("equity").to_csv(eq_t)
+        trig["trades"].to_csv(tr_t, index=False)
+        saved += [eq_t, tr_t]
     print(f"\nSaved: {', '.join(saved)}")
 
 

@@ -1,0 +1,872 @@
+symbol,entry_date,exit_date,entry_price,exit_price,qty,reason,pnl,ret_pct,holding_days
+OBEROIRLTY,2021-01-01,2021-01-15,590.1,559.6,169,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5154.5,-5.168615488900185,14
+GODREJPROP,2021-01-01,2021-01-15,1427.25,1382.3,70,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3146.500000000003,-3.149413207216678,14
+TATASTEEL,2021-01-01,2021-01-18,59.32,61.61,1685,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,3858.6499999999987,3.8604180714767455,17
+DIXON,2021-01-01,2021-01-22,2724.4,2818.5,36,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,3387.5999999999967,3.4539715166642226,21
+VEDL,2021-01-15,2021-01-22,74.2,69.3,1448,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7095.200000000008,-6.60377358490567,7
+PERSISTENT,2021-01-01,2021-01-25,748.8,769.5,133,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,2753.100000000006,2.7644230769230838,24
+DLF,2021-01-01,2021-01-27,238.35,258.75,419,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,8547.600000000002,8.558842039018245,26
+MPHASIS,2021-01-25,2021-01-27,1466.7,1461.6,71,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-362.1000000000097,-0.3477193700143322,2
+KPITTECH,2021-01-01,2021-01-28,143.9,132.95,694,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7599.300000000012,-7.609451007644208,27
+APLAPOLLO,2021-01-01,2021-01-29,429.9,453.3,232,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,5428.800000000008,5.443126308443835,28
+ADANIENT,2021-01-01,2021-01-29,476.2,491.2,209,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,3135.0,3.1499370012599837,28
+ASHOKLEY,2021-01-22,2021-01-29,58.65,52.9,1830,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10522.5,-9.80392156862745,7
+HAVELLS,2021-01-27,2021-02-01,1116.05,1062.2,94,dropped out of top 20 rank (now #21 of 44),-5061.899999999991,-4.825052641010696,5
+RVNL,2021-01-28,2021-02-02,30.15,29.65,3472,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1736.0,-1.6583747927031545,5
+KPITTECH,2021-01-29,2021-02-02,142.8,134.95,722,dropped out of top 20 rank (now #28 of 54),-5667.700000000016,-5.497198879551835,4
+ASHOKLEY,2021-02-02,2021-02-12,63.7,61.65,1706,dropped out of top 20 rank (now #21 of 99),-3497.3000000000075,-3.2182103610675084,10
+VOLTAS,2021-02-12,2021-02-16,1079.2,1037.65,109,dropped out of top 20 rank (now #23 of 94),-4528.949999999995,-3.8500741289844265,4
+SHRIRAMFIN,2021-01-29,2021-02-18,258.25,287.75,399,dropped out of top 20 rank (now #23 of 99),11770.5,11.423039690222648,20
+TATAELXSI,2021-01-01,2021-02-22,1867.95,2666.8,53,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,42339.05000000001,42.76613399716267,52
+TMPV,2021-01-18,2021-02-22,169.35,209.65,626,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,25227.800000000007,23.796870386772962,35
+DLF,2021-02-01,2021-02-22,281.65,294.1,375,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,4668.750000000017,4.420379904136351,21
+UNOMINDA,2021-01-27,2021-02-23,237.95,271.7,442,dropped out of top 20 rank (now #21 of 78),14917.5,14.183652027736926,27
+SBIN,2021-02-16,2021-03-05,402.35,383.65,294,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5497.800000000014,-4.647694793090606,17
+DIXON,2021-02-02,2021-03-08,3139.3,3801.2,34,dropped out of top 20 rank (now #22 of 88),22504.599999999988,21.084318160099368,34
+MAHABANK,2021-02-22,2021-03-16,21.75,21.4,5338,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1868.3000000000077,-1.6091954022988575,22
+IDFCFIRSTB,2021-01-22,2021-03-17,49.5,60.9,2169,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,24726.6,23.030303030303024,54
+ADANIPORTS,2021-02-22,2021-03-17,673.8,688.25,172,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,2485.400000000008,2.144553279905015,23
+NBCC,2021-03-05,2021-03-18,33.9,29.03,3789,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-18452.42999999999,-14.36578171091445,13
+ASTRAL,2021-03-17,2021-03-18,1388.15,1290.4,92,dropped out of top 20 rank (now #23 of 41),-8993.0,-7.041746208983179,1
+PGEL,2021-01-29,2021-03-19,17.35,38.7,5948,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,126989.8,123.05475504322767,49
+ABCAPITAL,2021-03-08,2021-03-19,131.25,120.8,996,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10408.200000000003,-7.9619047619047585,11
+NMDC,2021-03-19,2021-03-22,16.05,15.45,7820,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4692.000000000011,-3.7383177570093573,3
+DIXON,2021-03-19,2021-03-23,4267.25,3868.85,29,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11553.600000000002,-9.33622356318472,4
+HINDALCO,2021-03-17,2021-03-24,326.4,317.75,391,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3382.149999999991,-2.6501225490195957,7
+PGEL,2021-03-22,2021-03-24,40.65,38.75,3109,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5907.099999999996,-4.674046740467396,2
+AUBANK,2021-03-24,2021-03-25,612.8,575.25,204,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7660.199999999991,-6.127610966057439,1
+ADANIPOWER,2021-03-25,2021-03-31,19.85,17.0,6167,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-17575.950000000008,-14.35768261964736,6
+PGEL,2021-03-31,2021-04-01,40.7,39.05,3088,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5095.200000000017,-4.054054054054069,1
+APLAPOLLO,2021-03-18,2021-04-05,609.8,617.75,206,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,1637.7000000000094,1.303706133158422,18
+NBCC,2021-03-23,2021-04-05,31.93,30.3,4006,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6529.779999999996,-5.104917005950515,13
+VEDL,2021-02-22,2021-04-12,88.0,92.94275175105139,1319,stop,6519.489559636782,5.61676335346748,49
+IEX,2021-02-18,2021-04-12,99.3,112.6,1210,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,16092.999999999996,13.393756294058413,53
+ADANIENSOL,2021-02-23,2021-04-12,734.5,924.9,159,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,30273.599999999995,25.922396187882903,48
+COFORGE,2021-04-12,2021-04-13,623.5,578.0,204,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9282.0,-7.29751403368083,1
+ADANIPOWER,2021-04-01,2021-04-19,17.85,17.5,7228,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2529.80000000001,-1.9607843137254943,18
+CGPOWER,2021-04-12,2021-04-20,74.65,67.7,1706,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11856.700000000004,-9.310113864701941,8
+JINDALSTEL,2021-04-12,2021-05-14,389.0,402.3113105127997,327,stop,4352.798537685504,3.421930723084765,32
+SAIL,2021-04-05,2021-05-20,89.65,121.45,1451,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,46141.799999999996,35.471277189068594,45
+JSWSTEEL,2021-03-19,2021-05-24,440.55,681.45,284,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,68415.6,54.68164794007491,66
+SAIL,2021-05-24,2021-05-25,124.75,123.95,1248,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-998.3999999999965,-0.6412825651302634,1
+TATASTEEL,2021-04-05,2021-05-26,81.26,102.22,1601,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,33556.95999999999,25.793748461727773,51
+HINDALCO,2021-04-13,2021-05-26,348.7,381.0,369,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,11918.700000000004,9.262976770863208,43
+JSWSTEEL,2021-05-25,2021-05-26,700.8,682.2,219,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4073.39999999998,-2.654109589041087,1
+VEDL,2021-04-20,2021-05-27,98.55,118.65,1315,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,26431.50000000001,20.395738203957393,37
+NMDC,2021-05-20,2021-06-08,21.65,21.6,7115,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-355.74999999997976,-0.2309468822170757,19
+NATIONALUM,2021-05-26,2021-06-09,70.3,68.98,2149,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2836.6799999999853,-1.8776671408250234,14
+TATASTEEL,2021-05-27,2021-06-09,103.63,104.07,1477,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,649.8799999999967,0.4245874746694911,13
+JSWSTEEL,2021-06-08,2021-06-09,707.5,697.85,227,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2190.5499999999947,-1.3639575971731377,1
+BHEL,2021-05-26,2021-06-14,72.5,65.68593039802897,2084,stop,-14200.521050507621,-9.398716692373831,19
+ADANIENSOL,2021-04-19,2021-06-15,1012.6,1446.4,127,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,55092.600000000006,42.84021331226546,57
+PNBHOUSING,2021-06-09,2021-06-15,671.45,609.8,236,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-14549.400000000021,-9.181621863132039,6
+ADANIENT,2021-03-16,2021-06-16,870.4,1404.1,151,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,80588.69999999998,61.316636029411754,92
+ADANIPOWER,2021-06-14,2021-06-16,28.2,25.45,5551,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15265.25,-9.751773049645395,2
+JSWSTEEL,2021-06-15,2021-06-16,725.1,705.4,213,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4196.1000000000095,-2.71686663908427,1
+TATASTEEL,2021-06-15,2021-06-17,111.26,104.32,1391,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9653.540000000017,-6.237641560309193,2
+OFSS,2021-06-16,2021-06-17,3260.0,3148.0,46,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5152.0,-3.435582822085892,1
+KPITTECH,2021-03-24,2021-06-18,171.95,220.6513155902868,729,stop,35503.259065319085,28.32295178266171,86
+BSE,2021-06-16,2021-06-18,103.0,95.55814681658708,1465,stop,-10902.314913699924,-7.225100178070798,2
+TATAELXSI,2021-05-14,2021-06-18,3481.8,3639.95,42,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,6642.299999999985,4.542190820839775,35
+SAIL,2021-06-09,2021-06-18,124.45,124.0,1276,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-574.2000000000037,-0.36159100040177306,9
+PNBHOUSING,2021-06-17,2021-06-18,620.95,611.1,241,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2373.8500000000054,-1.5862790884934364,1
+BSE,2021-06-18,2021-06-24,99.5,98.0,1470,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2205.0,-1.5075376884422065,6
+ADANIENT,2021-06-18,2021-07-01,1442.1,1444.8,101,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,272.7000000000046,0.18722696068234068,13
+APLAPOLLO,2021-06-16,2021-07-09,743.9,771.85,202,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,5645.900000000009,3.7572254335260125,23
+KPITTECH,2021-06-18,2021-07-13,236.9,246.95,617,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,6200.849999999989,4.2422963275643655,25
+SUZLON,2021-07-01,2021-07-14,7.7,7.25,20480,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9216.000000000004,-5.844155844155852,13
+KEI,2021-06-18,2021-07-16,702.1,710.95,208,dropped out of top 20 rank (now #24 of 81),1840.8000000000047,1.2605042016806678,28
+TATAELXSI,2021-06-24,2021-07-27,3740.15,4175.75,39,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,16988.399999999998,11.646591714236054,33
+MOTILALOFS,2021-07-27,2021-07-30,259.4,235.8,660,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15575.999999999978,-9.097918272937534,3
+NATIONALUM,2021-07-09,2021-08-09,83.57,81.02,1858,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4737.899999999995,-3.0513342108412056,31
+BSE,2021-07-30,2021-08-10,139.0,123.74780111651249,1247,stop,-19019.492007708923,-10.972804952149284,11
+COFORGE,2021-06-09,2021-08-11,769.5,938.0,206,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,34711.0,21.897335932423644,63
+TATAELXSI,2021-08-10,2021-08-11,4238.6,4195.3,39,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1688.700000000007,-1.0215637238710884,1
+PRESTIGE,2021-08-11,2021-08-13,360.95,338.8,461,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10211.149999999989,-6.136584014406421,2
+VEDL,2021-08-11,2021-08-18,146.05,132.25,1140,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15732.000000000013,-9.4488188976378,7
+TATASTEEL,2021-07-14,2021-08-20,118.1,130.9,1327,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,16985.600000000017,10.838272650296377,37
+INOXWIND,2021-08-09,2021-08-20,33.02,29.28,5182,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-19380.68000000001,-11.326468806783774,11
+JSWENERGY,2021-06-17,2021-08-23,161.05,225.1,933,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,59758.64999999999,39.77025768394906,67
+KPITTECH,2021-07-16,2021-09-16,266.45,325.2,598,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,35132.5,22.04916494651905,62
+OFSS,2021-07-13,2021-09-20,3551.5,4196.5,43,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,27735.0,18.161340278755446,69
+ADANIENSOL,2021-09-20,2021-09-21,1729.35,1642.9,103,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8904.34999999998,-4.998988059097343,1
+APOLLOHOSP,2021-08-20,2021-09-24,4746.5,4731.8,35,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-514.4999999999936,-0.3097018855999112,35
+WIPRO,2021-08-23,2021-09-27,300.5,312.55,553,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,6663.650000000006,4.009983361064906,35
+PERSISTENT,2021-05-26,2021-09-28,1257.5,1755.7,120,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,59784.00000000001,39.61829025844932,125
+COFORGE,2021-08-13,2021-09-28,962.5,1043.0,177,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,14248.5,8.363636363636374,46
+TECHM,2021-08-20,2021-09-28,1312.5,1326.7,127,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,1803.4000000000058,1.0819047619047728,39
+MPHASIS,2021-06-18,2021-10-01,1888.5,2836.9,77,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,73026.8,50.21975112523167,105
+PRESTIGE,2021-09-24,2021-10-14,459.1,453.55,407,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2258.8500000000045,-1.2088869527336121,20
+OIL,2021-09-28,2021-10-18,155.5,157.05,1163,dropped out of top 20 rank (now #21 of 95),1802.6500000000133,0.9967845659164087,20
+OBEROIRLTY,2021-09-27,2021-10-20,948.8,882.2,194,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12920.399999999983,-7.019392917369305,23
+TATAELXSI,2021-08-18,2021-10-21,4722.2,5911.1,36,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,42800.40000000002,25.176824361526418,64
+DLF,2021-09-28,2021-10-21,410.05,407.1,441,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1300.949999999995,-0.7194244604316502,23
+PERSISTENT,2021-10-18,2021-10-22,2064.25,1935.95,92,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11803.599999999995,-6.215332445198007,4
+INDUSTOWER,2021-09-21,2021-10-25,261.05,278.1,688,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,11730.400000000009,6.531315839877427,34
+TATAELXSI,2021-10-22,2021-10-25,6032.3,5809.2,29,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6469.900000000011,-3.6984234868955523,3
+JSWENERGY,2021-09-16,2021-10-27,311.35,366.55,571,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,31519.199999999993,17.72924361650874,41
+INDHOTEL,2021-09-28,2021-10-28,181.65,193.25,995,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,11541.999999999995,6.385906963941634,30
+GODREJPROP,2021-10-01,2021-10-28,2233.3,2270.45,82,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,3046.29999999997,1.6634576635472076,27
+GMRAIRPORT,2021-10-14,2021-10-28,43.4,39.75,4395,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-16041.749999999995,-8.41013824884792,14
+OBEROIRLTY,2021-10-27,2021-10-28,931.05,891.75,194,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7624.199999999992,-4.221040760431771,1
+MPHASIS,2021-10-28,2021-10-29,3070.6,3037.1,56,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1876.0,-1.0909919885364383,1
+GODFRYPHLP,2021-10-28,2021-11-01,457.0,423.0,382,dropped out of top 20 rank (now #25 of 44),-12988.0,-7.4398249452954035,4
+LTM,2021-10-28,2021-11-09,6689.35,6839.65,26,dropped out of top 20 rank (now #21 of 68),3907.799999999981,2.2468550756052474,12
+GODREJPROP,2021-11-01,2021-11-11,2345.3,2292.8,74,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3885.0,-2.2385195923762424,10
+INDIANB,2021-10-21,2021-11-12,166.3,161.3,1088,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5440.0,-3.0066145520144305,22
+GMRAIRPORT,2021-10-29,2021-11-15,40.55,40.5,4271,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-213.54999999998785,-0.12330456226880004,17
+BANKBARODA,2021-10-21,2021-11-16,82.25,83.5,2201,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,2751.25,1.5197568389057725,26
+ADANIENSOL,2021-10-25,2021-11-17,1869.9,1857.5,95,dropped out of top 20 rank (now #25 of 65),-1178.0000000000086,-0.6631370661532743,23
+PRESTIGE,2021-11-09,2021-11-17,514.85,466.25,352,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-17107.200000000008,-9.439642614353694,8
+OBEROIRLTY,2021-11-17,2021-11-18,957.35,921.5,182,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6524.700000000004,-3.744711965320935,1
+TMPV,2021-10-20,2021-11-22,335.25,334.7,549,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-301.95000000000624,-0.16405667412379143,33
+PGEL,2021-10-28,2021-11-22,49.3,49.4,3545,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,354.50000000000506,0.20283975659229903,25
+TATAELXSI,2021-11-11,2021-11-22,6591.8,6029.8,27,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15174.0,-8.525744106313905,11
+INDHOTEL,2021-11-12,2021-11-22,214.3,201.95,833,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10287.55000000002,-5.762949136724227,10
+PHOENIXLTD,2021-11-15,2021-11-22,560.6,503.0,315,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-18144.000000000007,-10.274705672493756,7
+INDIGO,2021-11-16,2021-11-22,2364.4,2162.8,74,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-14918.399999999994,-8.526476061580102,6
+TECHM,2021-11-22,2021-11-24,1448.5,1445.4,113,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-350.2999999999897,-0.21401449775629855,2
+COFORGE,2021-11-22,2021-11-24,1085.5,1075.5,151,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1510.0,-0.9212344541685846,2
+PERSISTENT,2021-10-25,2021-11-25,1979.85,2032.15,90,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,4707.000000000016,2.6416142637068596,31
+BLUESTARCO,2021-11-22,2021-11-25,522.3,492.7,313,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9264.79999999999,-5.66724104920543,3
+INDHOTEL,2021-11-24,2021-11-25,206.15,205.55,805,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-482.99999999999545,-0.2910502061605591,1
+IEX,2021-11-17,2021-11-26,272.2,250.95,643,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13663.75,-7.806759735488611,9
+TVSMOTOR,2021-11-22,2021-11-26,709.85,676.8,230,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7601.5000000000155,-4.6559132211030585,4
+TIINDIA,2021-11-22,2021-11-26,1719.35,1588.3,95,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12449.749999999996,-7.6220664786111,4
+PHOENIXLTD,2021-11-24,2021-11-26,517.7,484.2,320,closed below 200 EMA,-10720.000000000018,-6.4709291095229045,2
+INDUSTOWER,2021-11-25,2021-11-26,286.05,268.6,578,closed below 200 EMA,-10086.099999999993,-6.100332109771012,1
+KEI,2021-11-22,2021-11-29,1032.6,1000.35,158,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5095.499999999982,-3.123184195235318,7
+PGEL,2021-11-25,2021-11-29,59.25,52.35,2791,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-19257.899999999998,-11.64556962025316,4
+ADANIGREEN,2021-11-25,2021-11-30,1405.05,1295.4,117,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12829.049999999985,-7.8039927404718545,5
+ADANIENSOL,2021-11-26,2021-11-30,1993.85,1799.5,79,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15353.649999999992,-9.747473480953929,4
+BHARTIARTL,2021-11-26,2021-11-30,738.75,728.25,215,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2257.5,-1.4213197969543123,4
+VEDL,2021-11-26,2021-12-03,160.25,152.25,991,dropped out of top 20 rank (now #27 of 30),-7928.0,-4.99219968798752,7
+TORNTPHARM,2021-11-29,2021-12-06,1518.65,1468.45,101,closed below 200 EMA,-5070.200000000004,-3.30556744477003,7
+APOLLOHOSP,2021-11-26,2021-12-09,5687.6,5232.8,27,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12279.600000000006,-7.996342921443144,13
+KEI,2021-11-30,2021-12-13,1104.9,1088.7,140,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2268.0000000000064,-1.4661960358403503,13
+BAJAJHLDNG,2021-11-30,2021-12-14,5037.8,5487.9,30,dropped out of top 20 rank (now #21 of 50),13502.999999999984,8.93445551629679,14
+PRESTIGE,2021-12-13,2021-12-15,460.6,450.1,357,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3748.5,-2.2796352583586588,2
+INDHOTEL,2021-12-09,2021-12-16,203.9,195.05,803,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7106.549999999996,-4.340362923001473,7
+PHOENIXLTD,2021-12-15,2021-12-16,513.9,506.3,322,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2447.199999999989,-1.4788869429850138,1
+GMRAIRPORT,2021-12-06,2021-12-17,41.85,41.45,3804,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1521.5999999999947,-0.9557945041815952,11
+PRESTIGE,2021-12-16,2021-12-17,455.3,450.85,361,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1606.449999999996,-0.9773775532615825,1
+DLF,2021-12-16,2021-12-17,405.15,390.2,405,closed below 200 EMA,-6054.749999999995,-3.689991361224232,1
+MPHASIS,2021-12-17,2021-12-20,3063.2,2834.274671099007,52,stop,-11904.117102851636,-7.473404573680886,3
+KPITTECH,2021-11-18,2021-12-20,449.45,456.75,379,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,2766.7000000000044,1.6242073645566846,32
+BSE,2021-11-29,2021-12-20,170.0,212.5,908,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,38590.0,25.0,21
+TECHM,2021-12-14,2021-12-20,1545.5,1502.8,109,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4654.300000000005,-2.76285991588483,6
+PHOENIXLTD,2021-12-17,2021-12-20,510.35,505.9,315,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1401.7500000000143,-0.8719506221220863,3
+BLUESTARCO,2021-12-20,2021-12-21,503.4,489.4,310,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4340.0,-2.7810885975367516,1
+POWERGRID,2021-11-26,2021-12-22,147.95,147.6,1073,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-375.54999999999393,-0.2365664075701157,26
+TORNTPHARM,2021-12-20,2021-12-24,1533.9,1523.1,101,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1090.8000000000184,-0.7040876197926926,4
+APLAPOLLO,2021-12-20,2021-12-27,1017.15,991.2,153,dropped out of top 20 rank (now #23 of 32),-3970.3499999999894,-2.5512461288895394,7
+SIEMENS,2021-12-20,2021-12-30,1794.2,1793.75,87,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-39.150000000003956,-0.025080815962552627,10
+PERSISTENT,2021-12-03,2022-01-06,2168.1,2267.1,74,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,7326.0,4.566210045662111,34
+INFY,2021-12-20,2022-01-06,1760.8,1779.3,88,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,1628.0,1.0506587914584253,17
+TECHM,2021-12-22,2022-01-06,1561.9,1592.8,102,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,3151.799999999986,1.9783596901209899,15
+TATAELXSI,2022-01-06,2022-01-07,5873.55,5799.55,28,closed below 200 EMA,-2072.0,-1.2598854185288277,1
+LTM,2021-12-24,2022-01-10,7166.55,7103.55,22,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1386.0,-0.8790840781129017,17
+COFORGE,2021-12-30,2022-01-10,1172.0,1116.0,143,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8008.0,-4.778156996587035,11
+GMRAIRPORT,2021-12-27,2022-01-11,46.15,44.85,3553,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4618.89999999999,-2.8169014084507005,15
+PRESTIGE,2022-01-10,2022-01-11,464.75,461.7,369,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1125.4500000000041,-0.6562668101129709,1
+WIPRO,2021-12-17,2022-01-12,320.55,330.4,501,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,4934.849999999983,3.0728435501481632,26
+LTM,2022-01-11,2022-01-13,7174.15,7132.6,23,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-955.6499999999833,-0.5791626882627132,2
+HCLTECH,2022-01-07,2022-01-17,1290.55,1258.75,131,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4165.799999999994,-2.4640657084188833,10
+TECHM,2022-01-10,2022-01-18,1615.7,1562.9,106,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5596.799999999996,-3.2679334034783625,8
+TCS,2022-01-06,2022-01-20,3807.45,3826.55,44,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,840.400000000016,0.5016480846760984,14
+INFY,2022-01-11,2022-01-20,1816.3,1785.1,94,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2932.8000000000043,-1.717777900126638,9
+PGEL,2021-11-30,2022-01-21,53.55,75.35,2896,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,63132.79999999999,40.709617180205406,52
+NBCC,2022-01-17,2022-01-21,35.07,31.93,4978,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15630.920000000004,-8.953521528371834,4
+SRF,2022-01-18,2022-01-21,2615.15,2476.8,65,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8992.749999999995,-5.290327514674109,3
+KPITTECH,2021-12-21,2022-01-24,481.5,631.15,325,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,48636.24999999999,31.079958463136027,34
+PRESTIGE,2022-01-12,2022-01-24,471.15,480.75,363,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,3484.8000000000084,2.0375676536135146,12
+KEI,2022-01-21,2022-01-24,1165.8,1108.95,142,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8072.699999999987,-4.876479670612444,3
+INDIGO,2022-01-21,2022-01-24,2084.35,1992.2,79,closed below 200 EMA,-7279.849999999989,-4.421042531244746,3
+PIDILITIND,2022-01-24,2022-01-25,1320.2,1275.6168800000003,120,stop,-5349.974399999974,-3.3769974246326107,1
+KPITTECH,2022-01-25,2022-01-27,648.4,633.05,248,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3806.8000000000056,-2.3673658235657036,2
+POWERGRID,2022-01-21,2022-02-04,157.75,153.7,1049,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4248.450000000012,-2.5673534072900184,14
+SUZLON,2022-01-06,2022-02-07,9.3,10.2,18029,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,16226.099999999975,9.677419354838701,32
+HAL,2022-01-20,2022-02-08,715.55,689.0,238,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6318.899999999989,-3.7104325344140765,19
+ADANIENSOL,2022-01-24,2022-02-08,2035.9,1968.3,78,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5272.80000000001,-3.3203988408075147,15
+POWERGRID,2022-02-07,2022-02-08,156.7,154.0,1050,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2834.999999999988,-1.723037651563486,1
+ONGC,2022-01-24,2022-02-09,149.8,148.2,1063,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1700.8000000000243,-1.0680907877169687,16
+BDL,2022-01-21,2022-02-11,229.55,226.1,721,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2487.450000000012,-1.5029405358309766,21
+INDHOTEL,2022-02-08,2022-02-11,210.85,206.6,768,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3264.0,-2.015650936684843,3
+HAL,2022-02-09,2022-02-11,707.25,690.0,231,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3984.75,-2.4390243902439046,2
+TATAELXSI,2022-01-13,2022-02-14,6401.75,6911.35,26,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,13249.60000000001,7.960323349084231,32
+MARUTI,2022-02-08,2022-02-14,8599.45,8366.4,18,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4194.90000000002,-2.7100570385315437,6
+ADANIENSOL,2022-02-11,2022-02-14,2016.05,1915.25,79,closed below 200 EMA,-7963.199999999996,-4.999875995139003,3
+ONGC,2022-02-11,2022-02-15,151.95,141.74724655233155,1060,stop,-10814.918654528548,-6.714546526928888,4
+OIL,2022-02-14,2022-02-15,150.5,149.8,1023,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-716.0999999999883,-0.46511627906975495,1
+BDL,2022-02-14,2022-02-16,231.9,230.65,664,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-830.0,-0.5390254420008622,2
+BANKBARODA,2022-01-27,2022-02-18,89.8,91.55,1799,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,3148.25,1.948775055679297,22
+NATIONALUM,2022-02-11,2022-02-18,119.94,112.74,1343,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9669.600000000004,-6.003001500750383,7
+INDIGO,2022-02-08,2022-02-21,2182.6,2086.55,74,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7107.69999999998,-4.400714743883427,13
+ONGC,2022-02-16,2022-02-21,152.35,147.65,1026,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4822.199999999988,-3.085001640958307,5
+BDL,2022-02-18,2022-02-21,236.35,229.85,658,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4277.0,-2.750158662999791,3
+ADANIPOWER,2022-02-18,2022-02-21,26.3,24.05,5916,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13311.0,-8.55513307984791,3
+BSE,2022-02-04,2022-02-22,246.5,229.5,664,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11288.0,-6.896551724137934,18
+JSWENERGY,2022-02-21,2022-02-22,339.35,327.65,447,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5229.900000000021,-3.4477677913658633,1
+TVSMOTOR,2022-02-22,2022-02-23,663.5,651.45,227,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2735.3499999999894,-1.816126601356438,1
+ADANIGREEN,2022-01-24,2022-02-24,1837.85,1849.75,86,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,1023.4000000000078,0.6474957151018979,31
+BLUESTARCO,2022-02-14,2022-02-24,501.9,507.8,306,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,1805.4000000000106,1.1755329746961696,10
+MARUTI,2022-02-15,2022-02-24,8622.7,8210.15,18,closed below 200 EMA,-7425.90000000002,-4.784464262933897,9
+SIEMENS,2022-02-15,2022-02-24,1844.55,1741.25,84,closed below 200 EMA,-8677.199999999997,-5.600281911577342,9
+CHOLAFIN,2022-02-21,2022-02-24,674.15,647.85,225,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5917.49999999999,-3.9012089297634,3
+EICHERMOT,2022-02-21,2022-02-24,2699.0,2617.15,56,closed below 200 EMA,-4583.599999999995,-3.0326046683956998,3
+VOLTAS,2022-02-21,2022-02-24,1243.65,1196.9,122,closed below 200 EMA,-5703.5,-3.759096208740398,3
+CUMMINSIND,2022-02-22,2022-02-24,950.25,927.7,159,closed below 200 EMA,-3585.4499999999925,-2.373059721126014,2
+ADANIENSOL,2022-02-23,2022-02-24,2060.15,1957.3,73,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7508.05000000001,-4.992354925612219,1
+ADANIGREEN,2022-02-25,2022-02-28,1923.5,1843.4,75,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6007.499999999993,-4.164283857551332,3
+CROMPTON,2022-02-28,2022-03-02,428.5,407.45,340,closed below 200 EMA,-7157.000000000004,-4.912485414235713,2
+VOLTAS,2022-02-25,2022-03-03,1252.3,1197.15,115,closed below 200 EMA,-6342.2499999999845,-4.403896829833098,6
+JSWENERGY,2022-02-28,2022-03-03,340.2,337.35,428,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1219.7999999999854,-0.8377425044091558,3
+BLUESTARCO,2022-02-25,2022-03-04,528.5,513.95,273,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3972.149999999988,-2.7530747398296973,7
+TITAN,2022-02-28,2022-03-04,2546.55,2441.0,57,closed below 200 EMA,-6016.35000000001,-4.144823388506024,4
+NATIONALUM,2022-02-28,2022-03-14,118.77,115.29,1227,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4269.959999999987,-2.9300328365748807,14
+HINDALCO,2022-02-25,2022-03-15,533.9,559.75,270,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,6979.500000000006,4.841730661172505,18
+VEDL,2022-02-28,2022-03-15,173.0,162.1,842,closed below 200 EMA,-9177.800000000005,-6.300578034682081,15
+TATASTEEL,2022-03-14,2022-03-15,123.23,117.02,1177,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7309.170000000009,-5.039357299358926,1
+CIPLA,2022-03-14,2022-03-23,1048.65,1014.45,138,dropped out of top 20 rank (now #21 of 51),-4719.600000000006,-3.261336003432991,9
+BSE,2022-03-16,2022-03-28,329.5,294.5,441,dropped out of top 20 rank (now #23 of 47),-15435.0,-10.62215477996965,12
+HINDALCO,2022-03-16,2022-03-31,572.7,569.5,253,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-809.6000000000115,-0.5587567661952231,15
+COALINDIA,2022-03-28,2022-04-12,178.05,173.15,847,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4150.300000000005,-2.7520359449592857,15
+TATAELXSI,2022-03-14,2022-04-18,7169.65,7815.95,20,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,12926.000000000004,9.014387034234584,35
+BANKBARODA,2022-03-16,2022-04-18,93.75,99.55,1550,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,8989.999999999996,6.186666666666674,33
+JINDALSTEL,2022-03-04,2022-04-25,435.75,526.2,331,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,29938.950000000015,20.75731497418245,52
+VEDL,2022-03-23,2022-04-25,186.7,183.55,791,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2491.649999999982,-1.6871987145152478,33
+COALINDIA,2022-04-18,2022-04-25,176.35,175.45,934,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-840.6000000000054,-0.5103487383045113,7
+HAL,2022-03-14,2022-04-29,690.6,797.55,210,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,22459.499999999985,15.486533449174612,46
+BDL,2022-03-14,2022-05-02,250.95,357.4,578,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,61528.09999999999,42.41880852759514,49
+MAZDOCK,2022-04-18,2022-05-02,165.65,146.7,994,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-18836.300000000017,-11.439782674313326,14
+BEL,2022-04-25,2022-05-02,81.95,79.4,1962,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5003.099999999994,-3.1116534472239166,7
+JINDALSTEL,2022-04-29,2022-05-02,540.05,532.85,297,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2138.3999999999796,-1.333209887973319,3
+ADANIENT,2022-03-31,2022-05-04,1953.3,2185.0,76,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,17609.200000000004,11.86197716684585,34
+ADANIPORTS,2022-04-25,2022-05-04,859.55,812.8,187,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8742.25,-5.4388924437205555,9
+APLAPOLLO,2022-05-02,2022-05-04,1029.0,977.75,154,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7892.5,-4.980563654033043,2
+ADANIGREEN,2022-04-25,2022-05-10,2824.0,2502.17776546615,56,stop,-18022.045133895597,-11.39597147782755,15
+ADANIENSOL,2022-02-25,2022-05-10,2032.85,2482.55,70,closed below 200 EMA,31479.00000000002,22.121651868067005,74
+ADANIPOWER,2022-04-12,2022-05-11,46.15,51.05,3519,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,17243.099999999995,10.617551462621888,29
+NTPC,2022-05-02,2022-05-11,157.5,152.55,1011,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5004.449999999989,-3.142857142857136,9
+COLPAL,2022-05-10,2022-05-11,1589.9,1576.0,95,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1320.5000000000086,-0.8742688219384953,1
+PHOENIXLTD,2022-05-11,2022-05-12,527.55,516.5,284,closed below 200 EMA,-3138.199999999987,-2.0945881906928143,1
+POWERGRID,2022-05-02,2022-05-18,170.1,167.35,936,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2574.0,-1.6166960611405101,16
+VBL,2022-05-02,2022-05-19,147.3,141.5,1081,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6269.800000000012,-3.9375424304141315,17
+PATANJALI,2022-05-18,2022-05-24,396.0,366.4,384,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11366.400000000009,-7.4747474747474785,6
+BDL,2022-05-24,2022-05-25,365.95,353.75,417,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5087.399999999995,-3.333788768957502,1
+BAJAJ-AUTO,2022-05-17,2022-06-01,3650.5,3628.0,41,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-922.5,-0.6163539241199834,15
+ADANIPOWER,2022-05-13,2022-06-02,50.95,59.05,2951,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,23903.099999999984,15.897939156035324,20
+EICHERMOT,2022-05-17,2022-06-06,2706.7,2653.1,56,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3001.599999999995,-1.9802711789263627,20
+ADANIPOWER,2022-06-06,2022-06-07,59.65,58.3,2524,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3407.4000000000037,-2.2632020117351215,1
+ITC,2022-05-25,2022-06-08,224.85,220.95,671,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2616.9000000000037,-1.7344896597731863,14
+ASHOKLEY,2022-06-02,2022-06-13,69.3,63.45,2197,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12852.449999999988,-8.441558441558438,11
+COALINDIA,2022-06-08,2022-06-15,184.0,176.9,812,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5765.199999999995,-3.8586956521739046,7
+HAL,2022-05-19,2022-06-16,842.9,898.55,179,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,9961.349999999997,6.6022066674575886,28
+EICHERMOT,2022-06-13,2022-06-16,2700.8,2652.5,54,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2608.20000000001,-1.7883590047393483,3
+BEL,2022-06-15,2022-06-16,80.05,77.45,1848,closed below 200 EMA,-4804.799999999989,-3.2479700187382776,1
+OIL,2022-06-07,2022-06-17,190.85,169.75,791,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-16690.099999999995,-11.055802986638719,10
+BDL,2022-06-01,2022-06-20,406.65,350.53035681942754,375,stop,-21044.866192714664,-13.800477850872362,19
+HAL,2022-06-17,2022-06-20,949.35,853.4126504867236,152,stop,-14582.47712601802,-10.10558271588734,3
+VBL,2022-06-16,2022-06-21,155.85,147.75,935,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7573.4999999999945,-5.197305101058703,5
+TORNTPHARM,2022-06-21,2022-07-07,1411.8,1474.25,100,dropped out of top 20 rank (now #23 of 27),6245.000000000005,4.42343108088965,16
+ASHOKLEY,2022-06-23,2022-07-14,67.35,68.4,2104,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,2209.200000000024,1.5590200445434466,21
+PHOENIXLTD,2022-06-23,2022-07-20,569.7,601.8,248,dropped out of top 20 rank (now #22 of 43),7960.799999999977,5.634544497103722,27
+BAJAJ-AUTO,2022-07-20,2022-07-27,3903.0,3788.0,38,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4370.0,-2.9464514476044035,7
+BRITANNIA,2022-07-20,2022-08-03,3828.3,3770.0,38,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2215.400000000007,-1.5228691586343879,14
+VBL,2022-06-22,2022-08-22,149.7,183.95,945,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,32366.25,22.879091516366067,61
+TIINDIA,2022-07-07,2022-08-22,2010.1,2112.35,72,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,7362.0,5.086811601412866,46
+BDL,2022-08-03,2022-08-22,425.75,399.15,362,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9629.200000000008,-6.247798003523197,19
+HINDUNILVR,2022-07-14,2022-08-23,2497.8,2592.75,58,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,5507.099999999989,3.801345183761695,40
+BDL,2022-08-23,2022-08-24,405.6,402.7,385,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1116.5000000000132,-0.7149901380670731,1
+CGPOWER,2022-07-27,2022-08-26,220.0,227.1,676,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,4799.599999999996,3.227272727272723,30
+PIIND,2022-08-22,2022-09-06,3379.0,3265.15,45,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5123.249999999996,-3.369340041432378,15
+ADANIENSOL,2022-07-20,2022-09-21,3018.75,3865.75,49,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,41503.0,28.057971014492743,63
+BEL,2022-07-20,2022-09-23,84.95,106.65,1753,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,38040.100000000006,25.544437904649797,65
+BANKBARODA,2022-08-26,2022-09-23,113.0,116.95,1407,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,5557.650000000004,3.4955752212389335,28
+EICHERMOT,2022-06-23,2022-09-26,2819.05,3515.55,50,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,34825.0,24.70690480835742,95
+HAL,2022-08-22,2022-09-26,1114.9,1169.8,138,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,7576.199999999981,4.924208449188261,35
+BDL,2022-09-21,2022-09-26,460.5,425.2,380,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13414.000000000004,-7.6655808903365985,5
+VBL,2022-08-24,2022-09-27,206.2,207.7,759,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,1138.5,0.7274490785645016,34
+ITC,2022-07-20,2022-09-28,245.9,268.0,605,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,13370.499999999996,8.987393249288322,70
+CGPOWER,2022-09-26,2022-09-28,246.7,233.6,673,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8816.299999999996,-5.310093230644508,2
+BAJAJHLDNG,2022-09-26,2022-09-29,6760.85,6302.45,24,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11001.600000000013,-6.780212547238895,3
+AMBUJACEM,2022-09-23,2022-10-03,539.35,488.65,322,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-16325.400000000014,-9.400203949198115,10
+HINDUNILVR,2022-09-26,2022-10-03,2660.55,2622.5,62,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2359.1000000000113,-1.4301554189923182,7
+EICHERMOT,2022-09-27,2022-10-03,3570.55,3463.35,46,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4931.200000000013,-3.0023385752895315,6
+ITC,2022-09-30,2022-10-03,273.95,267.5,617,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3979.649999999993,-2.3544442416499334,3
+MARICO,2022-09-30,2022-10-03,537.85,529.5,314,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2621.900000000007,-1.5524774565399357,3
+NESTLEIND,2022-10-03,2022-10-07,949.6,966.0,177,dropped out of top 20 rank (now #21 of 36),2902.799999999996,1.7270429654591357,4
+CIPLA,2022-10-03,2022-10-07,1130.75,1130.5,149,dropped out of top 20 rank (now #25 of 36),-37.25,-0.022109219544552694,4
+360ONE,2022-10-03,2022-10-10,468.65,445.6,359,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8274.949999999984,-4.9183825882854855,7
+BRITANNIA,2022-09-30,2022-10-11,3843.05,3727.9,44,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5066.600000000004,-2.9963180286491253,11
+HAL,2022-10-07,2022-10-11,1229.85,1184.4,144,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6544.799999999974,-3.695572630808619,4
+AMBUJACEM,2022-10-10,2022-10-11,522.65,500.2,337,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7565.649999999996,-4.295417583468863,1
+BDL,2022-10-07,2022-10-12,458.8,441.1,387,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6849.899999999996,-3.857890148212728,5
+UNOMINDA,2022-10-03,2022-10-13,556.4,554.25,303,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-651.4499999999931,-0.3864126527677869,10
+TIINDIA,2022-09-23,2022-10-14,2772.35,2643.9,62,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7963.899999999989,-4.633253377098844,21
+MAXHEALTH,2022-10-13,2022-10-18,429.15,407.45,407,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8831.899999999996,-5.056507048817426,5
+BAJAJHLDNG,2022-10-03,2022-10-20,6507.25,6467.45,25,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-995.0000000000045,-0.6116254946405997,17
+CGPOWER,2022-10-11,2022-10-24,251.5,255.95,678,dropped out of top 20 rank (now #27 of 47),3017.099999999992,1.7693836978131205,13
+AMBUJACEM,2022-10-14,2022-10-25,501.85,513.1,345,dropped out of top 20 rank (now #24 of 46),3881.25,2.241705688950879,11
+IDFCFIRSTB,2022-10-11,2022-10-31,53.1,56.1,3214,dropped out of top 20 rank (now #27 of 55),9642.0,5.649717514124286,20
+HAL,2022-10-25,2022-11-10,1251.9,1215.55,143,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5198.050000000019,-2.9035865484463685,16
+EICHERMOT,2022-10-31,2022-11-11,3850.45,3519.65,46,closed below 200 EMA,-15216.799999999988,-8.591203625550259,11
+BDL,2022-10-20,2022-11-14,460.8,473.7,383,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,4940.699999999992,2.799479166666652,25
+BEL,2022-10-24,2022-11-14,104.8,106.6,1697,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,3054.5999999999954,1.717557251908386,21
+COCHINSHIP,2022-09-06,2022-12-07,186.6,312.7,887,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,111850.7,67.57770632368702,92
+INDIANB,2022-11-11,2022-12-09,249.0,260.3,779,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,8802.700000000008,4.53815261044177,28
+RVNL,2022-11-14,2022-12-09,54.55,67.35,3614,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,46259.19999999999,23.46471127406049,25
+MAZDOCK,2022-08-22,2022-12-16,152.05,416.2,1017,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,268640.55,173.72574810917462,116
+BANKBARODA,2022-10-18,2022-12-21,124.6,159.15,1402,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,48439.10000000001,27.728731942215102,64
+BANKINDIA,2022-11-10,2022-12-21,68.87,80.93,2774,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,33454.44000000001,17.51125308552346,41
+UNIONBANK,2022-11-14,2022-12-21,57.45,72.91,3432,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,53058.71999999998,26.910356832027848,37
+NMDC,2022-12-07,2022-12-21,33.8,33.5,6515,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1954.4999999999816,-0.8875739644970349,14
+PNB,2022-12-09,2022-12-21,53.13,50.19,4178,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12283.32000000002,-5.5335968379446765,12
+GODFRYPHLP,2022-10-11,2022-12-22,437.0,606.0,390,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,65910.0,38.672768878718536,72
+INDIANB,2022-12-16,2022-12-22,280.8,267.75,773,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10087.650000000009,-4.647435897435903,6
+RVNL,2022-12-16,2022-12-22,70.15,66.45,3097,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11458.900000000009,-5.274411974340698,6
+MAHABANK,2022-12-21,2022-12-22,29.95,28.85,7069,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7775.899999999985,-3.6727879799666074,1
+JINDALSTEL,2022-12-21,2022-12-22,547.6,539.85,386,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2991.5,-1.415266617969324,1
+IRFC,2022-12-21,2022-12-22,32.3,31.25,6555,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6882.749999999982,-3.2507739938080427,1
+ABCAPITAL,2022-12-21,2022-12-22,148.6,147.85,1424,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1068.0,-0.5047106325706596,1
+VBL,2022-12-09,2022-12-23,282.05,257.5,787,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-19320.85000000001,-8.704130473320337,14
+HINDZINC,2022-12-21,2022-12-23,323.35,313.15,654,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6670.80000000003,-3.154476573372522,2
+JSWSTEEL,2022-12-22,2022-12-23,737.55,727.85,280,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2715.999999999981,-1.3151650735543252,1
+CUMMINSIND,2022-12-22,2022-12-23,1450.15,1388.05,142,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8818.200000000019,-4.282315622521815,1
+PIIND,2022-12-22,2022-12-23,3520.9,3459.6,58,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3555.4000000000106,-1.7410321224686887,1
+RECLTD,2022-12-22,2022-12-23,112.5,108.75,1837,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6888.75,-3.3333333333333326,1
+BRITANNIA,2022-12-22,2022-12-23,4391.45,4331.9,47,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2798.8500000000085,-1.3560441312095106,1
+AXISBANK,2022-12-22,2022-12-23,919.55,906.6,224,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2900.7999999999847,-1.4082975368386652,1
+TIINDIA,2022-12-22,2022-12-23,2925.75,2778.5,70,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10307.5,-5.0328975476373605,1
+NESTLEIND,2022-12-23,2022-12-26,1006.6,994.9,199,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2328.3000000000093,-1.16232863103517,3
+CIPLA,2022-12-23,2022-12-26,1119.15,1096.5,179,closed below 200 EMA,-4054.3500000000163,-2.023857391770545,3
+APOLLOHOSP,2022-12-23,2022-12-27,4700.15,4643.8,42,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2366.699999999977,-1.1988979075135742,4
+VBL,2022-12-26,2022-12-27,270.55,263.8,740,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4995.0,-2.494917760118276,1
+INDIANB,2022-12-26,2022-12-28,276.1,266.75,725,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6778.750000000016,-3.3864541832669404,2
+PIIND,2022-12-26,2022-12-28,3482.95,3452.7,57,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1724.25,-0.8685166310168135,2
+MARICO,2022-12-23,2022-12-29,515.55,515.4,389,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-58.349999999991155,-0.029095141111434852,6
+BRITANNIA,2022-12-26,2022-12-29,4375.35,4348.3,45,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1217.2500000000082,-0.6182362553852849,3
+ZYDUSLIFE,2022-12-23,2022-12-30,420.3,419.95,478,dropped out of top 20 rank (now #26 of 26),-167.30000000001087,-0.08327385201047921,7
+VBL,2022-12-29,2022-12-30,271.45,264.5,735,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5108.249999999992,-2.5603241849327607,1
+HDFCBANK,2022-12-26,2023-01-04,814.7,805.0,245,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2376.500000000011,-1.1906223149625639,9
+JSWSTEEL,2022-12-28,2023-01-04,761.7,736.3,260,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6604.000000000024,-3.3346461861625376,7
+AXISBANK,2022-12-26,2023-01-05,928.7,949.55,215,dropped out of top 20 rank (now #21 of 37),4482.74999999998,2.245073759017968,10
+BANKBARODA,2022-12-29,2023-01-10,166.45,162.1,1199,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5215.649999999993,-2.6133974166416274,12
+PNB,2022-12-30,2023-01-10,53.31,52.04,3732,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4739.640000000011,-2.3822922528606294,11
+MAHABANK,2023-01-05,2023-01-10,31.1,29.7,6503,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9104.200000000013,-4.501607717041811,5
+INDIANB,2023-01-04,2023-01-11,282.1,274.85,713,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5169.25,-2.570010634526765,7
+GODFRYPHLP,2023-01-10,2023-01-16,701.0,649.0,285,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-14820.0,-7.4179743223965815,6
+BANKBARODA,2023-01-16,2023-01-17,166.85,163.1,1204,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4515.0,-2.2475277195085352,1
+BANKINDIA,2022-12-30,2023-01-18,82.47,83.49,2412,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,2460.2399999999902,1.2368133866860642,19
+MAHABANK,2023-01-17,2023-01-23,32.0,30.9,6207,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6827.700000000009,-3.4375000000000044,6
+NMDC,2023-01-04,2023-01-24,34.25,35.05,5874,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,4699.199999999983,2.335766423357666,20
+PNB,2023-01-11,2023-01-24,53.26,52.42,3760,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3158.399999999986,-1.5771686068343893,13
+UNIONBANK,2023-01-18,2023-01-24,72.96,72.39,2741,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1562.3699999999812,-0.7812499999999889,6
+PFC,2023-01-10,2023-01-25,124.1,114.06080954778959,1612,stop,-16183.175008963173,-8.08959746350556,15
+RECLTD,2022-12-26,2023-01-25,114.0,120.5,1757,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,11420.5,5.701754385964919,30
+JINDALSTEL,2022-12-27,2023-01-27,575.95,588.15,346,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,4221.199999999976,2.118239430506108,31
+RVNL,2023-01-23,2023-01-27,76.15,72.9,2600,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8450.0,-4.267892317793831,4
+HDFCBANK,2023-01-24,2023-01-27,847.8,807.9,231,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9216.899999999994,-4.706298655343244,3
+INDIANB,2023-01-25,2023-01-27,278.9,269.55,698,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6526.2999999999765,-3.352456077447097,2
+HINDZINC,2022-12-27,2023-01-30,321.6,330.0,620,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,5207.999999999985,2.6119402985074647,34
+TCS,2023-01-27,2023-01-31,3411.05,3358.7,56,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2931.6000000000204,-1.5347180486946943,4
+RVNL,2023-01-31,2023-02-01,76.1,72.65,2517,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8683.64999999997,-4.533508541392894,1
+NHPC,2023-01-25,2023-02-02,43.7,41.75,4458,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8693.100000000013,-4.462242562929064,8
+JINDALSTEL,2023-02-01,2023-02-02,608.25,575.05,311,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10325.200000000013,-5.458281956432398,1
+TATASTEEL,2023-01-10,2023-02-06,112.62,111.26,1776,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2415.3599999999988,-1.2076007813887402,27
+INDIANB,2023-01-30,2023-02-07,283.4,274.45,674,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6032.299999999992,-3.1580804516584293,8
+HCLTECH,2023-01-24,2023-02-10,1137.85,1115.65,172,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3818.3999999999687,-1.9510480291778154,17
+COFORGE,2023-01-27,2023-02-13,859.0,809.0022908435606,222,stop,-11099.491432729556,-5.82045508223975,17
+GODREJCP,2023-02-02,2023-02-13,939.7,923.85,201,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3185.8500000000045,-1.686708523997027,11
+HDFCBANK,2023-02-06,2023-02-20,825.9,820.2,228,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1299.5999999999844,-0.6901561932437295,14
+BRITANNIA,2023-02-13,2023-02-20,4588.0,4453.8,40,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5367.999999999993,-2.9250217959895353,7
+CGPOWER,2023-01-24,2023-02-21,299.35,319.9,656,dropped out of top 20 rank (now #22 of 31),13480.79999999997,6.864873893435752,28
+TCS,2023-02-02,2023-02-21,3460.4,3451.0,54,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-507.6000000000049,-0.27164489654375457,19
+OIL,2023-02-20,2023-02-21,172.75,169.85,1087,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3152.300000000006,-1.6787264833574511,1
+BAJAJ-AUTO,2023-01-27,2023-02-27,3839.5,3620.297267744893,49,stop,-10740.933880500248,-5.709147864438258,31
+PERSISTENT,2023-01-27,2023-03-09,2288.5,2408.8,83,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,9984.900000000016,5.2567183744811175,41
+BDL,2023-02-21,2023-03-10,466.25,460.0,399,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2493.75,-1.3404825737265424,17
+BANKBARODA,2023-03-09,2023-03-10,153.5,150.0,1235,closed below 200 EMA,-4322.5,-2.28013029315961,1
+KPITTECH,2023-02-10,2023-03-13,855.45,792.7,221,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13867.75,-7.3353205915015485,31
+SUPREMEIND,2023-02-21,2023-03-13,2756.65,2666.5,67,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6040.050000000007,-3.2702737017757055,20
+ITC,2023-02-07,2023-03-14,307.75,313.1,613,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,3279.550000000014,1.7384240454914712,35
+OIL,2023-03-03,2023-03-14,170.95,166.45,1094,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4923.0,-2.632348639953208,11
+VBL,2023-02-21,2023-03-16,264.9,261.25,703,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2565.949999999984,-1.3778784446961012,23
+ITC,2023-03-16,2023-03-17,314.6,309.7,585,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2866.50000000002,-1.5575333757152032,1
+HAL,2023-02-20,2023-03-20,1293.6,1322.4,145,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,4176.000000000026,2.2263450834879572,28
+CUMMINSIND,2023-02-13,2023-03-22,1595.25,1612.6,117,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,2029.9499999999894,1.0876038238520458,37
+ABCAPITAL,2023-03-22,2023-03-24,156.15,144.05,1173,closed below 200 EMA,-14193.299999999994,-7.748959333973737,2
+MAXHEALTH,2023-03-14,2023-03-28,468.65,449.95,394,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7367.799999999996,-3.9901845727088436,14
+OIL,2023-03-28,2023-03-31,171.65,167.75,1057,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4122.300000000006,-2.272065249053312,3
+KPITTECH,2023-03-17,2023-04-03,869.2,777.8517904172784,212,stop,-19365.820431536995,-10.509458074404243,17
+ZYDUSLIFE,2023-03-14,2023-04-05,470.55,493.1,392,dropped out of top 20 rank (now #23 of 37),8839.600000000004,4.792264371480193,22
+BDL,2023-03-31,2023-04-19,494.35,485.7,369,dropped out of top 20 rank (now #23 of 62),-3191.8500000000126,-1.7497724284413985,19
+VBL,2023-03-24,2023-04-20,270.4,276.35,671,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,3992.4500000000307,2.2004437869822757,27
+GODREJCP,2023-03-20,2023-04-25,960.0,963.2,191,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,611.2000000000087,0.33333333333334103,36
+HAL,2023-04-05,2023-04-26,1360.9,1420.5,132,dropped out of top 20 rank (now #25 of 57),7867.199999999988,4.379454772576974,21
+VBL,2023-04-25,2023-05-02,287.45,283.0,647,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2879.149999999993,-1.548095320925369,7
+HDFCBANK,2023-04-05,2023-05-04,826.9,863.9,217,dropped out of top 20 rank (now #22 of 75),8029.0,4.474543475631876,29
+KPITTECH,2023-04-26,2023-05-08,905.5,883.15,206,dropped out of top 20 rank (now #26 of 71),-4604.100000000005,-2.4682495858641684,12
+BANKBARODA,2023-04-03,2023-05-09,151.35,159.4,1188,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,9563.400000000014,5.318797489263294,36
+INDIANB,2023-04-05,2023-05-09,276.45,283.3,650,closed below 200 EMA,4452.500000000015,2.4778440947730296,34
+PNB,2023-05-04,2023-05-09,50.38,47.45,3789,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11101.769999999999,-5.815799920603415,5
+SBIN,2023-04-20,2023-05-10,544.8,572.2,336,dropped out of top 20 rank (now #33 of 80),9206.40000000003,5.029368575624105,20
+ABCAPITAL,2023-04-05,2023-05-11,155.25,163.95,1158,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,10074.599999999988,5.603864734299502,36
+RVNL,2023-05-09,2023-05-12,128.25,120.4,1449,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11374.649999999992,-6.12085769980506,3
+COLPAL,2023-05-11,2023-05-12,1626.15,1627.7,114,dropped out of top 20 rank (now #28 of 69),176.69999999999482,0.09531716016357716,1
+NESTLEIND,2023-05-12,2023-05-17,1089.7,1086.6,170,dropped out of top 20 rank (now #21 of 73),-527.0000000000232,-0.28448196751400534,5
+PRESTIGE,2023-05-08,2023-05-18,491.75,479.2,387,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4856.850000000004,-2.552109811896286,10
+RVNL,2023-05-17,2023-05-19,121.85,116.2,1524,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8610.599999999988,-4.636848584324982,2
+GLENMARK,2023-05-02,2023-05-26,543.9,591.4,350,dropped out of top 20 rank (now #23 of 77),16625.0,8.73322301893731,24
+VBL,2023-05-10,2023-06-08,321.3,316.35,576,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2851.1999999999935,-1.540616246498594,29
+INDHOTEL,2023-05-19,2023-06-08,372.35,380.8,498,dropped out of top 20 rank (now #24 of 91),4208.099999999994,2.269370216194444,20
+SONACOMS,2023-05-12,2023-06-14,534.0,509.85,347,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8380.049999999992,-4.522471910112358,33
+KPITTECH,2023-05-26,2023-06-14,1006.8,1039.7,187,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,6152.3000000000175,3.2677791021056946,19
+RVNL,2023-06-08,2023-06-15,125.35,122.9,1525,dropped out of top 20 rank (now #21 of 97),-3736.2499999999827,-1.954527323494204,7
+BAJAJ-AUTO,2023-04-19,2023-06-16,4160.5,4527.0,44,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,16126.0,8.809037375315466,58
+CHOLAFIN,2023-05-09,2023-06-20,983.55,1121.9,189,dropped out of top 20 rank (now #21 of 97),26148.150000000027,14.066392150882034,42
+SBICARD,2023-05-18,2023-06-20,886.6,893.8,207,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,1490.399999999986,0.8120911346717774,33
+ITC,2023-04-05,2023-06-26,318.65,367.6,564,dropped out of top 20 rank (now #22 of 77),27607.800000000025,15.361682096343966,82
+BEL,2023-06-20,2023-06-27,125.15,118.4,1569,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10590.75,-5.393527766679984,7
+MAXHEALTH,2023-06-16,2023-06-28,594.4,603.3,326,dropped out of top 20 rank (now #35 of 85),2901.3999999999924,1.4973082099596136,12
+ASTRAL,2023-06-14,2023-07-04,1968.65,1924.4,96,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4248.0,-2.2477332181952137,20
+DIXON,2023-06-20,2023-07-05,4538.55,4206.1,43,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-14295.349999999991,-7.325026715580963,15
+RECLTD,2023-07-05,2023-07-14,166.5,160.3,1187,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7359.399999999987,-3.7237237237237153,9
+ANGELONE,2023-06-15,2023-07-17,156.3,159.9425980892319,1226,stop,4465.825257398287,2.330517011664668,32
+KEI,2023-05-09,2023-07-28,2069.95,2437.6,89,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,32720.85000000001,17.761298582091367,80
+HAL,2023-06-14,2023-08-02,1857.8,1869.9,102,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,1234.200000000014,0.6513079987081616,49
+BEL,2023-06-28,2023-08-02,120.75,125.35,1618,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,7442.799999999991,3.809523809523796,35
+SHRIRAMFIN,2023-06-26,2023-08-03,340.65,363.7,574,dropped out of top 20 rank (now #25 of 69),13230.700000000006,6.766475854983134,38
+GODREJPROP,2023-06-27,2023-08-03,1563.3,1573.0,124,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,1202.8000000000056,0.6204823130557147,37
+KALYANKJIL,2023-07-17,2023-08-10,181.0,181.5,1132,dropped out of top 20 rank (now #27 of 83),566.0,0.2762430939226457,24
+MAZDOCK,2023-06-08,2023-08-11,503.55,870.65,379,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,139130.9,72.90239300963162,64
+ETERNAL,2023-08-10,2023-08-16,94.25,91.9,2301,dropped out of top 20 rank (now #21 of 68),-5407.349999999987,-2.4933687002652416,6
+RBLBANK,2023-07-28,2023-08-18,234.1,215.8,924,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-16909.199999999983,-7.817172148654416,21
+AUROPHARMA,2023-08-03,2023-08-24,840.35,833.65,250,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1675.0000000000114,-0.7972868447670645,21
+MOTILALOFS,2023-08-11,2023-08-28,228.8,216.35,944,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11752.800000000016,-5.441433566433574,17
+MAZDOCK,2023-08-16,2023-08-29,967.85,909.2,221,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12961.649999999994,-6.059823319729296,13
+PFC,2023-07-04,2023-08-31,177.0,208.15,1114,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,34701.100000000006,17.598870056497184,58
+GODFRYPHLP,2023-08-03,2023-09-05,676.0,700.0,311,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,7464.0,3.5502958579881616,33
+POLYCAB,2023-08-02,2023-09-11,4588.05,5147.95,45,dropped out of top 20 rank (now #23 of 119),25195.499999999985,12.203441549242044,40
+BEL,2023-08-28,2023-09-12,134.9,134.15,1612,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1209.0,-0.555967383246847,15
+HAL,2023-08-29,2023-09-12,1948.7,1970.4,111,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,2408.7000000000053,1.1135628880792448,14
+KALYANKJIL,2023-09-11,2023-09-13,247.45,223.3,1033,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-24946.949999999975,-9.759547383309751,2
+SUPREMEIND,2023-08-18,2023-09-14,4352.55,4294.9,49,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2824.8500000000267,-1.3245109188866455,27
+HAL,2023-09-13,2023-09-15,1985.15,1973.8,120,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-1362.0000000000164,-0.5717452081706709,2
+ADANIPOWER,2023-09-12,2023-09-18,77.25,75.0,3152,dropped out of top 20 rank (now #22 of 110),-7092.0,-2.9126213592232997,6
+COFORGE,2023-09-05,2023-09-21,1122.5,1067.5,210,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11550.0,-4.899777282850781,16
+PHOENIXLTD,2023-09-12,2023-09-25,934.2,893.15,260,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10673.000000000018,-4.394134018411478,13
+IRFC,2023-08-24,2023-10-09,48.6,71.15,4496,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,101384.80000000002,46.399176954732525,46
+MAZDOCK,2023-08-31,2023-10-09,924.5,1036.7,238,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,26703.60000000001,12.1362898864251,39
+MAHABANK,2023-09-18,2023-10-09,48.15,45.3,4943,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-14087.550000000007,-5.919003115264799,21
+UNIONBANK,2023-09-21,2023-10-09,87.19,89.95,2667,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,7360.920000000014,3.165500630806295,18
+INDIANB,2023-09-25,2023-10-09,411.4,385.0,575,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15179.999999999987,-6.4171122994652325,14
+BANKBARODA,2023-10-09,2023-10-11,191.15,186.9,1236,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5253.0,-2.223384776353654,2
+RBLBANK,2023-10-09,2023-10-11,243.85,245.9,969,dropped out of top 20 rank (now #22 of 71),1986.450000000011,0.8406807463604782,2
+MAZDOCK,2023-10-11,2023-10-19,1077.15,1064.9,227,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2780.75,-1.1372603629949407,8
+RECLTD,2023-08-02,2023-10-23,196.3,278.3,1068,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,87576.0,41.772796739684146,82
+NMDC,2023-09-15,2023-10-23,45.7,46.1,5277,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,2110.7999999999925,0.8752735229759168,38
+IRFC,2023-10-11,2023-10-23,75.6,72.2,3246,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11036.399999999972,-4.497354497354489,12
+MOTILALOFS,2023-10-19,2023-10-23,250.05,230.4,1006,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-19767.900000000005,-7.858428314337129,4
+PFC,2023-10-09,2023-10-25,240.25,237.2,983,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2998.150000000011,-1.2695109261186333,16
+ETERNAL,2023-10-23,2023-10-26,108.9,106.45,2289,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5608.050000000007,-2.249770431588616,3
+360ONE,2023-10-23,2023-10-26,532.8,521.4,468,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5335.19999999999,-2.1396396396396344,3
+MOTILALOFS,2023-10-25,2023-10-26,237.45,231.7,1061,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6100.75,-2.421562434196678,1
+PERSISTENT,2023-10-26,2023-11-13,2933.3,3118.05,86,dropped out of top 20 rank (now #21 of 91),15888.5,6.298367026898033,18
+KALYANKJIL,2023-10-23,2023-11-16,287.35,313.5,867,dropped out of top 20 rank (now #27 of 111),22672.04999999998,9.100400208804583,24
+TATAELXSI,2023-10-26,2023-12-05,7463.5,8392.1,33,dropped out of top 20 rank (now #22 of 121),30643.80000000001,12.441883834662026,40
+BAJAJ-AUTO,2023-10-23,2023-12-08,5272.0,5925.5,47,dropped out of top 20 rank (now #22 of 124),30714.5,12.395675265553873,46
+PHOENIXLTD,2023-11-16,2023-12-08,1108.2,1104.5,268,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-991.6000000000122,-0.3338747518498497,22
+BSE,2023-07-14,2023-12-20,252.5,770.5,815,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,422170.0,205.14851485148515,159
+OBEROIRLTY,2023-12-05,2023-12-20,1439.25,1381.15,216,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12549.59999999998,-4.036824735105082,15
+MCX,2023-10-09,2023-12-27,416.0,638.0,568,dropped out of top 20 rank (now #22 of 118),126096.0,53.36538461538463,79
+MOTILALOFS,2023-11-13,2023-12-27,282.65,302.7,1019,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,20430.95000000001,7.0935786308155,44
+MANAPPURAM,2023-12-08,2023-12-28,163.85,172.5,1909,dropped out of top 20 rank (now #22 of 119),16512.85000000001,5.279218797680807,20
+PFC,2023-12-20,2023-12-28,381.85,384.9,812,dropped out of top 20 rank (now #26 of 119),2476.599999999963,0.7987429618960151,8
+360ONE,2023-12-28,2024-01-03,708.8,655.25,458,dropped out of top 20 rank (now #37 of 113),-24525.89999999998,-7.5550225733634235,6
+BANKBARODA,2023-12-27,2024-01-05,210.1,212.6,1547,dropped out of top 20 rank (now #21 of 124),3867.5,1.1899095668729265,9
+ANGELONE,2023-10-09,2024-01-16,204.0,333.0,1158,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,149382.0,63.23529411764706,99
+PRESTIGE,2023-10-09,2024-01-23,670.5,1091.8624600000007,352,stop,148319.58592000027,62.843021625652604,106
+OBEROIRLTY,2024-01-03,2024-01-23,1459.0,1424.5837798334865,224,stop,-7709.233317299033,-2.358891032660282,20
+HAL,2023-12-20,2024-01-23,2665.9,2890.5,116,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,26053.59999999999,8.424922165122473,34
+BDL,2023-12-20,2024-01-23,739.5,834.8,419,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,39930.69999999998,12.887085868830294,34
+PHOENIXLTD,2024-01-05,2024-01-23,1244.4,1198.1,273,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12639.900000000049,-3.7206685953069862,18
+MAZDOCK,2023-12-27,2024-01-30,1171.2,1143.2,277,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7756.0,-2.390710382513661,34
+BEL,2023-12-08,2024-02-01,158.75,183.4,1970,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,48560.500000000015,15.527559055118111,55
+GODREJPROP,2024-01-16,2024-02-08,2304.15,2216.75,147,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12847.800000000014,-3.7931558275285937,23
+RVNL,2024-01-23,2024-02-09,288.75,259.25,1134,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-33453.0,-10.216450216450212,17
+IRFC,2024-01-23,2024-02-12,161.3,132.98234000000008,2030,stop,-57484.849799999865,-17.555895846249182,20
+NBCC,2024-01-23,2024-02-12,65.73,88.77,4982,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,114785.27999999996,35.052487448653565,20
+BHEL,2024-01-23,2024-02-12,202.95,216.7,1613,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,22178.75,6.77506775067751,20
+NHPC,2024-01-30,2024-02-12,87.6,81.0,3991,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-26340.599999999977,-7.534246575342463,13
+MAXHEALTH,2024-02-12,2024-02-16,875.9,865.45,382,dropped out of top 20 rank (now #22 of 90),-3991.899999999974,-1.193058568329708,4
+MOTILALOFS,2023-12-28,2024-02-21,304.1,420.1,1069,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,124004.0,38.14534692535349,55
+COALINDIA,2024-02-16,2024-02-21,450.75,406.55,790,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-34917.99999999999,-9.80587909040488,5
+IOC,2024-02-09,2024-02-27,166.67,157.89,2160,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-18964.800000000003,-5.267894642107162,18
+UNIONBANK,2024-02-21,2024-02-28,132.94,128.94,2629,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10516.0,-3.008876184745002,7
+OFSS,2024-01-23,2024-03-02,5887.0,7083.0,55,dropped out of top 20 rank (now #25 of 96),65780.0,20.315950399184636,39
+PHOENIXLTD,2024-02-08,2024-03-04,1403.35,1350.9,261,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13689.449999999953,-3.73748530302489,25
+PETRONET,2024-02-21,2024-03-12,268.15,263.3,1303,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6319.549999999956,-1.808689166511268,20
+PHOENIXLTD,2024-03-12,2024-03-13,1402.8,1258.756875355489,251,stop,-36154.82428577225,-10.26825810126254,1
+BANKBARODA,2024-02-01,2024-03-13,232.55,237.2,1536,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,7142.399999999965,1.9995699849494564,41
+OIL,2024-02-12,2024-03-13,312.6,382.55,1072,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,74986.4,22.37683941138835,30
+BPCL,2024-02-12,2024-03-13,272.4,275.8,1230,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,4182.000000000042,1.2481644640235157,30
+GODFRYPHLP,2024-02-12,2024-03-13,861.0,978.0,389,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,45513.0,13.588850174216027,30
+CUMMINSIND,2024-02-28,2024-03-13,2714.6,2675.95,125,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4831.250000000011,-1.4237825093936562,14
+UNIONBANK,2024-03-02,2024-03-13,134.67,129.6,2600,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13181.999999999982,-3.764758298061921,11
+BHEL,2024-03-04,2024-03-13,264.55,225.3,1345,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-52791.25,-14.836514836514835,9
+SUNPHARMA,2024-03-13,2024-03-15,1558.6,1548.2,213,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2215.1999999999707,-0.6672654946746959,2
+DRREDDY,2024-03-13,2024-03-15,1260.75,1257.0,263,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-986.25,-0.2974419988102328,2
+HEROMOTOCO,2024-03-15,2024-03-18,4473.05,4442.75,75,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2272.5000000000136,-0.6773901476621158,3
+GODFRYPHLP,2024-03-18,2024-03-19,1043.0,1022.0,326,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6846.0,-2.0134228187919434,1
+TRENT,2024-03-13,2024-03-22,2629.4,2632.4,126,dropped out of top 20 rank (now #25 of 44),378.0,0.11409447022134867,9
+BHARTIARTL,2024-03-19,2024-03-26,1228.35,1213.1,272,dropped out of top 20 rank (now #22 of 46),-4148.0,-1.2415028289982533,7
+GODFRYPHLP,2024-03-22,2024-03-26,1043.0,1021.0,334,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7348.0,-2.1093000958772756,4
+ZYDUSLIFE,2024-03-13,2024-04-03,968.65,987.7,343,dropped out of top 20 rank (now #22 of 113),6534.150000000023,1.9666546224126336,21
+OFSS,2024-03-13,2024-04-09,7340.5,7677.0,45,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,15142.5,4.584156392616312,27
+CGPOWER,2024-03-13,2024-04-12,461.45,494.25,721,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,23648.800000000007,7.108029038899133,30
+OIL,2024-03-26,2024-04-18,407.65,402.1,862,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4784.09999999996,-1.3614620385134169,23
+ABB,2024-02-27,2024-04-19,5450.5,6292.6,63,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,53052.300000000025,15.449958719383549,52
+BAJAJ-AUTO,2024-03-13,2024-04-19,8177.5,8587.0,40,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,16380.0,5.007642922653632,37
+HINDZINC,2024-04-18,2024-04-19,404.95,398.7,886,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5537.5,-1.543400419804919,1
+GODREJPROP,2024-04-09,2024-05-02,2704.5,2532.7,132,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-22677.600000000024,-6.352375670179333,23
+HAL,2024-03-26,2024-05-07,3300.8,3715.0,106,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,43905.19999999998,12.548473097430923,42
+BEL,2024-04-03,2024-05-07,221.5,227.4,1634,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,9640.60000000001,2.6636568848758424,34
+PHOENIXLTD,2024-04-12,2024-05-07,1498.35,1487.5,240,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2603.999999999978,-0.7241298761971438,25
+MOTILALOFS,2024-04-19,2024-05-09,558.0,537.8,638,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12887.60000000003,-3.6200716845878222,20
+OIL,2024-05-02,2024-05-09,420.3,411.55,878,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7682.5,-2.081846300261714,7
+NAM-INDIA,2024-05-09,2024-05-13,575.05,563.05,632,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7584.0,-2.0867750630379933,4
+MOTILALOFS,2024-05-13,2024-05-15,567.1,571.3,660,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,2771.999999999955,0.7406101216716587,2
+JINDALSTEL,2024-04-19,2024-05-16,927.25,1005.25,384,dropped out of top 20 rank (now #24 of 82),29952.0,8.411970881639252,27
+GODREJPROP,2024-05-07,2024-05-23,2781.0,2814.75,131,dropped out of top 20 rank (now #26 of 99),4421.25,1.2135922330097193,16
+CUMMINSIND,2024-03-15,2024-05-30,2707.65,3596.8,124,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,110254.6,32.83843923697671,76
+SUPREMEIND,2024-05-07,2024-05-31,5247.35,5277.6,69,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,2087.25,0.576481462071321,24
+SIEMENS,2024-03-13,2024-06-04,3542.45,4846.052179999999,93,stop,121235.00273999991,36.79945179183895,83
+CGPOWER,2024-04-19,2024-06-04,533.9,584.1324036238066,667,stop,33505.013217078995,9.408579064208023,46
+ABB,2024-05-07,2024-06-04,6888.45,7793.479720000001,53,stop,47966.57516000007,13.138365234559313,28
+HAL,2024-05-09,2024-06-04,3846.65,4333.35,94,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,45749.800000000025,12.652567818751393,26
+MAZDOCK,2024-05-15,2024-06-04,1196.05,1339.75,326,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,46846.20000000001,12.014547886794036,20
+BEL,2024-05-31,2024-06-04,295.95,255.55,1391,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-56196.399999999965,-13.650954553133964,4
+GVT&D,2024-05-23,2024-06-05,1362.85,1280.4,305,dropped out of top 20 rank (now #21 of 49),-25147.249999999945,-6.049822064056931,13
+COCHINSHIP,2024-05-30,2024-06-05,1957.15,1684.55,211,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-57518.60000000003,-13.928416319648473,6
+BDL,2024-06-04,2024-06-05,1436.85,1305.25,261,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-34347.59999999998,-9.158924035215922,1
+POLYCAB,2024-06-05,2024-06-07,6788.45,6846.45,55,dropped out of top 20 rank (now #23 of 94),3190.0,0.8543923870692138,2
+CROMPTON,2024-06-05,2024-06-07,402.25,397.35,933,dropped out of top 20 rank (now #22 of 94),-4571.699999999979,-1.2181479179614652,2
+HEROMOTOCO,2024-06-04,2024-06-13,5180.7,5673.65,72,dropped out of top 20 rank (now #23 of 139),35492.39999999999,9.515123438917517,9
+SUPREMEIND,2024-06-05,2024-06-21,5527.1,5864.55,67,dropped out of top 20 rank (now #26 of 123),22609.149999999987,6.105371713918695,16
+OBEROIRLTY,2024-05-16,2024-06-25,1711.15,1829.3,232,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,27410.799999999967,6.904713204570023,40
+M&M,2024-06-04,2024-07-05,2572.9,2880.6,146,dropped out of top 20 rank (now #23 of 122),44924.199999999975,11.959267752341706,31
+UNOMINDA,2024-06-04,2024-07-10,844.75,1060.25,445,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,95897.5,25.5105060668837,36
+PHOENIXLTD,2024-06-04,2024-07-12,1628.85,1951.4,230,dropped out of top 20 rank (now #28 of 115),74186.50000000004,19.802314516376597,38
+HAL,2024-06-13,2024-07-16,5099.7,5329.4,78,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,17916.599999999984,4.504186520775733,33
+BEL,2024-06-21,2024-07-18,304.95,313.55,1362,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,11713.200000000032,2.820134448270206,27
+BDL,2024-06-25,2024-07-18,1545.35,1546.45,271,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,298.10000000003697,0.07118128579286509,23
+PGEL,2024-07-05,2024-07-19,368.8,350.3,1289,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-23846.5,-5.016268980477223,14
+MOTHERSON,2024-07-10,2024-07-19,133.67,128.13,3605,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-19971.69999999997,-4.144535049001263,9
+NBCC,2024-07-12,2024-07-19,126.53,114.57,3827,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-45770.92000000003,-9.452303801470007,7
+KAYNES,2024-07-18,2024-07-19,4076.6,3901.85,112,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-19572.0,-4.286660452337731,1
+OIL,2024-07-19,2024-07-22,571.1,555.25,787,dropped out of top 20 rank (now #22 of 88),-12473.950000000017,-2.7753458238487183,3
+PETRONET,2024-07-19,2024-07-23,327.55,318.6,1373,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12288.349999999984,-2.73240726606625,4
+COCHINSHIP,2024-06-07,2024-07-25,1912.75,2461.75,201,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,110349.0,28.7021304404653,48
+MAZDOCK,2024-06-07,2024-07-25,1576.6,2428.25,244,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,207802.60000000003,54.018140301915516,48
+SONACOMS,2024-07-19,2024-07-29,693.5,685.05,648,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5475.6000000000295,-1.2184571016582657,10
+OFSS,2024-07-16,2024-07-31,10448.5,10404.0,45,dropped out of top 20 rank (now #25 of 113),-2002.5,-0.4258984543235922,15
+PERSISTENT,2024-07-18,2024-08-02,4896.15,4636.35,93,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-24161.399999999932,-5.306209981311838,15
+COCHINSHIP,2024-07-31,2024-08-02,2620.15,2537.9,177,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-14558.25,-3.1391332557296314,2
+RVNL,2024-06-04,2024-08-05,351.5,550.8,1069,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,213051.69999999995,56.699857752489315,62
+MAZDOCK,2024-07-29,2024-08-05,2670.2,2399.75,175,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-47328.74999999997,-10.128454797393449,7
+CAMS,2024-08-02,2024-08-05,873.7,798.2,517,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-39033.5,-8.641410094998282,3
+360ONE,2024-07-25,2024-08-06,998.7,994.2,455,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2047.5,-0.4505857614899411,12
+NAUKRI,2024-08-02,2024-08-06,1444.0,1361.0,312,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-25896.0,-5.747922437673125,4
+KALYANKJIL,2024-07-19,2024-08-08,528.95,536.55,850,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,6459.999999999923,1.4368087720956435,20
+PETRONET,2024-07-25,2024-08-13,348.95,351.6,1302,dropped out of top 20 rank (now #21 of 57),3450.3000000000443,0.7594211205043777,19
+ZYDUSLIFE,2024-08-05,2024-08-13,1227.55,1175.45,351,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-18287.09999999997,-4.244226304427512,8
+SUNPHARMA,2024-08-05,2024-08-16,1720.35,1742.75,250,dropped out of top 20 rank (now #24 of 77),5600.000000000023,1.302060627197954,11
+TORNTPHARM,2024-08-06,2024-08-19,3220.55,3349.35,133,dropped out of top 20 rank (now #22 of 79),17130.399999999965,3.9993168868671436,13
+LUPIN,2024-08-08,2024-08-19,2050.8,2068.8,214,dropped out of top 20 rank (now #25 of 79),3852.0,0.8777062609713226,11
+PIIND,2024-08-06,2024-08-20,4264.75,4327.25,100,dropped out of top 20 rank (now #21 of 85),6250.0,1.4655020810129482,14
+KALYANKJIL,2024-08-16,2024-08-20,572.95,541.9,792,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-24591.600000000053,-5.4193210576839235,4
+KAYNES,2024-07-25,2024-08-28,4175.15,4881.6,108,dropped out of top 20 rank (now #23 of 114),76296.60000000008,16.920350167059883,34
+ETERNAL,2024-08-05,2024-08-29,256.29,252.34,1684,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6651.800000000028,-1.5412228335089262,24
+NAM-INDIA,2024-08-19,2024-08-29,715.15,676.8,639,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-24505.650000000016,-5.362511361252887,10
+KFINTECH,2024-08-13,2024-09-06,1016.35,989.6,433,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11582.75,-2.6319673340876704,24
+CDSL,2024-08-20,2024-09-09,1443.05,1372.6,316,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-22262.200000000015,-4.882020720002778,20
+NYKAA,2024-08-29,2024-09-12,209.55,207.69,2165,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4026.9000000000296,-0.8876163206871901,14
+LUPIN,2024-09-06,2024-09-19,2256.5,2171.9,211,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-17850.59999999998,-3.7491690671393685,13
+PNBHOUSING,2024-09-12,2024-09-24,1109.0,995.7,433,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-49058.89999999998,-10.216411181244355,12
+GODFRYPHLP,2024-08-29,2024-09-27,2043.0,2333.0,222,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,64380.0,14.194811551639752,29
+ETERNAL,2024-09-09,2024-09-30,263.2,273.3,1793,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,18109.30000000004,3.837386018237088,21
+MOTILALOFS,2024-08-20,2024-10-01,677.45,742.8,675,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,44111.24999999994,9.646468374049721,42
+PGEL,2024-07-22,2024-10-04,370.3,609.85,1233,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,295365.15,64.69079125033757,74
+TRENT,2024-08-13,2024-10-04,4254.5,4902.2,103,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,66713.09999999998,15.223880597014915,52
+BAJAJ-AUTO,2024-09-30,2024-10-04,12041.0,11483.5,40,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-22300.0,-4.630014118428704,4
+KFINTECH,2024-10-01,2024-10-04,1137.35,1015.65,427,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-51965.89999999997,-10.700312129071964,3
+KALYANKJIL,2024-08-28,2024-10-07,611.2,702.2,756,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,68796.0,14.888743455497377,40
+DIXON,2024-09-24,2024-10-07,14340.85,13509.75,34,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-28257.400000000012,-5.79533291262373,13
+BLUESTARCO,2024-09-27,2024-10-07,2119.5,1935.6,230,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-42297.00000000002,-8.676574663835812,10
+INFY,2024-10-07,2024-10-15,1893.3,1917.8,244,dropped out of top 20 rank (now #25 of 61),5978.0,1.2940368668462376,8
+NAUKRI,2024-08-19,2024-10-17,1478.5,1596.0,309,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,36307.5,7.947243828204265,59
+TRENT,2024-10-07,2024-10-17,4966.3,5146.4,93,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,16749.29999999995,3.626442220566606,10
+LTM,2024-10-07,2024-10-18,6254.95,6053.563975321669,74,stop,-14902.565826196465,-3.219626450704327,11
+TRENT,2024-10-18,2024-10-21,5178.7,5071.0,94,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10123.799999999983,-2.079672504682639,3
+BSE,2024-09-19,2024-10-22,1237.0,1363.5,393,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,49714.5,10.226354082457556,33
+SUNPHARMA,2024-10-04,2024-10-22,1910.05,1887.55,247,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5557.5,-1.1779796340409932,18
+NAM-INDIA,2024-10-17,2024-10-22,707.6,659.8,685,closed below 200 EMA,-32743.000000000047,-6.755228942905611,5
+BLUESTARCO,2024-10-21,2024-10-22,2017.85,1910.05,245,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-26410.99999999999,-5.342319795822281,1
+DIVISLAB,2024-10-22,2024-10-23,5817.95,5727.6,81,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7318.349999999956,-1.5529525004511768,1
+DIXON,2024-10-17,2024-10-25,15130.85,13503.088240000003,32,stop,-52088.37631999992,-10.757900316241308,8
+MOTILALOFS,2024-10-15,2024-10-25,924.45,872.0,535,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-28060.750000000025,-5.67364378819839,10
+BSE,2024-10-23,2024-10-25,1424.5,1354.0,341,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-24040.5,-4.949104949104955,2
+NAM-INDIA,2024-10-25,2024-10-28,681.55,677.8,688,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2580.0,-0.5502164184579272,3
+OBEROIRLTY,2024-10-22,2024-10-30,1950.45,1927.75,243,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5516.100000000011,-1.1638339870286396,8
+HCLTECH,2024-10-04,2024-10-31,1776.6,1768.827493053767,266,stop,-2067.4868476979386,-0.4374933550733373,27
+TECHM,2024-10-22,2024-10-31,1623.9,1532.0600725027903,291,stop,-26725.41890168806,-5.6555161954067295,9
+PERSISTENT,2024-10-25,2024-10-31,5670.9,5372.5,82,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-24468.79999999997,-5.261951365744411,6
+WIPRO,2024-10-22,2024-11-04,260.65,258.5,1818,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3908.699999999959,-0.8248609246115368,13
+LUPIN,2024-10-31,2024-11-06,2186.95,2166.05,211,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4409.899999999923,-0.9556688538832403,6
+MCX,2024-10-04,2024-11-12,1161.0,1221.0,407,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,24420.0,5.167958656330751,39
+NAM-INDIA,2024-10-31,2024-11-12,708.2,692.0,652,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10562.40000000003,-2.2874894097712595,12
+CDSL,2024-10-31,2024-11-12,1545.8,1521.9,299,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7146.099999999959,-1.5461249838271351,12
+MOTILALOFS,2024-10-28,2024-11-13,918.55,898.8,514,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10151.5,-2.1501279190027756,16
+PGEL,2024-11-04,2024-11-18,625.6,624.3,732,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-951.6000000000499,-0.20780051150895984,14
+WIPRO,2024-11-06,2024-11-18,269.5,264.2,1751,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9280.30000000002,-1.9666048237476863,12
+TECHM,2024-11-12,2024-11-18,1614.7,1589.7,288,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7200.0,-1.5482752214033613,6
+INFY,2024-11-13,2024-11-18,1828.8,1773.1,249,closed below 200 EMA,-13869.300000000012,-3.045713035870523,5
+HCLTECH,2024-11-12,2024-11-19,1872.85,1820.55,248,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12970.399999999989,-2.7925354406385994,7
+BSE,2024-10-30,2024-11-26,1447.0,1477.0,323,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,9690.0,2.0732550103662817,27
+AMBER,2024-10-04,2024-11-28,4918.9,5992.25,96,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,103041.60000000003,21.820935575026958,55
+HCLTECH,2024-11-22,2024-11-28,1898.4,1840.9,243,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13972.5,-3.028866413822162,6
+BSE,2024-11-28,2024-12-03,1524.5,1504.5,299,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5980.0,-1.3119055428009174,5
+TECHM,2024-11-22,2024-12-09,1672.6,1701.7,276,dropped out of top 20 rank (now #22 of 80),8031.600000000038,1.7398062896089916,17
+MOTILALOFS,2024-12-03,2024-12-18,954.8,953.75,485,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-509.24999999997794,-0.10997067448680342,15
+ETERNAL,2024-11-28,2024-12-20,286.13,282.1,1595,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6427.849999999957,-1.4084507042253391,22
+BSE,2024-12-09,2024-12-27,1822.5,1759.5,265,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-16695.0,-3.4567901234567877,18
+NAM-INDIA,2024-12-18,2024-12-27,754.95,731.25,661,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15665.70000000003,-3.1392807470693507,9
+WIPRO,2024-11-19,2024-12-31,268.6,288.5,1700,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,33829.99999999996,7.408786299329839,42
+COFORGE,2024-10-25,2025-01-02,1548.0,1939.5,303,dropped out of top 20 rank (now #23 of 56),118624.5,25.290697674418606,69
+PERSISTENT,2024-11-12,2025-01-03,5680.15,6405.95,81,dropped out of top 20 rank (now #21 of 53),58789.80000000002,12.777831571349353,52
+PAYTM,2024-11-22,2025-01-03,900.95,982.8,513,dropped out of top 20 rank (now #26 of 53),41989.04999999995,9.084854875409288,42
+MOTILALOFS,2025-01-02,2025-01-06,985.2,925.25,508,closed below 200 EMA,-30454.600000000024,-6.085058871295168,4
+NAM-INDIA,2025-01-03,2025-01-06,758.25,729.95,662,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-18734.59999999997,-3.732278272337608,3
+NAUKRI,2024-11-26,2025-01-07,1649.5,1687.5,280,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,10640.0,2.3037284025462235,42
+360ONE,2024-12-27,2025-01-07,1250.9,1217.3,397,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13339.200000000053,-2.6860660324566465,11
+POLICYBZR,2025-01-03,2025-01-07,2215.85,2079.55,226,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-30803.799999999937,-6.1511383893314004,4
+MOTILALOFS,2025-01-07,2025-01-08,970.0,940.1,503,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15039.699999999988,-3.0824742268041216,1
+KAYNES,2025-01-07,2025-01-08,7247.55,6970.65,67,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-18552.300000000036,-3.820601444626126,1
+PGEL,2024-11-22,2025-01-09,684.15,922.2,675,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,160683.75000000006,34.79500109625084,48
+MANKIND,2025-01-01,2025-01-09,2881.05,2828.05,174,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9222.0,-1.8396070876937176,8
+KFINTECH,2024-12-23,2025-01-10,1415.2,1377.7,347,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13012.5,-2.649802148106273,18
+MAXHEALTH,2025-01-07,2025-01-10,1198.35,1149.9,407,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-19719.149999999925,-4.0430592064087945,3
+LUPIN,2025-01-07,2025-01-10,2357.65,2191.1,206,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-34309.30000000004,-7.064237694314257,3
+AMBER,2024-12-27,2025-01-13,7442.95,7078.5,66,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-24053.69999999999,-4.896579985086557,17
+MUTHOOTFIN,2025-01-07,2025-01-13,2209.15,2096.5,220,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-24783.000000000022,-5.099246316456563,6
+DRREDDY,2025-01-10,2025-01-13,1354.4,1335.1,344,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6639.200000000063,-1.4249852333136581,3
+HCLTECH,2025-01-10,2025-01-14,1995.1,1845.094269577469,234,stop,-35101.34091887222,-7.518707354144194,4
+INFY,2025-01-10,2025-01-16,1925.3,1887.6,242,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9123.40000000001,-1.9581363943281582,6
+BIOCON,2025-01-13,2025-01-27,365.2,370.25,1260,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,6363.000000000015,1.382803943044908,14
+MUTHOOTFIN,2025-01-14,2025-01-27,2123.85,2139.0,216,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,3272.4000000000196,0.71332721237376,13
+BSE,2025-01-16,2025-01-27,1998.0,1813.5,231,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-42619.5,-9.23423423423423,11
+BAJAJHLDNG,2025-01-27,2025-01-28,11193.2,11029.3,40,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6556.000000000058,-1.4642818854304518,1
+BAJAJFINSV,2025-01-28,2025-02-01,1768.95,1618.3792418896992,258,stop,-38847.25559245762,-8.51187190764583,4
+BAJAJHLDNG,2025-02-04,2025-02-07,11735.85,11271.15,40,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-18588.00000000003,-3.959662061120417,3
+MUTHOOTFIN,2025-02-04,2025-02-11,2239.0,2188.2,211,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10718.80000000004,-2.26887003126397,7
+BAJAJFINSV,2025-02-04,2025-02-11,1813.25,1744.85,261,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-17852.400000000023,-3.7722321797876823,7
+MANAPPURAM,2025-02-01,2025-02-12,197.8,191.42,2347,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-14973.860000000055,-3.225480283114268,11
+SRF,2025-01-13,2025-02-14,2516.0,2752.25,183,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,43233.75,9.389904610492849,32
+WIPRO,2025-01-27,2025-02-14,294.35,300.35,1545,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,9270.0,2.038389672158991,18
+MARUTI,2025-02-04,2025-02-20,13109.95,12440.65,36,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-24094.80000000004,-5.105282628842989,16
+MUTHOOTFIN,2025-02-14,2025-02-21,2254.9,2212.1,204,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8731.200000000037,-1.8980886070335767,7
+BAJAJHLDNG,2025-02-20,2025-02-25,12454.3,11642.05,36,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-29241.0,-6.521843861156384,5
+KOTAKBANK,2025-02-25,2025-02-28,393.4,380.6,1161,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-14860.799999999947,-3.253685815963381,3
+BAJAJFINSV,2025-02-14,2025-03-04,1841.3,1790.3,249,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12699.0,-2.769782219084338,18
+MANAPPURAM,2025-02-21,2025-03-04,201.32,197.58,2270,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8489.799999999956,-1.857738923107477,11
+BAJFINANCE,2025-01-13,2025-03-05,715.0,830.0,643,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,73945.0,16.083916083916083,51
+SBICARD,2025-01-27,2025-03-13,753.7,829.85,603,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,45918.44999999999,10.103489452036607,45
+SHRIRAMFIN,2025-02-28,2025-04-01,617.3,637.45,736,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,14830.400000000067,3.2642151304066225,32
+CHOLAFIN,2025-03-04,2025-04-01,1449.6,1468.25,312,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,5818.800000000028,1.2865618101545406,28
+BAJFINANCE,2025-03-13,2025-04-02,842.0,867.0,536,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,13400.0,2.9691211401425166,20
+SBICARD,2025-03-24,2025-04-03,854.5,850.3,552,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2318.400000000025,-0.4915155061439469,10
+MUTHOOTFIN,2025-03-24,2025-04-07,2352.55,2150.0,200,stop,-40510.00000000004,-8.609806380310737,14
+MAZDOCK,2025-03-24,2025-04-07,2654.8,2221.05,177,stop,-76773.75,-16.338330571041126,14
+BAJAJFINSV,2025-03-24,2025-04-07,1894.15,1852.65,249,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10333.5,-2.1909563656521414,14
+HDFCLIFE,2025-04-07,2025-04-17,665.95,720.05,673,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,36409.29999999994,8.123733012988943,10
+MFSL,2025-04-07,2025-04-17,1128.45,1218.0,397,dropped out of top 20 rank (now #22 of 47),35551.349999999984,7.935663963844197,10
+MANAPPURAM,2025-03-05,2025-04-25,203.68,226.93,2221,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,51638.25,11.414964650432058,51
+SHRIRAMFIN,2025-04-17,2025-04-25,691.75,655.2,678,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-24780.89999999997,-5.283700758944699,8
+BAJFINANCE,2025-04-16,2025-04-30,906.0,863.5,512,closed below 200 EMA,-21760.0,-4.690949227373064,14
+BAJAJFINSV,2025-04-17,2025-04-30,2035.3,1951.6,230,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-19251.00000000001,-4.112415860069774,13
+INDIGO,2025-03-04,2025-05-08,4598.7,5146.0,98,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,53635.400000000016,11.90118946658838,65
+LTF,2025-04-25,2025-05-08,172.99,163.53,2721,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-25740.66000000002,-5.468524192149838,13
+HDFCBANK,2025-04-16,2025-05-09,939.0,944.8,494,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,2865.1999999999775,0.6176783812566589,23
+HDFCAMC,2025-04-25,2025-05-09,2105.0,2051.6,223,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11908.20000000002,-2.5368171021377672,14
+ICICIBANK,2025-05-08,2025-05-09,1435.5,1388.9,323,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15051.79999999997,-3.246255660048758,1
+MUTHOOTFIN,2025-05-09,2025-05-13,2229.6,2216.5,207,dropped out of top 20 rank (now #21 of 51),-2711.699999999981,-0.5875493362037965,4
+GODFRYPHLP,2025-04-16,2025-05-21,2448.0,2851.0,189,dropped out of top 20 rank (now #25 of 59),76167.0,16.462418300653603,35
+INDIGO,2025-05-13,2025-05-23,5521.0,5521.0,88,dropped out of top 20 rank (now #22 of 60),0.0,0.0,10
+MAZDOCK,2025-04-30,2025-06-11,3057.6,3314.6,152,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,39064.0,8.405285190999479,42
+BDL,2025-05-09,2025-06-12,1531.8,1871.0,302,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,102438.40000000001,22.143883013448228,34
+CDSL,2025-06-11,2025-06-12,1739.4,1644.2,305,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-29036.000000000015,-5.47315166149247,1
+PNBHOUSING,2025-04-16,2025-06-13,1001.7,1055.6,463,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,24955.699999999935,5.3808525506638505,58
+ANGELONE,2025-05-23,2025-06-13,308.0,292.5,1656,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-25668.0,-5.032467532467533,21
+BSE,2025-04-07,2025-06-18,1727.5,2633.2,259,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,234576.29999999996,52.42836468885672,72
+HAL,2025-05-21,2025-06-19,5001.1,4902.3,100,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9880.000000000018,-1.9755653756173719,29
+CDSL,2025-06-18,2025-06-19,1680.3,1637.8,311,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13217.5,-2.529310242218652,1
+BDL,2025-06-13,2025-06-24,1900.0,1851.7,271,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13089.299999999988,-2.54210526315789,11
+BSE,2025-06-24,2025-07-04,2785.6,2635.2,191,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-28726.400000000016,-5.399195864445727,10
+MFSL,2025-05-09,2025-07-07,1268.2,1568.5,365,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,109609.49999999999,23.679230405298846,59
+HDFCAMC,2025-06-12,2025-07-07,2461.7,2446.0,211,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3312.6999999999616,-0.6377706463013277,25
+BDL,2025-07-07,2025-07-10,1943.3,1892.8,275,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13887.5,-2.5986723614470186,3
+BEL,2025-04-30,2025-07-11,314.1,409.3,1484,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,141276.8,30.308818847500785,72
+GVT&D,2025-06-12,2025-07-11,2308.6,2332.9,225,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,5467.500000000041,1.0525859828467654,29
+MCX,2025-06-13,2025-07-11,1512.0,1610.0,341,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,33418.0,6.481481481481488,28
+CDSL,2025-07-04,2025-07-11,1762.5,1688.7,305,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-22508.999999999985,-4.1872340425531895,7
+AUBANK,2025-05-08,2025-07-16,689.0,797.75,673,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,73188.75,15.78374455732947,69
+LTF,2025-07-07,2025-07-17,207.77,199.78,2580,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-20614.200000000023,-3.8455984983395197,10
+ABCAPITAL,2025-06-19,2025-07-18,255.68,264.35,2021,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,17522.070000000032,3.390957446808507,29
+360ONE,2025-06-19,2025-07-22,1114.4,1144.1,463,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,13751.099999999915,2.665111270638887,33
+MOTILALOFS,2025-07-11,2025-07-24,934.4,904.9,557,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-16431.5,-3.1571061643835607,13
+GODFRYPHLP,2025-07-16,2025-07-24,3106.0,2935.0,169,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-28899.0,-5.505473277527361,8
+NAM-INDIA,2025-07-11,2025-07-25,804.85,809.7,647,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,3137.950000000015,0.6025967571597235,14
+MANAPPURAM,2025-07-17,2025-07-25,270.7,265.65,1943,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9812.150000000021,-1.865533801256003,8
+RBLBANK,2025-07-11,2025-07-28,264.16,253.26,1972,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-21494.80000000007,-4.126287098728055,17
+LTF,2025-07-24,2025-07-28,210.1,201.99,2470,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-20031.699999999964,-3.8600666349357327,4
+MUTHOOTFIN,2025-07-10,2025-07-29,2644.8,2617.1,199,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5512.300000000054,-1.0473381730187636,19
+DELHIVERY,2025-07-28,2025-07-30,428.85,409.15,1191,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-23462.700000000055,-4.593680774163467,2
+POLYCAB,2025-07-28,2025-08-01,6837.5,6698.0,74,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10323.0,-2.0402193784277878,4
+GLENMARK,2025-07-22,2025-08-05,2157.9,2052.6,243,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-25587.900000000045,-4.879744195745872,14
+MOTILALOFS,2025-07-29,2025-08-05,937.4,910.75,546,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-14550.899999999987,-2.842969916791127,7
+HDFCAMC,2025-07-11,2025-08-11,2503.2,2691.6,208,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,39187.20000000002,7.526366251198469,31
+RBLBANK,2025-07-30,2025-08-11,261.75,258.5,1960,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6370.0,-1.241642788920727,12
+MOTILALOFS,2025-08-11,2025-08-12,918.55,911.3,567,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4110.75,-0.7892874639377268,1
+SBIN,2025-08-12,2025-08-19,820.6,830.4,631,dropped out of top 20 rank (now #22 of 51),6183.799999999971,1.1942481111381964,7
+INDIANB,2025-08-11,2025-08-25,659.95,654.1,789,dropped out of top 20 rank (now #22 of 49),-4615.650000000018,-0.8864307902113788,14
+GVT&D,2025-07-18,2025-08-26,2358.2,2690.1,222,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,73681.80000000002,14.074293953015026,39
+NAM-INDIA,2025-08-19,2025-08-26,861.7,825.7,615,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-22140.0,-4.177788093303936,7
+HDFCAMC,2025-08-25,2025-08-28,2882.9,2731.3,185,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-28045.99999999998,-5.25859377709944,3
+DELHIVERY,2025-08-05,2025-09-01,458.05,473.75,1120,dropped out of top 20 rank (now #21 of 42),17583.999999999985,3.427573409016471,27
+GODFRYPHLP,2025-08-05,2025-09-02,3292.0,3353.0,155,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,9455.0,1.8529769137302532,28
+FORTIS,2025-08-01,2025-09-12,859.25,970.0,598,dropped out of top 20 rank (now #21 of 66),66228.5,12.88914751236543,42
+PAYTM,2025-07-25,2025-09-17,1067.75,1222.1,479,dropped out of top 20 rank (now #21 of 79),73933.64999999995,14.455630999765855,54
+GODFRYPHLP,2025-09-17,2025-09-19,3571.0,3525.0,153,dropped out of top 20 rank (now #23 of 86),-7038.0,-1.2881545785494275,2
+CUMMINSIND,2025-07-25,2025-09-23,3535.1,4005.2,144,dropped out of top 20 rank (now #21 of 64),67694.4,13.298067947158486,60
+ADANIPOWER,2025-09-23,2025-09-24,162.35,144.5,3377,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-60279.44999999998,-10.994764397905755,1
+MANAPPURAM,2025-09-02,2025-09-25,281.0,281.2,1883,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,376.5999999999786,0.0711743772241924,23
+ETERNAL,2025-07-24,2025-09-26,313.15,321.0,1657,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,13007.450000000037,2.5067858853584646,64
+UNOMINDA,2025-08-26,2025-09-26,1276.8,1268.9,413,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3262.6999999999434,-0.618734335839588,31
+ADANIPOWER,2025-09-25,2025-09-30,149.0,144.65,3612,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15712.199999999979,-2.9194630872483196,5
+ASHOKLEY,2025-09-26,2025-10-06,141.93,137.78,3742,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15529.300000000021,-2.92397660818714,10
+HAL,2025-09-19,2025-10-13,4916.2,4745.4,111,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-18958.80000000002,-3.474228062324558,24
+EICHERMOT,2025-08-28,2025-10-23,6133.0,6884.5,85,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,63877.5,12.253383336050883,56
+MUTHOOTFIN,2025-09-24,2025-10-24,3088.3,3163.1,174,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,13015.199999999953,2.422044490496389,30
+MARUTI,2025-09-30,2025-10-28,16029.0,16311.0,33,dropped out of top 20 rank (now #24 of 77),9306.0,1.7593112483623496,28
+NAM-INDIA,2025-09-12,2025-10-29,827.75,857.9,653,closed below 200 EMA,19687.949999999986,3.6424041075203917,47
+HEROMOTOCO,2025-09-01,2025-10-30,5244.0,5515.0,101,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,27371.0,5.167810831426389,59
+BAJFINANCE,2025-09-26,2025-10-31,985.1,1042.8,539,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,31100.299999999963,5.8572733732615845,35
+ADANIPOWER,2025-10-06,2025-11-03,151.99,156.73,3571,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,16926.53999999993,3.1186262254095487,28
+INDIANB,2025-10-23,2025-11-21,808.95,834.05,690,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,17318.999999999938,3.102787564126319,29
+BANKBARODA,2025-10-31,2025-11-24,269.7,273.05,2050,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,6867.500000000046,1.2421208750463597,24
+BANKINDIA,2025-10-28,2025-12-03,136.63,135.79507494399004,4092,stop,-3416.5133291927177,-0.6110847222498328,36
+SBIN,2025-10-29,2025-12-03,939.75,951.05,590,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,6666.999999999973,1.2024474594307,35
+BSE,2025-11-24,2025-12-03,2802.2,2751.1,205,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-10475.499999999982,-1.8235671972021916,9
+CANBK,2025-10-30,2025-12-08,128.65,138.28,4299,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,41399.36999999998,7.485425573260773,39
+BHARATFORG,2025-12-03,2025-12-08,1406.7,1373.6,412,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13637.200000000055,-2.353024809838644,5
+BSE,2025-12-08,2025-12-09,2798.8,2652.6531999999997,206,stop,-30106.24080000009,-5.22176647134488,1
+HEROMOTOCO,2025-12-08,2025-12-09,6167.0,6001.0,93,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15438.0,-2.6917463920869134,1
+MCX,2025-11-03,2025-12-10,1905.0,1973.0,295,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,20060.0,3.5695538057742837,37
+BANKBARODA,2025-12-09,2025-12-10,280.75,277.15,2055,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7398.000000000046,-1.2822796081923493,1
+CANBK,2025-12-09,2025-12-10,141.52,140.91,4077,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-2486.9700000000557,-0.4310344827586299,1
+EICHERMOT,2025-12-10,2025-12-16,7228.5,7061.5,79,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-13193.0,-2.310299508888425,6
+LTF,2025-08-26,2025-12-18,220.0,299.85,2399,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,191560.15000000005,36.295454545454554,114
+SBIN,2025-12-18,2025-12-26,977.55,966.3,596,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6705.0,-1.150836274359368,8
+MUTHOOTFIN,2025-12-03,2025-12-29,3763.4,3736.5,154,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-4142.600000000014,-0.7147791890312005,26
+MOTHERSON,2025-12-10,2025-12-30,116.28,119.75,4918,dropped out of top 20 rank (now #21 of 57),17065.459999999995,2.984176126590987,20
+FEDERALBNK,2025-12-10,2026-01-05,259.6,263.75,2203,dropped out of top 20 rank (now #23 of 76),9142.44999999995,1.5986132511556228,26
+CANBK,2025-12-16,2026-01-07,142.47,148.08,4073,dropped out of top 20 rank (now #21 of 79),22849.530000000057,3.937671088650241,22
+HINDZINC,2025-12-29,2026-01-08,618.55,590.75,960,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-26687.999999999956,-4.494382022471899,10
+NMDC,2025-12-26,2026-01-09,80.17,78.11,7444,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15334.640000000018,-2.569539728077841,14
+MANAPPURAM,2026-01-07,2026-01-09,319.9,285.85,1948,closed below 200 EMA,-66329.3999999999,-10.643951234760852,2
+AUBANK,2025-10-24,2026-01-13,860.35,971.95,648,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,72316.80000000002,12.971465101412228,81
+BAJAJ-AUTO,2026-01-08,2026-01-16,9760.5,9489.0,62,dropped out of top 20 rank (now #21 of 51),-16833.0,-2.7816197940679244,8
+EICHERMOT,2026-01-09,2026-01-16,7507.0,7315.0,80,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15360.0,-2.557612894631678,7
+NMDC,2026-01-13,2026-01-19,79.7,78.99,7613,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5405.2300000000605,-0.8908406524466894,6
+MANAPPURAM,2026-01-16,2026-01-20,314.0,301.85,1944,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-23619.599999999955,-3.869426751592353,4
+BANKBARODA,2026-01-05,2026-01-21,297.25,289.7,2079,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-15696.450000000024,-2.5399495374264114,16
+HINDZINC,2026-01-09,2026-01-30,606.45,628.5,994,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,21917.699999999953,3.6359139253029804,21
+MCX,2026-01-19,2026-02-01,2429.0,2069.8708733305903,254,stop,-91218.79817403007,-14.785060793306293,13
+NATIONALUM,2025-10-13,2026-02-01,225.38,354.2,2428,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,312774.95999999996,57.15680184577159,111
+SBIN,2025-12-30,2026-02-01,973.45,1018.2,623,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,27879.25,4.5970517232523544,33
+BANKINDIA,2026-01-16,2026-02-01,152.36,145.68,4008,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-26773.440000000028,-4.38435284851667,16
+UNIONBANK,2026-01-20,2026-02-01,170.69,164.51,3556,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-21976.080000000024,-3.620598746265158,12
+INDIANB,2026-01-22,2026-02-01,878.05,825.55,697,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-36592.5,-5.979158362280057,10
+SHRIRAMFIN,2025-11-21,2026-02-02,823.3,950.0691800720616,696,stop,88231.34933015492,15.397689793764325,73
+TECHM,2026-02-01,2026-02-04,1673.8,1603.6,349,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-24499.800000000017,-4.194049468275784,3
+NATIONALUM,2026-02-02,2026-02-05,369.7,363.85,1581,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9248.849999999946,-1.5823640789829452,3
+HINDALCO,2026-02-04,2026-02-05,964.95,935.45,617,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-18201.5,-3.057153220374109,1
+MCX,2026-02-03,2026-02-11,2434.1,2372.8,242,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-14834.599999999933,-2.5183846185448333,8
+NMDC,2026-02-03,2026-02-13,79.24,79.43,7434,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,1412.4600000000887,0.23977788995457328,10
+NATIONALUM,2026-02-11,2026-02-13,367.7,349.3,1642,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-30212.799999999963,-5.004079412564588,2
+FEDERALBNK,2026-02-01,2026-02-19,285.1,288.3,2053,dropped out of top 20 rank (now #23 of 63),6569.599999999977,1.1224131883549537,18
+SHRIRAMFIN,2026-02-13,2026-03-02,1065.8,1052.5,557,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7408.099999999975,-1.2478889097391588,17
+APLAPOLLO,2026-01-30,2026-03-04,2045.7,2121.711748172963,306,stop,23259.594940926625,3.7156840285947457,33
+ASHOKLEY,2025-12-03,2026-03-04,162.71,200.46,3569,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,134729.75,23.20078667568066,91
+BANKINDIA,2026-02-03,2026-03-04,153.01,158.22,3849,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,20053.29000000003,3.405006208744532,29
+SBIN,2026-02-03,2026-03-06,1064.2,1146.7089999999998,553,stop,45627.47699999988,7.753147904529212,31
+UNIONBANK,2026-02-05,2026-03-06,172.82,183.24,3415,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,35584.300000000054,6.029394745978478,29
+INDIANB,2026-02-19,2026-03-09,908.0,880.15,659,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-18353.150000000016,-3.067180616740095,18
+POLYCAB,2026-03-09,2026-03-10,8228.5,7723.0,71,closed below 200 EMA,-35890.5,-6.143282493771651,1
+BHARATFORG,2026-02-13,2026-03-12,1738.8,1779.6,341,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,13912.799999999985,2.346445824706689,27
+GVT&D,2026-03-06,2026-03-13,3869.0,3604.3,154,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-40763.799999999974,-6.8415611269061705,7
+BEL,2026-03-10,2026-03-13,463.35,439.4,1274,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-30512.300000000057,-5.168878817308742,3
+NATIONALUM,2026-03-06,2026-03-16,396.15,372.25,1512,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-36136.79999999997,-6.033068282216325,10
+TORNTPHARM,2026-03-12,2026-03-16,4446.0,4266.6,132,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-23680.799999999952,-4.035087719298236,4
+CGPOWER,2026-03-13,2026-03-16,709.9,698.65,820,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-9225.0,-1.5847302436962973,3
+MCX,2026-03-16,2026-03-20,2555.6,2414.5,224,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-31606.39999999998,-5.521208326811699,4
+BSE,2026-03-16,2026-03-20,2862.6,2806.1,200,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11300.0,-1.9737301753650516,4
+ABB,2026-02-05,2026-03-23,5770.0,6041.5,102,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,27693.0,4.705372616984405,46
+SUNPHARMA,2026-03-20,2026-03-23,1777.1,1758.4,321,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-6002.699999999942,-1.052276180293732,3
+COALINDIA,2026-03-13,2026-03-24,467.0,442.1,1246,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-31025.399999999972,-5.331905781584578,11
+TATAPOWER,2026-03-20,2026-03-24,402.4,384.75,1419,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-25045.34999999997,-4.3861829025844905,4
+ABB,2026-03-24,2026-03-27,6162.0,6105.0,91,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5187.0,-0.9250243427458615,3
+TATAPOWER,2026-03-25,2026-03-27,390.7,385.7,1448,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-7240.0,-1.2797542871768597,2
+SUNPHARMA,2026-03-27,2026-03-30,1793.6,1757.2,314,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-11429.599999999957,-2.029438001784112,3
+LUPIN,2026-03-23,2026-04-01,2296.7,2274.9,245,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5340.999999999933,-0.9491879653415691,9
+GVT&D,2026-04-01,2026-04-07,3798.7,3673.2,148,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-18574.0,-3.303761813251904,6
+ONGC,2026-03-27,2026-04-09,281.95,288.6,2001,dropped out of top 20 rank (now #23 of 42),13306.650000000069,2.358574215286402,13
+AUROPHARMA,2026-03-23,2026-04-15,1278.7,1373.9,440,dropped out of top 20 rank (now #21 of 65),41888.00000000002,7.445061390474694,23
+NATIONALUM,2026-04-01,2026-04-30,399.45,399.3,1415,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-212.24999999996783,-0.03755163349604684,29
+NMDC,2026-04-07,2026-05-11,81.74,86.79,6935,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,35021.75000000008,6.178125764619535,34
+GVT&D,2026-04-15,2026-05-12,4134.5,4282.4,141,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,20853.89999999995,3.577216108356507,27
+PNBHOUSING,2026-04-30,2026-05-29,1045.65,1030.5,580,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8787.000000000053,-1.4488595610385957,29
+BSE,2026-04-09,2026-06-02,3257.4,3931.9,175,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,118037.5,20.70669859397065,54
+BHEL,2026-05-12,2026-06-04,391.75,389.2,1531,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3904.0500000000175,-0.6509253350351019,23
+ADANIPOWER,2026-03-16,2026-06-08,154.06,225.85,3730,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,267776.69999999995,46.59872776840193,84
+NAM-INDIA,2026-05-11,2026-06-08,1065.6,1055.2,572,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-5948.799999999922,-0.9759759759759623,28
+GVT&D,2026-05-29,2026-06-08,5148.6,4744.0,121,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-48956.60000000004,-7.85844695645419,10
+NMDC,2026-06-04,2026-06-08,94.7,89.59,6440,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-32908.399999999994,-5.395987328405494,4
+OFSS,2026-06-02,2026-06-09,10344.5,9639.5,59,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-41595.0,-6.815215815167486,7
+GVT&D,2026-06-09,2026-06-11,4931.0,4735.0,121,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-23716.0,-3.974852970999798,2
+ZYDUSLIFE,2026-06-08,2026-06-17,1087.6,1061.4,546,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-14305.1999999999,-2.4089738874586097,9
+CGPOWER,2026-06-11,2026-06-24,901.35,919.45,653,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,11819.300000000016,2.0080989626671153,13
+GVT&D,2026-06-17,2026-06-29,5152.5,4956.5,114,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-22344.0,-3.8039786511402274,12
+ADANIGREEN,2026-06-08,2026-06-30,1490.5,1492.2,398,dropped out of top 20 rank (now #22 of 66),676.6000000000181,0.11405568601141614,22
+CGPOWER,2026-06-29,2026-07-03,956.25,892.55,621,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-39557.700000000026,-6.661437908496737,4
+SUZLON,2026-06-30,2026-07-03,58.9,56.87,10105,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-20513.150000000012,-3.446519524617997,3
+BEL,2026-07-06,2026-07-07,425.55,419.15,1401,closed below 200 EMA,-8966.400000000047,-1.503936082716495,1
+MOTILALOFS,2026-07-06,2026-07-08,953.0,909.6,625,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-27124.999999999985,-4.55403987408185,2
+ABCAPITAL,2026-07-06,2026-07-08,409.75,385.75,1455,dropped out of top 20 rank (now #21 of 49),-34920.0,-5.857230018303838,2
+ADANIENT,2026-06-08,2026-07-09,2970.0,3083.6,200,dropped out of top 20 rank (now #26 of 51),22719.99999999998,3.82491582491582,31
+NAM-INDIA,2026-06-24,2026-07-16,1157.4,1151.5,514,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-3032.6000000000467,-0.5097632624848858,22
+LTF,2026-07-03,2026-07-20,327.0,305.85,1825,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-38598.749999999956,-6.467889908256874,17
+OFSS,2026-07-03,2026-07-22,11248.0,10851.0,53,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-21041.0,-3.5295163584637246,19
+LICI,2026-07-06,2026-07-22,429.1,423.3,1389,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-8056.200000000016,-1.3516662782568245,16
+LUPIN,2026-07-20,2026-07-22,2478.5,2406.9,234,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-16754.39999999998,-2.8888440589065922,2
+PHOENIXLTD,2026-07-22,2026-07-24,2055.6,2010.7,279,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-12527.099999999962,-2.184277096711418,2
+BAJFINANCE,2026-07-22,2026-07-24,1060.3,1012.8,541,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-25697.5,-4.479864189380367,2
+BHEL,2026-07-16,2026-07-28,435.4,405.75,1343,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-39819.94999999997,-6.809830041341291,12
+TORNTPHARM,2026-07-22,2026-07-29,5033.4,4878.5,114,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-17658.59999999996,-3.077442682878362,7
+GODREJPROP,2026-07-31,2026-08-04,2105.7,2033.6,277,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-19971.699999999975,-3.4240395118013023,4
+TORNTPHARM,2026-07-31,2026-08-05,5122.8,5000.0,114,dropped out of top 20 rank (now #22 of 73),-13999.20000000002,-2.3971265714062606,5
+BAJFINANCE,2026-07-31,2026-08-13,1141.2,1090.8,512,dropped out of top 20 rank (now #23 of 67),-25804.800000000047,-4.416403785488965,13
+OFSS,2026-08-05,2026-08-13,11759.0,11420.0,49,failed a technical gate (trend/near-high/RSI) -- not in the top 20 at all,-16611.0,-2.882898205629736,8
+BAJAJ-AUTO,2026-07-31,2026-08-19,11520.5,11645.0,50,dropped out of top 20 rank (now #22 of 56),6225.0,1.0806822620545997,19
+LODHA,2026-07-28,2026-08-21,1301.4,1242.0,445,dropped out of top 20 rank (now #21 of 60),-26433.00000000004,-4.564315352697101,24

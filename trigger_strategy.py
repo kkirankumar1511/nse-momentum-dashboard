@@ -47,6 +47,16 @@ TRIGGERED_DEFAULTS: dict = {
     **config.STRATEGY,
 
     "watchlist_size": 10,
+    # 2026-08-22: 0 (default) reproduces existing behavior exactly --
+    # the watchlist rebalance step ranks/gates using TODAY's own close.
+    # Set >0 to rank/gate using the close from that many trading days
+    # BEFORE today instead, while still applying the resulting watchlist
+    # to today's trigger scan -- validates a live/intraday design where
+    # the watchlist has to be built from the last FULLY KNOWN day
+    # (yesterday's close), since today's own close-based gates aren't
+    # actually knowable until after today's market close. See
+    # backtest_triggered.py's rebalance-step comment.
+    "watchlist_lag_days": 0,
 
     "multiyear_lookback_days": 756,      # ~3 trading years
     "shortterm_lookback_days": 42,       # ~2 months
@@ -248,12 +258,182 @@ TRIGGERED_DEFAULTS: dict = {
     "ha_breakeven_trail_enabled": False,
     "ha_breakeven_trigger_r": 1.0,
     "ha_breakeven_trail_atr_multiple": 2.0,
+
+    # 2026-08-21: new, INDEPENDENT Heikin-Ashi entry pattern -- EMA21-
+    # touch-then-wait-for-breakout (see trigger_indicators.
+    # precompute_ema21_touch_signals/heikin_ashi_ema21_touch_entry's
+    # docstrings), explicit spec: same stock selection + sector gates as
+    # heikin_ashi_enabled, but its OWN entry pattern -- a multi-day state
+    # machine (HUNTING for a signal candle whose HA low touches EMA21
+    # while its HA high pokes above EMA13 and its HA close holds above
+    # EMA21, then PENDING up to ha_ema21_touch_confirm_days for the real
+    # intraday HIGH to cross the signal's HA high by a small threshold,
+    # cancelled early if HA close drops below EMA21 first). Stop =
+    # signal candle's HA low, target = fixed 1:2 R:R (per spec, "make
+    # stop as 1:2 target and see the result first" -- not trail-only
+    # like heikin_ashi_enabled). Off by default; mutually exclusive in
+    # practice with the other two HA patterns (all three are independent
+    # branches in detect_trigger, checked in order -- enable only one at
+    # a time for a clean test).
+    #
+    # 2026-08-21 revision, explicit request: (1) the day-of-entry RSI
+    # gate that used to exist here was REMOVED entirely -- the signal
+    # candle's own RSI gate (below) is now the only RSI check in this
+    # pattern; (2) entry price is the exact crossing level (signal_high
+    # * (1+breakout_threshold_pct)), not that day's real close; (3) the
+    # signal candle's own RSI floor raised 50 -> 55, then reverted back
+    # to 50 (2026-08-22, explicit request).
+    "ha_ema21_touch_enabled": False,
+    "ha_ema21_touch_signal_rsi_min": 50.0,   # the ONLY RSI gate in this pattern
+    "ha_ema21_touch_confirm_days": 10,       # N -- how long a signal stays PENDING
+    "ha_ema21_touch_target_rr": 2.0,
+    # 2026-08-21 revision: confirmation is a crossing check against the
+    # day's REAL HIGH (high >= signal_high * (1+this)), not a close-
+    # above-level requirement -- see trigger_indicators.
+    # precompute_ema21_touch_signals' docstring.
+    "ha_ema21_touch_breakout_threshold_pct": 0.001,
+    # 2026-08-22: when multiple consecutive candles each independently
+    # qualify as a signal candle (a multi-day run), True (default) uses
+    # the LOWEST HA low across the whole run as the stop; False uses
+    # just the LATEST qualifying candle's own HA low, kept as an
+    # explicit alternative to compare against.
+    "ha_ema21_touch_stop_uses_run_low": True,
+    # 2026-08-22: optional extra filter on the SIGNAL candle itself --
+    # None (default) means no gate. When set, the signal candle's own
+    # real volume must be above its trailing EMA of real volume over
+    # this many days. Distinct from (not a revival of) the day-of-entry
+    # volume gate removed from heikin_ashi_ema21_touch_entry -- see
+    # trigger_indicators.precompute_ema21_touch_signals' docstring for
+    # why that one had to go but this one is fine.
+    "ha_ema21_touch_signal_volume_ema_period": None,
+    # 2026-08-22: False (default) fills at the exact crossing level
+    # (signal_high * (1+breakout_threshold_pct)) -- assumes continuous
+    # intraday price monitoring. True fills at TODAY's real close
+    # instead, for a live design that only checks once daily after
+    # market close -- see trigger_indicators.heikin_ashi_ema21_touch_
+    # entry's docstring for why this replaces the lagged-watchlist
+    # alternative (found to lose most of this pattern's trades).
+    "ha_ema21_touch_fill_at_close": False,
+    # 2026-08-22 addition: optional extra filter on the SIGNAL candle --
+    # None (default) means no gate. When set, at least one of the prior
+    # N HA candles (strictly before the signal candle) must have had HA
+    # RSI above ha_ema21_touch_prior_rsi_min -- lets a stock qualify on
+    # recently-shown momentum even though a pullback (the signal candle
+    # itself, by construction) drags its OWN HA RSI down. See
+    # trigger_indicators.precompute_ema21_touch_signals' docstring.
+    "ha_ema21_touch_prior_rsi_lookback_days": None,
+    "ha_ema21_touch_prior_rsi_min": 60.0,
+    # 2026-08-22 addition: plain trailing SMA (not EMA) of real volume --
+    # a second, independent optional signal-candle volume filter, kept
+    # separate from ha_ema21_touch_signal_volume_ema_period so both can
+    # be compared. None (default) = no gate.
+    "ha_ema21_touch_signal_volume_sma_period": None,
+    # 2026-08-23 addition: optional extra filter on the SIGNAL candle --
+    # None (default) means no gate. When set, at least one of the prior
+    # N HA candles (strictly before the signal candle) must have had BOTH
+    # its open AND close above HA EMA13. A second, independent recent-
+    # strength check alongside ha_ema21_touch_prior_rsi_lookback_days --
+    # see trigger_indicators.precompute_ema21_touch_signals' docstring.
+    "ha_ema21_touch_prior_above_ema13_lookback_days": None,
+    # 2026-08-23 addition: the signal candle's own close-above-EMA gate --
+    # True (default) checks HA EMA13, False checks HA EMA21 (the original
+    # spec before the 2026-08-23 loosening). Kept toggleable since both
+    # are still being compared.
+    "ha_ema21_touch_signal_close_above_ema13": True,
+    # 2026-08-23 addition: independently toggle each sector gate between
+    # "live, rechecked every day through confirmation" (False, the
+    # original behavior) and "checked once at signal-candle formation
+    # only" (True) -- see detect_trigger's ha_ema21_touch branch for the
+    # A/B test result that made both-True clearly worse than both-False,
+    # motivating isolating them to find out which one actually matters.
+    "ha_ema21_touch_sector_rs_formation_only": False,
+    "ha_ema21_touch_sector_above_ema_formation_only": False,
+    # 2026-08-23 addition: the signal candle's REAL (non-HA) close must be
+    # above its REAL open (an ordinary green daily candle) on top of the
+    # HA-based shape check, which no longer cares about color at all.
+    # True (default, since 2026-08-23) -- validated at both smoke (0.6y:
+    # 24->21 trades, win rate 54.2%->57.1%, alpha +37.94%->+38.76%) and
+    # full 5yr scale (CAGR 11.23%->13.97%, alpha +3.44%->+6.19%, on top
+    # of the prior_rsi_lookback_days=20 config) -- a rare gate this
+    # session that held up at 5yr instead of regressing. See
+    # trigger_indicators.precompute_ema21_touch_signals' docstring for
+    # the original post-hoc finding motivating it (real-green signal
+    # candles win 46.5% vs 38.6% for real-red ones).
+    "ha_ema21_touch_require_real_green": True,
+    # 2026-08-23 addition, off by default -- if set, the signal candle's
+    # REAL-close EMA50 must have risen by ha_ema21_touch_ema50_slope_min_
+    # pct over the prior N trading days. See trigger_indicators.
+    # precompute_ema21_touch_signals' docstring for the post-hoc finding
+    # motivating this (EMA50 up >=6% over 20 days: 50.0% win/+2.84% avg
+    # vs 41.8% win/+1.15% avg for the rest -- below ~5-6% the slope
+    # carries no signal). Not yet validated at 5yr scale.
+    "ha_ema21_touch_ema50_slope_lookback_days": None,
+    "ha_ema21_touch_ema50_slope_min_pct": 5.0,
+    # 2026-08-24 addition, off by default -- only takes effect alongside
+    # require_real_green=True. Widens that gate to also accept a red
+    # hammer/dragonfly-doji (long lower wick, rejection of lower prices)
+    # as a valid signal candle, not just a plain green close. See
+    # trigger_indicators.precompute_ema21_touch_signals' docstring --
+    # not yet validated at scale (post-hoc sample was only 14-21 trades).
+    # 2026-08-24 addition, off by default -- confirmation crosses on REAL
+    # CLOSE closing above the trigger level instead of REAL HIGH crossing
+    # it intrabar, filled at that day's close instead of the exact
+    # crossing level. confirm_lookback_days (or confirm_days via the CLI
+    # override) still controls how many days are checked -- e.g. 3 for
+    # "check the next 3 candles for a close above."
+    "ha_ema21_touch_confirm_on_close": False,
+    "ha_ema21_touch_allow_reversal_wick_shapes": False,
+    # 2026-08-24: True (baked in as default) -- HA EMA13 must be above HA
+    # EMA21 at the signal candle. See trigger_indicators.
+    # precompute_ema21_touch_signals' docstring -- isolated from the full
+    # 4-EMA stack condition after post-hoc analysis found only this piece
+    # (not EMA21-vs-50 or EMA50-vs-200) carries a real signal (33.3% win
+    # vs 42.1% baseline on the failing cases). Validated at 5yr scale on
+    # top of require_real_green+prior_rsi_lookback=20: CAGR 13.97%->
+    # 14.78%, alpha +6.19%->+7.01%, Sharpe 1.40->1.47, max DD -13.01%->
+    # -12.17%, PF 1.77->1.83, trade count nearly unchanged (196->195).
+    "ha_ema21_touch_require_ema13_above_ema21": True,
+    # 2026-08-24 addition, off by default -- the FULL stacked condition
+    # (HA EMA13>EMA21>EMA50>EMA200), matching heikin_ashi_trend_entry/
+    # heikin_ashi_ema21_bounce_entry's own spec. Independent of
+    # ha_ema21_touch_require_ema13_above_ema21 above so both can be
+    # compared -- post-hoc analysis found only the EMA13-vs-21 piece
+    # carries real signal, so this is expected to underperform the
+    # isolated version, but tested per explicit request.
+    "ha_ema21_touch_require_ha_ema_stack": False,
+    # 2026-08-24 addition, off by default -- replaces the "100% out at
+    # the fixed 1:2 target" exit with: book HALF the position at target,
+    # let the REST ride until the REAL close first closes below the REAL
+    # EMA21 (the original stop still protects the remaining half
+    # throughout). See backtest_triggered.py's partial_close_at_target
+    # and the new tail-exit step for the implementation. Validated via
+    # post-hoc trade-level simulation (scripts/analyze_half_target_
+    # ema21_tail.py) before this real engine implementation: +4.7% total
+    # P&L, win rate unchanged, on the 389-trade 5yr priorrsi20_novolsma
+    # set -- not yet validated via a real smoke/5yr backtest run of this
+    # actual engine code path.
+    "ha_ema21_touch_half_target_ema21_tail": False,
+    # 2026-08-24 addition, off by default -- stricter alternative to the
+    # "any 1 of N" prior_above_ema13 gate: ALL N of the prior candles'
+    # HA close must be above HA EMA13. See trigger_indicators.
+    # precompute_ema21_touch_signals' docstring.
+    "ha_ema21_touch_prior_above_ema13_all_close": False,
+    # 2026-08-24 addition, off by default -- structured two-tier prior-
+    # strength alternative: immediate prior candle close > EMA21, prior
+    # 4 candles before that all close > EMA13. See trigger_indicators.
+    # precompute_ema21_touch_signals' docstring.
+    "ha_ema21_touch_prior_tiered_ema_check": False,
+    # 2026-08-24 addition, off by default -- none of the prior N candles
+    # (strictly before the signal) may have closed (HA) below HA EMA50.
+    # See trigger_indicators.precompute_ema21_touch_signals' docstring.
+    "ha_ema21_touch_prior_no_ema50_violation_days": None,
 }
 
 
 def detect_trigger(df_upto: pd.DataFrame, cfg: dict,
                    sector_df_upto: pd.DataFrame | None = None,
-                   ha_upto: pd.DataFrame | None = None) -> dict | None:
+                   ha_upto: pd.DataFrame | None = None,
+                   ema21_touch_upto: pd.DataFrame | None = None) -> dict | None:
     """df_upto: one symbol's OHLCV sliced up to and including today (point-
     in-time safe, no lookahead). sector_df_upto: the stock's OWN sector
     index's OHLC, sliced the same way -- used by the institutional
@@ -341,6 +521,52 @@ def detect_trigger(df_upto: pd.DataFrame, cfg: dict,
             if fib_result is None:
                 return None
             stop, target = fib_result
+        elif stop_mode in ("swing_ema50", "ema_tiered_fixed"):
+            # 2026-08-25 revision (2nd pass, explicit correction): take
+            # the combined initial low FIRST -- min(signal candle's HA
+            # low, entry candle's HA low) -- THEN apply the tiered EMA
+            # check ONCE to that single value, against the ENTRY candle's
+            # HA EMA13/EMA21 (today's trend context, not the signal
+            # candle's older one). Tiers, using <= ("touching" counts):
+            # if the combined low <= EMA21, use the low itself; elif it's
+            # <= EMA13 (i.e. sitting between EMA21 and EMA13), also use
+            # the low; else (above BOTH EMAs) use EMA13 itself, giving a
+            # shallow, barely-pulled-back low more room than its own
+            # (irrelevantly tight) value would. Written as explicit tiers
+            # rather than a flat min() because the priority order matters
+            # when EMA13 < EMA21 (e.g. the real LT 2023-03-16 case found
+            # earlier this session). Then trails UP to each newly-
+            # CONFIRMED swing low (never down), with an independent
+            # EMA50-close-below exit as a parallel safety net -- see
+            # backtest_triggered.py's step 1b/1c for the actual daily
+            # ratchet + EMA50 check (this only sets the INITIAL stop). No
+            # fixed target -- pure trail, same "let the big move run"
+            # intent as ha_target_enabled=False.
+            sig_low = entry["trigger_low"]
+            entry_ha_low = float(ha_upto["ha_low"].iloc[-1])
+            combined_low = min(sig_low, entry_ha_low)
+            e13, e21 = entry["entry_ema13"], entry["entry_ema21"]
+            if combined_low <= e21:
+                stop_candidate = combined_low
+            elif combined_low <= e13:
+                stop_candidate = combined_low
+            else:
+                stop_candidate = e13
+            stop = stop_candidate * (1 - cfg.get("swing_stop_buffer_pct", 0.3) / 100)
+            if stop_mode == "ema_tiered_fixed":
+                # 2026-08-25 addition: same tiered EMA13/EMA21 stop
+                # formula as swing_ema50, but as a FIXED initial stop
+                # (no daily swing-low ratchet, no EMA50-close-below exit
+                # -- explicit request: "not ATR based, its with our EMA
+                # stop logic" + "only initial stop + target is 1:2 hard
+                # exit"), paired with a hard profit_target_rr target
+                # exactly like the ha_low/default branch below. Omitting
+                # the swing_ema50_stop flag (set only for stop_mode==
+                # "swing_ema50" itself, below) keeps this out of
+                # backtest_triggered.py's trailing/EMA50-exit machinery
+                # entirely -- a plain stop+target bracket trade.
+                risk = max(entry_price - stop, 0.01)
+                target = entry_price + cfg["profit_target_rr"] * risk
         else:
             stop = entry["trigger_low"]
             risk = max(entry_price - stop, 0.01)
@@ -355,8 +581,13 @@ def detect_trigger(df_upto: pd.DataFrame, cfg: dict,
         # trailing-stop check (or 1d's institutional exits, which HA
         # positions are never added to either). ha_target_enabled=True
         # (default) keeps the fixed/symmetric target from before.
-        if cfg.get("ha_target_enabled", True):
+        # swing_ema50 is unconditionally target-less (no `target` local
+        # even exists for that branch) -- pure trail, matching its own
+        # "let the big move run" design intent.
+        if stop_mode != "swing_ema50" and cfg.get("ha_target_enabled", True):
             result["target"] = target
+        if stop_mode == "swing_ema50":
+            result["swing_ema50_stop"] = True
         return result
 
     if cfg.get("ha_ema21_bounce_enabled", False):
@@ -385,6 +616,53 @@ def detect_trigger(df_upto: pd.DataFrame, cfg: dict,
         risk = max(entry_price - stop, 0.01)
         target = entry_price + cfg["ha_ema21_bounce_target_rr"] * risk
         return {"type": "ha_ema21_bounce", "price": entry_price, "stop": stop, "target": target}
+
+    if cfg.get("ha_ema21_touch_enabled", False):
+        # Same stock selection as heikin_ashi_enabled -- an entirely
+        # independent entry PATTERN (see trigger_indicators.
+        # heikin_ashi_ema21_touch_entry's docstring): a multi-day
+        # touch-EMA21-then-wait-for-breakout state machine, not a
+        # same-day bounce or a short fixed-lookback red-candle search.
+        # 2026-08-23: the two sector gates below used to ALWAYS run live
+        # here, every day through confirmation -- traced to be silently
+        # rejecting 26 of 61 (43%) confirmed signals, but an A/B test
+        # moving BOTH to formation-time-only (checked once, in
+        # precompute_ema21_touch_signals via backtest_triggered.py's
+        # ema21_touch_sector_gate) made overall quality clearly WORSE
+        # (win rate 52.2%->40.7%, profit factor 2.07->1.32 on the same
+        # smoke window) -- unlike the RSI/watchlist gates, these sector
+        # checks are carrying real signal, not just noise. Each is now
+        # independently toggleable (ha_ema21_touch_sector_rs_formation_
+        # only / ha_ema21_touch_sector_above_ema_formation_only, both
+        # False by default = original live-recheck-every-day behavior)
+        # so the two can be isolated to see which one matters.
+        rs_formation_only = cfg.get("ha_ema21_touch_sector_rs_formation_only", False)
+        above_ema_formation_only = cfg.get("ha_ema21_touch_sector_above_ema_formation_only", False)
+        need_sector_df = not rs_formation_only or (
+            cfg.get("sector_above_ema_enabled", False) and not above_ema_formation_only)
+        if need_sector_df and (sector_df_upto is None or sector_df_upto.empty):
+            return None
+        if not rs_formation_only:
+            if ti.relative_strength_vs_sector(
+                    close, sector_df_upto["close"], cfg["institutional_rs_lookback_days"]) <= 0:
+                return None
+        if cfg.get("sector_above_ema_enabled", False) and not above_ema_formation_only:
+            if not ti.sector_above_ema_ok(sector_df_upto, cfg["sector_above_ema_period"]):
+                return None
+        if ha_upto is None or ha_upto.empty or ema21_touch_upto is None or ema21_touch_upto.empty:
+            return None
+
+        entry = ti.heikin_ashi_ema21_touch_entry(
+            df_upto, ha_upto, ema21_touch_upto,
+            cfg.get("ha_ema21_touch_fill_at_close", False))
+        if entry is None:
+            return None
+
+        entry_price = entry["entry_price"]
+        stop = entry["stop"]
+        risk = max(entry_price - stop, 0.01)
+        target = entry_price + cfg["ha_ema21_touch_target_rr"] * risk
+        return {"type": "ha_ema21_touch", "price": entry_price, "stop": stop, "target": target}
 
     if not ti.trend_template_ok(close, cfg["ema_fast"], cfg["ema_slow"],
                                 cfg["trend_template_ema_slow_trend_days"]):

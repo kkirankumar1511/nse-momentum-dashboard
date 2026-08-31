@@ -73,6 +73,57 @@ def precompute_pivots(long_df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["pivot_date", "price", "confirmed_date"])
 
 
+def precompute_swing_lows(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
+    """2026-08-25 addition: LOWS-only swing points, for trailing-stop use
+    (as opposed to precompute_pivots' highs+lows-combined output, built
+    for overhead-resistance zone scoring) -- same window-based confirmed-
+    swing-point detection (a bar's low is the most extreme in a `window`-
+    bar radius on each side, not knowable until `window` bars later),
+    kept as its own small function rather than post-filtering
+    precompute_pivots' output (which has no "is this a high or a low"
+    column to filter on) or changing that function's return shape and
+    risking its existing overhead-resistance callers.
+
+    Returns a DataFrame with one row per confirmed swing low, SORTED by
+    pivot_date ascending: pivot_date, price (the low), confirmed_date.
+    Empty (not an error) if `df` has fewer than 2*window+1 rows."""
+    if len(df) < 2 * window + 1:
+        return pd.DataFrame(columns=["pivot_date", "price", "confirmed_date"])
+    low = df["low"]
+    roll_min = low.rolling(2 * window + 1, center=True).min()
+    is_low = (low == roll_min) & roll_min.notna()
+    n = len(df)
+    confirmed_pos = np.arange(n) + window
+    confirmed_dates = df.index[np.minimum(confirmed_pos, n - 1)]
+    lo_pos = np.where(is_low.to_numpy())[0]
+    rows = [(df.index[p], float(low.iloc[p]), confirmed_dates[p]) for p in lo_pos]
+    return pd.DataFrame(rows, columns=["pivot_date", "price", "confirmed_date"])
+
+
+def precompute_swing_highs(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
+    """2026-08-26 addition: HIGHS-only counterpart to precompute_swing_lows,
+    for the quant_pattern strategy's RRR target (the nearest confirmed
+    swing high above a pattern's entry price stands in for "prior_swing_high"
+    in its reward calc). Same window-based confirmed-swing-point detection,
+    same point-in-time-safety (a swing high at bar i isn't confirmed until
+    `window` bars later).
+
+    Returns a DataFrame with one row per confirmed swing high, SORTED by
+    pivot_date ascending: pivot_date, price (the high), confirmed_date.
+    Empty (not an error) if `df` has fewer than 2*window+1 rows."""
+    if len(df) < 2 * window + 1:
+        return pd.DataFrame(columns=["pivot_date", "price", "confirmed_date"])
+    high = df["high"]
+    roll_max = high.rolling(2 * window + 1, center=True).max()
+    is_high = (high == roll_max) & roll_max.notna()
+    n = len(df)
+    confirmed_pos = np.arange(n) + window
+    confirmed_dates = df.index[np.minimum(confirmed_pos, n - 1)]
+    hi_pos = np.where(is_high.to_numpy())[0]
+    rows = [(df.index[p], float(high.iloc[p]), confirmed_dates[p]) for p in hi_pos]
+    return pd.DataFrame(rows, columns=["pivot_date", "price", "confirmed_date"])
+
+
 def _cluster(prices: np.ndarray, tolerance_pct: float) -> pd.DataFrame:
     """Greedy 1D clustering: sorted prices within `tolerance_pct` of their
     cluster's running mean get grouped together. Returns one row per

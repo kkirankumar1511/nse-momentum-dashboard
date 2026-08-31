@@ -180,8 +180,15 @@ def heikin_ashi_trend_entry(df_upto: pd.DataFrame, ha_upto: pd.DataFrame,
     # additive only (existing "ha_low"/"atr" ha_stop_mode branches simply
     # ignore this key) -- lets a caller locate the swing high/low that
     # preceded this pullback, for the new Fibonacci stop/target mode.
+    #
+    # 2026-08-25 addition, also additive-only: HA EMA13/EMA21 values at
+    # BOTH the signal candle and today (the entry/confirmation candle) --
+    # lets ha_stop_mode="swing_ema50" set its tiered initial stop without
+    # trigger_strategy.py needing to recompute ema13/ema21 itself.
     return {"entry_price": today_close, "trigger_low": sig_low,
-           "signal_date": ha_close.index[sig_pos]}
+           "signal_date": ha_close.index[sig_pos],
+           "sig_ema13": float(ema13.iloc[sig_pos]), "sig_ema21": float(ema21.iloc[sig_pos]),
+           "entry_ema13": float(ema13.iloc[-1]), "entry_ema21": float(ema21.iloc[-1])}
 
 
 def heikin_ashi_ema21_bounce_entry(df_upto: pd.DataFrame, ha_upto: pd.DataFrame,
@@ -254,6 +261,555 @@ def heikin_ashi_ema21_bounce_entry(df_upto: pd.DataFrame, ha_upto: pd.DataFrame,
         return None
 
     return {"entry_price": today_real_close, "stop": today_ha_low}
+
+
+def precompute_ema21_touch_signals(df: pd.DataFrame, ha: pd.DataFrame,
+                                   ema13_period: int = 13, ema21_period: int = 21,
+                                   rsi_period: int = 14, signal_rsi_min: float = 50.0,
+                                   confirm_lookback_days: int = 10,
+                                   breakout_threshold_pct: float = 0.001,
+                                   stop_uses_run_low: bool = True,
+                                   signal_volume_ema_period: int | None = None,
+                                   watchlist_membership: pd.Series | None = None,
+                                   prior_rsi_lookback_days: int | None = None,
+                                   prior_rsi_min: float = 60.0,
+                                   signal_volume_sma_period: int | None = None,
+                                   prior_above_ema13_lookback_days: int | None = None,
+                                   signal_close_above_ema13: bool = True,
+                                   sector_gate_ok: pd.Series | None = None,
+                                   require_real_green: bool = False,
+                                   ema50_slope_lookback_days: int | None = None,
+                                   ema50_slope_min_pct: float = 5.0,
+                                   allow_reversal_wick_shapes: bool = False,
+                                   require_ema13_above_ema21: bool = False,
+                                   require_ha_ema_stack: bool = False,
+                                   confirm_on_close: bool = False,
+                                   prior_above_ema13_all_close: bool = False,
+                                   prior_tiered_ema_check: bool = False,
+                                   prior_no_ema50_violation_days: int | None = None) -> pd.DataFrame:
+    """2026-08-21: one-time, full-history precompute for a THIRD,
+    independent Heikin-Ashi entry pattern -- EMA21-touch-then-wait-for-
+    breakout -- kept fully separate from heikin_ashi_trend_entry and
+    heikin_ashi_ema21_bounce_entry (neither is modified by this). Unlike
+    those two (each a same-day or short-fixed-lookback check,
+    recomputable fresh from any point-in-time slice), this pattern is a
+    genuine multi-day state machine, so it's walked forward ONCE over the
+    whole series here (same reasoning as precompute_heikin_ashi/
+    precompute_weekly_monthly_bars -- redoing an O(days) walk from
+    scratch on every single backtest day would be O(days^2) per symbol).
+
+    Explicit spec (2026-08-21 request, signal-candle shape revised
+    2026-08-23):
+      HUNTING (default state) -- looking for a new signal candle:
+        HA_low <= HA EMA21 (the "touch"), HA_high > HA EMA13, HA_close
+        above HA EMA13 if `signal_close_above_ema13` (default True) else
+        HA EMA21 -- kept as an explicit toggle to compare both variants,
+        since which one is "right" is still being tested -- and its OWN
+        HA RSI(`rsi_period`) > `signal_rsi_min` (50 by spec -- briefly raised to 55 on
+        2026-08-21, then reverted back to 50 on 2026-08-22 by explicit
+        request. This is the ONLY RSI gate anywhere in this pattern,
+        since the separate day-of-entry RSI gate that used to live in
+        heikin_ashi_ema21_touch_entry was also removed by explicit
+        request),
+        and, if `signal_volume_ema_period` is given (None = no gate, the
+        default), the candle's own REAL volume above its trailing EMA
+        (not SMA) of real volume over that period -- an OPTIONAL extra
+        filter on the signal candle itself, distinct from (and NOT a
+        revival of) the day-of-entry volume gate that was separately
+        removed from heikin_ashi_ema21_touch_entry; that one was removed
+        because entry fires on an INTRADAY crossing, where the day's
+        final volume isn't actually known yet at the moment of a live
+        entry -- this one is fine because the signal candle is fully
+        formed and in the past by the time it's evaluated, so its whole
+        day's volume is real, already-known information. Also, if
+        `watchlist_membership` is given (a bool Series indexed by date,
+        None = no gate, the default), the candle's own date must be True
+        in it -- i.e. the stock must have actually been on that day's
+        top-`watchlist_size` shortlist for a candle to start (or extend)
+        a run at all. This is the ONLY place watchlist membership is
+        checked anywhere in this pattern now (2026-08-22 explicit
+        request) -- PENDING's confirmation countdown below does NOT
+        recheck it, matching "once a signal candle is found, only look
+        at whether price crosses in the next N days" -- a stock that
+        drops off the shortlist while a signal is already PENDING can
+        still confirm and trade.
+        2026-08-23 addition: `sector_gate_ok` (a bool Series indexed by
+        date, None = no gate, the default) -- same treatment as
+        `watchlist_membership` above, checked ONLY at signal-candle
+        formation, never rechecked during PENDING. Moved here from
+        trigger_strategy.detect_trigger's ha_ema21_touch branch, which
+        used to recheck relative_strength_vs_sector/sector_above_ema_ok
+        EVERY day through confirmation -- traced (scripts/
+        trace_skip_reasons.py) to be silently rejecting 26 of 61 (43%)
+        confirmed signals, by far the single biggest source of lost
+        trades found. The caller computes this series (needs sector
+        candle data this function doesn't have access to).
+        2026-08-23 addition: `require_real_green` (False = no gate, the
+        default) -- if True, the signal candle's REAL (non-HA) close must
+        be above its REAL open, i.e. an ordinary green daily candle, on
+        top of the HA-based shape check above (which no longer cares
+        about color at all). Found via post-hoc analysis: signal candles
+        that are HA-red/-neutral but happen to close real-green win 46.5%
+        of the time (avg +2.15%) vs 38.6% (avg +0.37%) for real-red ones
+        -- HA smoothing can mask a day where real buying pressure already
+        returned, and this catches that.
+        2026-08-23 addition: `ema50_slope_lookback_days` (None = no gate,
+        the default) -- if given, the REAL (non-HA) close's EMA50 must
+        have risen by at least `ema50_slope_min_pct` (5.0% by default)
+        over that many trading days, measured at the signal candle. Post-
+        hoc analysis (scripts/analyze_win_factors.py) found this specific
+        combination -- EMA50 (not EMA21 or EMA200) over a ~20-day window
+        (not EMA50's own 10-day window, too short to show a meaningful
+        move) -- is where a genuine edge shows up: trades with EMA50 up
+        >=6% over the prior 20 days won 50.0% (avg +2.84%) vs 41.8% (avg
+        +1.15%) for the rest; below roughly 5-6% the slope carries no
+        signal at all (pure noise around the ~44% baseline). EMA200's
+        slope showed the OPPOSITE relationship (higher slope = worse
+        outcomes, likely chasing an already-extended structural trend) --
+        deliberately NOT implemented as a gate.
+        2026-08-24 addition: `require_ema13_above_ema21` (False = no gate,
+        the default) -- if True, HA EMA13 must be above HA EMA21 at the
+        signal candle (the fast/slow EMA in the "right" order for an
+        uptrend). Isolated from the full "HA EMA13>EMA21>EMA50>EMA200"
+        stacked-trend condition that heikin_ashi_trend_entry and
+        heikin_ashi_ema21_bounce_entry both require (trigger_indicators.py
+        lines 76/200) -- post-hoc analysis found the FULL stack barely
+        ever fails here (94%+ of signal candles already satisfy it) and,
+        when it does fail, only the EMA13-vs-EMA21 piece specifically
+        carries a real signal: trades where EMA13<EMA21 at signal time
+        won 33.3% (n=12) vs the 42.1% overall baseline, on a 416-trade
+        sample; EMA21<EMA50 or EMA50<EMA200 failing alone showed no
+        effect (both ~43%, right at baseline). This is the concrete case
+        that surfaced it: LT's 2023-03-16 signal candle passed every
+        other gate but had EMA13 (2160.81) just under EMA21 (2161.44)
+        the whole prior week, and the trade lost.
+        2026-08-24 addition: `require_ha_ema_stack` (False = no gate, the
+        default) -- the FULL "HA EMA13 > HA EMA21 > HA EMA50 > HA EMA200"
+        condition (all on HA_close), matching heikin_ashi_trend_entry and
+        heikin_ashi_ema21_bounce_entry's own spec exactly, which this
+        pattern never inherited. Independent of `require_ema13_above_
+        ema21` above (the post-hoc analysis found only the EMA13-vs-21
+        piece carries real signal; this flag lets the full stack be
+        tested too, for direct comparison).
+        2026-08-24 addition: `confirm_on_close` (False = no change, the
+        default) -- changes the PENDING confirmation check from "REAL
+        HIGH crosses above the signal high by breakout_threshold_pct,
+        fill at that exact crossing level" to "REAL CLOSE closes above
+        that same trigger level, fill at that day's close" -- explicit
+        request to test a close-based (not intrabar-crossing-based)
+        confirmation. `confirm_lookback_days` still controls the window
+        (e.g. 3 for "check the next 3 candles") -- unchanged, only the
+        crossing condition and fill price change.
+        2026-08-24 addition: `allow_reversal_wick_shapes` (False = no
+        change, the default) -- only takes effect when `require_real_
+        green` is also True. Widens that gate: a candle also passes if
+        it's a hammer or dragonfly-doji (small real body, real lower wick
+        >= 2x body, minimal real upper wick -- i.e. a long lower wick
+        showing rejection of lower prices), REGARDLESS of its real color.
+        Explicit request to test whether a red hammer/doji at the signal
+        candle (which fails plain require_real_green) is still a valid
+        reversal-at-support signal, since that's exactly the setup this
+        pattern is built around (pullback to EMA21). Post-hoc analysis
+        found a directional edge (hammer_red: 50.0% win/14 trades vs
+        44.6% win/186 trades for plain candles) but on samples too thin
+        to trust (14-21 trades) -- implemented to test at proper scale
+        rather than decide from that alone.
+        2026-08-22 addition: if `prior_rsi_lookback_days` is given (None
+        = no gate, the default), at least one of the `prior_rsi_lookback_
+        days` HA candles strictly BEFORE the signal candle must have had
+        HA-close RSI(`rsi_period`) above `prior_rsi_min` (60 by spec) --
+        i.e. the stock must have shown genuine recent momentum (on its
+        own HA RSI, the SAME series/period as the signal candle's own
+        RSI>`signal_rsi_min` check above) before pulling back into this
+        signal, even though the signal day's own HA RSI is typically much
+        lower by construction (that's what makes it a pullback). Uses HA
+        RSI throughout, not real-close RSI (that's the separate,
+        independent watchlist rsi_ok gate).
+        2026-08-22 addition: `signal_volume_sma_period` (None = no gate,
+        the default) -- a SECOND, independent optional volume filter on
+        the signal candle, using a plain trailing SMA of real volume
+        (not EMA) -- kept as a separate parameter from
+        `signal_volume_ema_period` above so both can be tested/compared
+        without one overwriting the other.
+        2026-08-23 addition: `prior_above_ema13_lookback_days` (None = no
+        gate, the default) -- at least one of the prior N HA candles
+        strictly BEFORE the signal candle must have had BOTH its HA_open
+        AND HA_close above HA EMA13 (not just the close, and not just the
+        high as the signal candle's own hh > e13 check requires) --
+        a second, independent recent-strength check alongside
+        `prior_rsi_lookback_days`, both evaluated over the candle
+        strictly preceding the signal, not the signal candle itself.
+        2026-08-24 addition: `prior_above_ema13_all_close` (False = the
+        above "any 1 of N" behavior, the default) -- if True, switches
+        to a much stricter requirement: ALL N of the prior candles' HA
+        CLOSE (not open+close, just close) must be above HA EMA13.
+        Explicit request to test a stronger recent-strength bar.
+        2026-08-24 addition: `prior_tiered_ema_check` (False = no gate,
+        the default) -- a third, STRUCTURED alternative to the two
+        prior_above_ema13 variants above: the candle IMMEDIATELY before
+        the signal candle (i-1) must have HA close > HA EMA21 (a looser
+        bar -- it's allowed to already be pulling back toward the EMA,
+        same as the signal candle itself will), while each of the 4
+        candles BEFORE that one (i-2 through i-5) must have HA close >
+        HA EMA13 (the stronger bar, but placed further back from the
+        signal so it doesn't conflict with the immediate pre-signal
+        pullback). Independent of prior_above_ema13_lookback_days/
+        prior_above_ema13_all_close -- doesn't use either.
+        2026-08-24 addition: `prior_no_ema50_violation_days` (None = no
+        gate, the default) -- a structural-trend-intact check: NONE of
+        the prior N candles (strictly before the signal candle) may have
+        closed (HA close) below HA EMA50 OR HA EMA200 -- i.e. the trend
+        hasn't broken either level at any point in that trailing window
+        (2026-08-24 revision: extended from EMA50-only to require both,
+        per explicit request, replacing `require_ha_ema_stack` as the
+        long-term-trend confirmation being tested). Independent of every
+        other prior-strength/stack gate above.
+        2026-08-22 revision: if the VERY NEXT candle also independently
+        qualifies as a signal candle, the run EXTENDS instead of
+        committing immediately -- the run keeps extending for as long as
+        consecutive candles keep qualifying. Only once a candle fails to
+        qualify (or HA_close drops below EMA21) does the run END and
+        commit to PENDING, using the LATEST qualifying candle's HA high
+        as the breakout trigger level. The stop is controlled by
+        `stop_uses_run_low`: True (default) -- the LOWEST HA low across
+        EVERY candle in the whole run (a multi-day pullback's stop
+        should protect against the deepest point of that whole pullback,
+        not just its last candle); False -- just the LATEST qualifying
+        candle's own HA low, ignoring the rest of the run, kept as an
+        explicit alternative to compare against. A single isolated
+        signal candle (the common case) is just a run of length one, so
+        both modes agree there -- this only matters for multi-candle
+        runs. Found (run ends) -> PENDING, remembering the run's final
+        high/low.
+      PENDING -- waiting up to `confirm_lookback_days` trading days TOTAL
+        (2026-08-23: the same-day check below, on the day the run ends,
+        now counts as day 1 of this budget -- confirm_lookback_days=1
+        means ONLY that immediate day is checked, no PENDING days after
+        it) for the REAL (non-HA) intraday HIGH to cross above the signal
+        candle's HA high by at least `breakout_threshold_pct` (0.1% by
+        spec -- a crossing check against the day's HIGH, not a
+        close-above-level requirement; the candle can close anywhere,
+        even back below the signal high, and this still counts).
+        Confirmed on some day -> that day is a hit (confirmed_entry=True
+        there; 2026-08-21 revision: entry now fills at the crossing
+        level itself -- signal_high * (1+breakout_threshold_pct), stored
+        as "trigger_price" -- NOT that day's real close, since the whole
+        point of the threshold is to enter exactly where price crossed
+        it, per explicit request), then back to HUNTING. HA_close < HA
+        EMA21 on any day while pending, before confirming -> LOCKED_OUT
+        (the pending signal is cancelled, not just expired).
+        confirm_lookback_days elapses with no confirmation and no
+        invalidation -> plain timeout, back to HUNTING (no lockout).
+      LOCKED_OUT -- HA_close dropped below EMA21 at some point (either
+        while HUNTING or PENDING); stays locked out of the search
+        entirely until HA_close reclaims above HA EMA13, then back to
+        HUNTING.
+
+    Returns a DataFrame indexed like df/ha with columns "confirmed_entry"
+    (bool, True only on a day the breakout confirms), "signal_high",
+    "signal_low", "trigger_price" (that confirmed signal's HA high/low
+    and the exact crossing-level entry price, NaN every other day)."""
+    ha_close, ha_open, ha_high, ha_low = (ha["ha_close"], ha["ha_open"],
+                                          ha["ha_high"], ha["ha_low"])
+    real_high = df["high"]
+    real_low = df["low"]
+    real_volume = df["volume"]
+    real_open = df["open"]
+    real_close = df["close"]
+    n = len(ha_close)
+    ema13 = indicators.ema(ha_close, ema13_period)
+    ema21 = indicators.ema(ha_close, ema21_period)
+    # HA-based EMA50/EMA200, only computed when needed -- matches
+    # heikin_ashi_trend_entry/heikin_ashi_ema21_bounce_entry's own
+    # "computed on HA_close" stack spec (this function's other EMA50 use,
+    # ema50_slope_ok above, is deliberately on the REAL close instead).
+    ema50_ha_stack = (indicators.ema(ha_close, 50)
+                     if (require_ha_ema_stack or prior_no_ema50_violation_days) else None)
+    ema200_ha_stack = (indicators.ema(ha_close, 200)
+                      if (require_ha_ema_stack or prior_no_ema50_violation_days) else None)
+    rsi = indicators.rsi(ha_close, rsi_period)
+    volume_ema = (indicators.ema(real_volume, signal_volume_ema_period)
+                 if signal_volume_ema_period else None)
+    volume_sma = (real_volume.rolling(signal_volume_sma_period).mean()
+                 if signal_volume_sma_period else None)
+    # "any 1 of the prior N HA candles had HA RSI above prior_rsi_min" --
+    # shift(1) excludes today itself (strictly BEFORE the signal candle,
+    # per spec), rolling(...).max() over the shifted series is the
+    # highest HA RSI seen in that trailing window.
+    prior_rsi_ok = (rsi.shift(1).rolling(prior_rsi_lookback_days).max() > prior_rsi_min
+                   if prior_rsi_lookback_days else None)
+    # "any 1 of the prior N HA candles had BOTH its open AND close above
+    # HA EMA13" -- same shift(1)-then-rolling pattern as prior_rsi_ok,
+    # but on a boolean (open>e13 AND close>e13) series: rolling(...).sum()
+    # over the shifted 0/1 series is > 0 iff at least one qualifying
+    # candle exists in that trailing window.
+    prior_above_ema13_ok = None
+    if prior_above_ema13_lookback_days:
+        if prior_above_ema13_all_close:
+            # 2026-08-24 addition, stricter alternative: ALL of the prior
+            # N candles' HA close (not open+close, just close) must be
+            # above HA EMA13 -- explicit request for a much stronger
+            # recent-strength requirement than "any 1 of N had both open
+            # and close above."
+            above_ema13_close = (ha_close > ema13).astype(int)
+            prior_above_ema13_ok = (above_ema13_close.shift(1)
+                                   .rolling(prior_above_ema13_lookback_days).sum()
+                                   == prior_above_ema13_lookback_days)
+        else:
+            above_ema13 = ((ha_open > ema13) & (ha_close > ema13)).astype(int)
+            prior_above_ema13_ok = (above_ema13.shift(1)
+                                   .rolling(prior_above_ema13_lookback_days).sum() > 0)
+    # 2026-08-24 addition: structured two-tier prior-strength check --
+    # immediate prior candle (i-1) HA close > HA EMA21 (looser, already
+    # pulling back), AND each of the 4 candles before THAT (i-2..i-5)
+    # had HA close > HA EMA13 (stronger). shift(1) isolates the
+    # immediate-prior value; shift(2).rolling(4).sum()==4 on the shifted-
+    # by-2 series covers exactly positions i-2..i-5 (shift(2) puts
+    # original i-2 at position i, then rolling(4) looks back 3 more).
+    prior_tiered_ok = None
+    if prior_tiered_ema_check:
+        immediate_above_ema21 = (ha_close > ema21).shift(1)
+        four_before_above_ema13 = (ha_close > ema13).astype(int)
+        four_before_ok = (four_before_above_ema13.shift(2).rolling(4).sum() == 4)
+        prior_tiered_ok = immediate_above_ema21.fillna(False) & four_before_ok.fillna(False)
+    # "NONE of the prior N HA candles closed below HA EMA50 OR HA EMA200"
+    # -- structural trend-intact check (2026-08-24 revision: extended
+    # from EMA50-only to require BOTH, per explicit request -- "should
+    # not close below 50 AND below 200 EMA"), same shift(1)-then-rolling
+    # pattern as the other prior-strength gates.
+    prior_ema50_no_violation_ok = None
+    if prior_no_ema50_violation_days:
+        above_ema50 = ((ha_close >= ema50_ha_stack) & (ha_close >= ema200_ha_stack)).astype(int)
+        prior_ema50_no_violation_ok = (above_ema50.shift(1)
+                                      .rolling(prior_no_ema50_violation_days).sum()
+                                      == prior_no_ema50_violation_days)
+    # REAL (non-HA) close's EMA50 % change over the prior N trading days,
+    # measured AT the signal candle (not shifted -- the signal candle's
+    # own EMA50 value is already-known, real information at the time
+    # it's evaluated, same reasoning as the real-volume gates above).
+    ema50_slope_ok = None
+    if ema50_slope_lookback_days:
+        ema50_real = indicators.ema(real_close, 50)
+        ema50_slope_pct = (ema50_real / ema50_real.shift(ema50_slope_lookback_days) - 1) * 100
+        ema50_slope_ok = ema50_slope_pct >= ema50_slope_min_pct
+    # Vectorized version of scripts/analyze_win_factors.py's row-wise
+    # hammer/dragonfly-doji classification (same thresholds) -- small
+    # real body, long real lower wick (>=2x body), minimal real upper
+    # wick, independent of close color.
+    reversal_wick_shape_ok = None
+    if allow_reversal_wick_shapes:
+        body = (real_close - real_open).abs()
+        oc_max = pd.concat([real_open, real_close], axis=1).max(axis=1)
+        oc_min = pd.concat([real_open, real_close], axis=1).min(axis=1)
+        upper_wick = real_high - oc_max
+        lower_wick = oc_min - real_low
+        candle_range = (real_high - real_low).replace(0, np.nan)
+        dragonfly = ((body <= 0.1 * candle_range) & (lower_wick / candle_range >= 0.6)
+                    & (upper_wick / candle_range <= 0.15))
+        hammer = (body > 0) & (lower_wick >= 2 * body) & (upper_wick <= body)
+        reversal_wick_shape_ok = (dragonfly | hammer).fillna(False)
+
+    confirmed = [False] * n
+    sig_high_out = [float("nan")] * n
+    sig_low_out = [float("nan")] * n
+    trigger_price_out = [float("nan")] * n
+
+    state = "HUNTING"
+    sig_high = sig_low = None
+    days_pending = 0
+    warmup = max(ema21_period, rsi_period) + 1
+
+    for i in range(warmup, n):
+        e13, e21 = ema13.iloc[i], ema21.iloc[i]
+        if pd.isna(e13) or pd.isna(e21):
+            continue
+        hc, ho, hh, hl = ha_close.iloc[i], ha_open.iloc[i], ha_high.iloc[i], ha_low.iloc[i]
+
+        if state == "LOCKED_OUT":
+            if hc > e13:
+                state = "HUNTING"
+            continue
+
+        if state == "PENDING":
+            if hc < e21:
+                state, sig_high, sig_low, days_pending = "LOCKED_OUT", None, None, 0
+                continue
+            trigger_level = sig_high * (1 + breakout_threshold_pct)
+            if confirm_on_close:
+                rc = real_close.iloc[i]
+                crossed = not pd.isna(rc) and rc >= trigger_level
+                fill_price = float(rc) if crossed else None
+            else:
+                rh = real_high.iloc[i]
+                crossed = not pd.isna(rh) and rh >= trigger_level
+                fill_price = trigger_level if crossed else None
+            if crossed:
+                confirmed[i] = True
+                sig_high_out[i] = sig_high
+                sig_low_out[i] = sig_low
+                trigger_price_out[i] = fill_price
+                state, sig_high, sig_low, days_pending = "HUNTING", None, None, 0
+                continue
+            days_pending += 1
+            if days_pending >= confirm_lookback_days:
+                state, sig_high, sig_low, days_pending = "HUNTING", None, None, 0
+            continue
+
+        # HUNTING (sig_high/sig_low double as "is a run currently being
+        # built" -- non-None here means at least one qualifying candle
+        # has been seen since the last commit/reset, still extending)
+        if hc < e21:
+            state, sig_high, sig_low = "LOCKED_OUT", None, None
+            continue
+        r = rsi.iloc[i]
+        # 2026-08-23 explicit request: drop the red-candle requirement
+        # (candle color no longer matters) and make the close-above-EMA
+        # check toggleable between EMA13 and EMA21 via
+        # signal_close_above_ema13 (was: hc < ho and hc > e21, hardcoded).
+        # The touch condition (hl <= e21) and the HA_high > EMA13
+        # condition are unchanged either way, per "keep the rest thing as
+        # is" -- so is everything else in this function (LOCKED_OUT still
+        # keys off hc < e21, PENDING/confirmation logic untouched).
+        close_gate_level = e13 if signal_close_above_ema13 else e21
+        is_signal_candle = (hl <= e21 and hh > e13 and hc > close_gate_level
+                           and not pd.isna(r) and r > signal_rsi_min)
+        if is_signal_candle and volume_ema is not None:
+            v_ema = volume_ema.iloc[i]
+            is_signal_candle = not pd.isna(v_ema) and float(real_volume.iloc[i]) > v_ema
+        if is_signal_candle and volume_sma is not None:
+            v_sma = volume_sma.iloc[i]
+            is_signal_candle = not pd.isna(v_sma) and float(real_volume.iloc[i]) > v_sma
+        if is_signal_candle and prior_rsi_ok is not None:
+            p_ok = prior_rsi_ok.iloc[i]
+            is_signal_candle = bool(p_ok) if not pd.isna(p_ok) else False
+        if is_signal_candle and prior_above_ema13_ok is not None:
+            pa_ok = prior_above_ema13_ok.iloc[i]
+            is_signal_candle = bool(pa_ok) if not pd.isna(pa_ok) else False
+        if is_signal_candle and prior_tiered_ok is not None:
+            pt_ok = prior_tiered_ok.iloc[i]
+            is_signal_candle = bool(pt_ok) if not pd.isna(pt_ok) else False
+        if is_signal_candle and prior_ema50_no_violation_ok is not None:
+            pe50_ok = prior_ema50_no_violation_ok.iloc[i]
+            is_signal_candle = bool(pe50_ok) if not pd.isna(pe50_ok) else False
+        if is_signal_candle and ema50_slope_ok is not None:
+            es_ok = ema50_slope_ok.iloc[i]
+            is_signal_candle = bool(es_ok) if not pd.isna(es_ok) else False
+        if is_signal_candle and require_ema13_above_ema21:
+            is_signal_candle = e13 > e21
+        if is_signal_candle and require_ha_ema_stack:
+            e50s, e200s = ema50_ha_stack.iloc[i], ema200_ha_stack.iloc[i]
+            is_signal_candle = (not pd.isna(e50s) and not pd.isna(e200s)
+                               and e13 > e21 > e50s > e200s)
+        if is_signal_candle and require_real_green:
+            real_green = float(real_close.iloc[i]) > float(real_open.iloc[i])
+            if reversal_wick_shape_ok is not None:
+                is_signal_candle = real_green or bool(reversal_wick_shape_ok.iloc[i])
+            else:
+                is_signal_candle = real_green
+        if is_signal_candle and sector_gate_ok is not None:
+            sg_ok = sector_gate_ok.iloc[i]
+            is_signal_candle = bool(sg_ok) if not pd.isna(sg_ok) else False
+        if is_signal_candle and watchlist_membership is not None:
+            today_date = ha_close.index[i]
+            is_signal_candle = bool(watchlist_membership.get(today_date, False))
+        if is_signal_candle:
+            sig_high = hh
+            if sig_low is None:
+                sig_low = hl
+            elif stop_uses_run_low:
+                sig_low = min(sig_low, hl)
+            else:
+                sig_low = hl  # latest candle's own low only, ignore the rest of the run
+        elif sig_high is not None:
+            # The run just ended. Check TODAY (the candle that broke the
+            # run) against the crossing price immediately, same as any
+            # other day would be checked -- 2026-08-22 fix: without this,
+            # a candle that fails to extend the run but ALSO happens to
+            # cross the trigger level that same day would silently wait
+            # until tomorrow instead of confirming right away (caught via
+            # a real traced trade, ALKEM 2026-07-29: that day's real high
+            # already crossed the trigger level, but it wasn't checked at
+            # all until the following day under the old logic). Not
+            # confirmed today -> commit to PENDING as before, waiting
+            # from tomorrow.
+            trigger_level = sig_high * (1 + breakout_threshold_pct)
+            if confirm_on_close:
+                rc = real_close.iloc[i]
+                crossed_today = not pd.isna(rc) and rc >= trigger_level
+                fill_price_today = float(rc) if crossed_today else None
+            else:
+                rh = real_high.iloc[i]
+                crossed_today = not pd.isna(rh) and rh >= trigger_level
+                fill_price_today = trigger_level if crossed_today else None
+            if crossed_today:
+                confirmed[i] = True
+                sig_high_out[i] = sig_high
+                sig_low_out[i] = sig_low
+                trigger_price_out[i] = fill_price_today
+                sig_high, sig_low = None, None
+            else:
+                # 2026-08-23 fix: today's same-day check now counts as the
+                # FIRST day against confirm_lookback_days -- it used to be
+                # a "free" check outside the budget (days_pending reset to
+                # 0 here), silently allowing confirm_lookback_days+1 total
+                # days to be checked instead of confirm_lookback_days.
+                # Caught via explicit question: confirm_lookback_days=1
+                # was still checking a SECOND day after the immediate next
+                # candle already failed to confirm. If today alone already
+                # exhausts the budget (confirm_lookback_days<=1), skip
+                # PENDING entirely and go straight back to HUNTING.
+                days_pending = 1
+                if days_pending >= confirm_lookback_days:
+                    state, sig_high, sig_low, days_pending = "HUNTING", None, None, 0
+                else:
+                    state = "PENDING"
+
+    return pd.DataFrame({"confirmed_entry": confirmed, "signal_high": sig_high_out,
+                        "signal_low": sig_low_out, "trigger_price": trigger_price_out},
+                       index=ha.index)
+
+
+def heikin_ashi_ema21_touch_entry(df_upto: pd.DataFrame, ha_upto: pd.DataFrame,
+                                  precomputed_touch: pd.DataFrame,
+                                  fill_at_close: bool = False) -> dict | None:
+    """2026-08-22 (revised): per-day check for the EMA21-touch-then-wait
+    pattern -- now JUST a lookup into `precomputed_touch` (see that
+    function) for whether TODAY is a confirmed-breakout day. Explicit
+    request: "once you found the signal candle... only look at [whether]
+    entry price is crossing or not in next 10 days" -- so the day-of-
+    entry RSI gate, volume gate, AND trend-stack (HA EMA13>21>50>200)
+    gate that used to all live here were removed one by one (RSI
+    2026-08-21; volume and trend-stack 2026-08-22). Every remaining gate
+    (signal-candle RSI, watchlist-shortlist membership) is checked ONCE,
+    at the moment a signal candle starts (see precompute_ema21_touch_
+    signals) -- once PENDING, confirmation is purely mechanical: did
+    price cross the level within the window, yes or no.
+
+    2026-08-22: `fill_at_close` (False by default) -- True switches the
+    fill to TODAY's real close instead of the exact crossing level, for
+    a live design that only checks once daily AFTER market close (no
+    continuous intraday price monitoring): a system that only learns
+    "today's high crossed the trigger" once the day is already over can
+    no longer fill at that intraday level -- the best it can honestly
+    claim is that day's own close, the same convention heikin_ashi_
+    trend_entry already uses. Found (on real data) to meaningfully hurt
+    performance vs. the exact-crossing-price fill -- entering at a
+    day's close means paying for whatever the stock already ran during
+    that day, not the price at the moment it actually broke out.
+
+    Returns {"entry_price": the exact crossing level (signal_high *
+    (1+breakout_threshold_pct), precomputed as "trigger_price") OR
+    today's real close if fill_at_close, "stop": the confirmed signal
+    candle's HA low} or None if today isn't a confirmed day."""
+    today = ha_upto.index[-1]
+    if today not in precomputed_touch.index:
+        return None
+    row = precomputed_touch.loc[today]
+    if not bool(row["confirmed_entry"]):
+        return None
+
+    entry_price = float(df_upto["close"].iloc[-1]) if fill_at_close else float(row["trigger_price"])
+    return {"entry_price": entry_price, "stop": float(row["signal_low"])}
 
 
 def sector_above_ema_ok(sector_df_upto: pd.DataFrame, ema_period: int = 200) -> bool:
