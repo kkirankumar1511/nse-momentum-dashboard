@@ -464,6 +464,7 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
                      precomputed_row: pd.Series | None = None,
                      precomputed_weekly_monthly: tuple | None = None,
                      precomputed_weekly_monthly_ok: tuple | None = None,
+                     precomputed_mad_df: pd.DataFrame | None = None,
                      asof_date=None) -> dict:
     """All technical metrics for one symbol from its daily candles.
 
@@ -504,7 +505,11 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
     weekly_above_ema/monthly_above_ema output across ~9,200 sampled
     daily values, including dense day-by-day coverage through week/
     month boundaries -- not an approximation. None (default) falls
-    through to precomputed_weekly_monthly's own fast path unchanged."""
+    through to precomputed_weekly_monthly's own fast path unchanged.
+
+    precomputed_mad_df: optional, this symbol's full MAD trail -- see
+    _suggested_stop()'s own docstring for why this one matters more than
+    the other "None = only changes speed" params here."""
     if df.empty or len(df) < cfg["ema_slow"]:
         return {}
 
@@ -600,32 +605,52 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
         "avg_volume_3m": float(volume.tail(cfg["mom_lookback_days_short"]).mean()),
         "atr": atr_now,
         "atr_pct": atr_now / price * 100,
-        "suggested_stop": _suggested_stop(df, price, atr_now, cfg),
+        "suggested_stop": _suggested_stop(df, price, atr_now, cfg,
+                                          precomputed_mad_df, asof_date),
     }
 
 
-def _suggested_stop(df: pd.DataFrame, price: float, atr_now: float, cfg: dict) -> float:
+def _suggested_stop(df: pd.DataFrame, price: float, atr_now: float, cfg: dict,
+                    precomputed_mad_df: pd.DataFrame | None = None,
+                    asof_date=None) -> float:
     """Initial stop for a NEW buy -- the ATR distance below, unless
     mad_stop_enabled and the MAD volatility trail's own lower band is a
     sensible support (bull MAD-regime, sitting below price), same
-    fallback rule as backtest.py's _initial_stop(). Computed inline from
-    `df` (this symbol's own candles, already in hand) rather than a
-    precomputed dict -- unlike the weekly/monthly gate, MAD's default
-    ~21-bar windows don't need deep multi-year history, so there's no
-    extra fetch to wire in here, just the trail calc itself. Deferred
-    import: mad_trail_strategy imports indicators at module level, so an
-    import at the top of this file would be circular; safe as a call-time
-    import since both modules are already fully loaded by the time this
-    function actually runs."""
+    fallback rule as backtest.py's _initial_stop().
+
+    precomputed_mad_df: optional, this symbol's full MAD trail (from
+    mad_trail_strategy.precompute_mad_trail(), via backtest.run_backtest()
+    -> screener.build_technical_table()) -- a plain .loc[asof_date] lookup
+    instead of recomputing the whole rolling median/MAD/ATR trail from
+    scratch on every call. This matters a lot here specifically: unlike
+    every other "None (default) = always the case for live callers today,
+    only changes speed" param in this function, compute_snapshot() runs
+    once per symbol per REBALANCE DATE in a backtest's day-loop (every
+    single trading day at daily cadence) -- recomputing the full trail
+    that often, only to have backtest.py's OWN _initial_stop()/
+    precomputed_mad (already built once per run) never even read this
+    field, was a real, measured slowdown, not just theoretical waste.
+    None (default, and always the case for live callers today, where
+    compute_snapshot() only runs once per symbol per scan) falls back to
+    the original full computation -- correct either way, this only
+    changes speed."""
     atr_stop = price - cfg["atr_stop_multiple"] * atr_now
     if not cfg.get("mad_stop_enabled", False):
         return atr_stop
-    import mad_trail_strategy
-    mad_cfg = mad_trail_strategy.cfg_from_strategy(cfg)
-    mad_df = mad_trail_strategy.precompute_mad_trail(df, mad_cfg)
-    if mad_df.empty:
-        return atr_stop
-    last = mad_df.iloc[-1]
+    if precomputed_mad_df is not None:
+        if asof_date is not None and asof_date in precomputed_mad_df.index:
+            last = precomputed_mad_df.loc[asof_date]
+        elif asof_date is None and not precomputed_mad_df.empty:
+            last = precomputed_mad_df.iloc[-1]
+        else:
+            return atr_stop
+    else:
+        import mad_trail_strategy
+        mad_cfg = mad_trail_strategy.cfg_from_strategy(cfg)
+        mad_df = mad_trail_strategy.precompute_mad_trail(df, mad_cfg)
+        if mad_df.empty:
+            return atr_stop
+        last = mad_df.iloc[-1]
     if last["regime"] == 1 and not pd.isna(last["lower"]) and last["lower"] < price:
         return float(last["lower"])
     return atr_stop

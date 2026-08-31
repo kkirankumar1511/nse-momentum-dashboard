@@ -41,7 +41,8 @@ def build_technical_table(candles: dict[str, pd.DataFrame],
                           long_candles: dict[str, pd.DataFrame] | None = None,
                           precomputed: dict[str, pd.Series] | None = None,
                           precomputed_weekly_monthly: dict | None = None,
-                          precomputed_weekly_monthly_ok: dict | None = None) -> pd.DataFrame:
+                          precomputed_weekly_monthly_ok: dict | None = None,
+                          precomputed_mad: dict | None = None) -> pd.DataFrame:
     """cfg: BUG FIX -- this used to be hardcoded to config.STRATEGY
     internally, silently ignoring any custom cfg a caller (i.e. every
     Backtest UI run) actually passed, the same class of bug apply_gates()/
@@ -91,7 +92,22 @@ def build_technical_table(candles: dict[str, pd.DataFrame],
     vs. that one's still-one-resample-per-call fast path). None (default)
     falls through to precomputed_weekly_monthly's own fast path
     unchanged -- see compute_snapshot's own docstring for the
-    byte-identical verification."""
+    byte-identical verification.
+
+    precomputed_mad: optional, {symbol: DataFrame} from backtest.
+    run_backtest()'s own once-per-run mad_trail_strategy.
+    precompute_mad_trail() precompute -- turns compute_snapshot()'s
+    suggested_stop into a plain .loc[asof_date] lookup instead of
+    recomputing the whole rolling MAD trail from scratch on every call.
+    Matters more than the similar params above: unlike them, this one's
+    absence was a REAL measured slowdown (compute_snapshot runs once per
+    symbol per rebalance date -- every trading day at daily cadence --
+    and backtest.py's own entry-stop logic never even reads this field,
+    it uses its own separate precomputed_mad + _initial_stop()), not
+    just theoretical waste. None (default, and always the case for live
+    callers today, where this only runs once per symbol per scan) falls
+    back to the original full per-call computation -- correct either
+    way, this only changes speed."""
     cfg = cfg if cfg is not None else config.STRATEGY
     asof_date = bench.index[-1] if not bench.empty else None
     rows = {}
@@ -102,10 +118,12 @@ def build_technical_table(candles: dict[str, pd.DataFrame],
         precomputed_wm = precomputed_weekly_monthly.get(sym) if precomputed_weekly_monthly else None
         precomputed_wm_ok = (precomputed_weekly_monthly_ok.get(sym)
                              if precomputed_weekly_monthly_ok else None)
+        precomputed_mad_df = precomputed_mad.get(sym) if precomputed_mad else None
         snap = indicators.compute_snapshot(df, bench, cfg, long_close=long_close,
                                           precomputed_row=precomputed_row,
                                           precomputed_weekly_monthly=precomputed_wm,
                                           precomputed_weekly_monthly_ok=precomputed_wm_ok,
+                                          precomputed_mad_df=precomputed_mad_df,
                                           asof_date=asof_date)
         if snap:
             rows[sym] = snap

@@ -371,6 +371,7 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
                        long_candles: dict | None = None,
                        precomputed: dict | None = None,
                        precomputed_pivots: dict | None = None,
+                       precomputed_mad: dict | None = None,
                        precomputed_weekly_monthly: dict | None = None,
                        precomputed_weekly_monthly_ok: dict | None = None) -> pd.DataFrame:
     """Point-in-time ranking: identical pipeline to the live screener, fed
@@ -442,7 +443,8 @@ def rank_universe_asof(candles: dict, bench: pd.DataFrame,
     tech = screener.build_technical_table(sliced, bench_slice, cfg=cfg, long_candles=long_sliced,
                                           precomputed=precomputed_rows,
                                           precomputed_weekly_monthly=precomputed_weekly_monthly,
-                                          precomputed_weekly_monthly_ok=precomputed_weekly_monthly_ok)
+                                          precomputed_weekly_monthly_ok=precomputed_weekly_monthly_ok,
+                                          precomputed_mad=precomputed_mad)
     if tech.empty:
         return tech
     fundamentals = None
@@ -974,12 +976,14 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         # 2) monthly rebalance: recompute the universe, drop trend/rank
         # failures, and refresh the standing watchlist (see step 2b).
         if date in rb_dates:
-            ranked = rank_universe_asof(candles, bench, date, cfg,
-                                       fundamentals_history, score_cache,
-                                       sector_candles, sector_membership,
-                                       long_candles, precomputed,
-                                       precomputed_pivots, precomputed_weekly_monthly,
-                                       precomputed_weekly_monthly_ok)
+            ranked = rank_universe_asof(
+                candles, bench, date, cfg,
+                fundamentals_history=fundamentals_history, score_cache=score_cache,
+                sector_candles=sector_candles, sector_membership=sector_membership,
+                long_candles=long_candles, precomputed=precomputed,
+                precomputed_pivots=precomputed_pivots, precomputed_mad=precomputed_mad,
+                precomputed_weekly_monthly=precomputed_weekly_monthly,
+                precomputed_weekly_monthly_ok=precomputed_weekly_monthly_ok)
             if not ranked.empty:
                 candidates = ranked[ranked["all_gates"]]
                 keep_zone = set(candidates.head(cfg["max_positions"] * 2).index)
