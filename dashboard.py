@@ -3984,11 +3984,34 @@ def page_backtest():
         else:
             with rc2:
                 rc2a, rc2b = st.columns(2)
-                default_start = dt.date.today() - dt.timedelta(days=3 * 365)
-                start_date = rc2a.date_input("Start date", value=default_start,
-                                             max_value=dt.date.today())
-                end_date = rc2b.date_input("End date", value=dt.date.today(),
-                                           max_value=dt.date.today())
+                # Streamlit deletes a widget's own auto-managed state if it
+                # isn't rendered on a given script run (documented
+                # behavior, confirmed via a headless AppTest simulation --
+                # this is true regardless of whether the widget has an
+                # explicit key=, that alone does NOT fix it) -- since these
+                # two date_inputs only render while range_mode == "Custom
+                # dates", switching to "Trailing years" and back silently
+                # reset them to a freshly-recomputed default (today - 3
+                # years for start_date), discarding whatever custom range
+                # you'd actually picked. Mirror each widget's value into a
+                # plain (non-widget-managed) session_state slot every
+                # render, and seed value= from THAT instead of a fresh
+                # computation -- a plain dict entry survives the widget
+                # being unmounted, so a later remount re-seeds from your
+                # last real choice instead of silently reverting.
+                if "bt_custom_start_date_saved" not in st.session_state:
+                    st.session_state["bt_custom_start_date_saved"] = \
+                        dt.date.today() - dt.timedelta(days=3 * 365)
+                if "bt_custom_end_date_saved" not in st.session_state:
+                    st.session_state["bt_custom_end_date_saved"] = dt.date.today()
+                start_date = rc2a.date_input(
+                    "Start date", value=st.session_state["bt_custom_start_date_saved"],
+                    max_value=dt.date.today(), key="bt_custom_start_date")
+                end_date = rc2b.date_input(
+                    "End date", value=st.session_state["bt_custom_end_date_saved"],
+                    max_value=dt.date.today(), key="bt_custom_end_date")
+                st.session_state["bt_custom_start_date_saved"] = start_date
+                st.session_state["bt_custom_end_date_saved"] = end_date
             years = None
         with rc3:
             bt_capital = st.number_input("Starting capital (₹)", value=1_000_000.0,
