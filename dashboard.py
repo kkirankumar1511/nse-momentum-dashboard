@@ -4606,6 +4606,30 @@ def page_backtest():
             st.session_state["bt_is_cached"] = False
             st.session_state["bt_cfg"] = result.get("cfg")
             st.session_state["bt_run_meta"] = result.get("run_meta")
+        # Every explicitly-keyed form widget above (checkboxes/segmented_
+        # controls/date_inputs that carry key="bt_...") has an entry in
+        # st.session_state by now, from whichever render last happened
+        # while this job was running/locked. Streamlit's rule for a keyed
+        # widget is that once session_state[key] exists, a freshly-passed
+        # value=/default= on a LATER render is silently ignored -- only
+        # the widget's own prior session-state value is used. Without
+        # this, the form's next render (backtest_running now False,
+        # _bt_locked False, disabled= correctly flips back off) would
+        # still SHOW every keyed field frozen at whatever it was during
+        # the run, not the freshly-editable value= being passed -- which
+        # is exactly "form stays non-editable after the run finishes",
+        # even though it's no longer actually disabled. Deleting these
+        # keys forces Streamlit to re-seed each one fresh from its
+        # value=/default= on the very next render, for every completion
+        # path (success, cancelled, or error), not just success.
+        for _k in ("bt_range_mode", "bt_custom_start_date", "bt_custom_end_date",
+                  "bt_use_mad_stop", "bt_use_trailing", "bt_rebalance_cadence",
+                  "bt_use_rsi_exit_gate", "bt_use_wm_rsi_gate", "bt_use_equal_weight",
+                  "bt_use_capital_equal_weight", "bt_use_fundamentals",
+                  "bt_use_sector_diversification", "bt_use_sector_composite",
+                  "bt_use_regime_filter", "bt_entry_confirm_days",
+                  "bt_entry_confirm_pool_size"):
+            st.session_state.pop(_k, None)
         clear_background_job("backtest_run")
         st.rerun()
 
