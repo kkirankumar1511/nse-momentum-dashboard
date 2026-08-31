@@ -818,6 +818,97 @@ def main_gap_check():
                         else "no positions gapped below stop")
 
 
+def correct_todays_exit_prices() -> list[str]:
+    """End-of-day correction pass, meant to run once shortly after market
+    close (~15:31 IST): replaces today's closed trades' exit_price -- an
+    LTP-at-detection-time APPROXIMATION every close_trade() call site uses,
+    since Kite's order-placement response never includes the real fill
+    price -- with the REAL average fill price from Kite's own order book
+    (kite_client.get_orders()), the only source of truth for what actually
+    executed. Applies uniformly to every trade that closed today,
+    regardless of which path closed it (rebalance sell, gap-down stop, or
+    a GTT/external fill caught by reconciled_positions()) -- no need to
+    distinguish which; Kite's real trade book is strictly more accurate
+    than any LTP guess either way.
+
+    Same-day only: kite.orders() only ever returns TODAY's order book, so
+    a day this doesn't run, the accurate price is gone for good -- this
+    must be scheduled to run every trading day, not something to catch up
+    later.
+
+    If a symbol has more than one COMPLETE sell fill today (rare -- e.g. a
+    same-day round trip), aggregates a quantity-weighted average across all
+    of them and applies that single blended price to every trades row that
+    closed for that symbol today -- an approximation for that edge case,
+    not a per-order match.
+
+    Returns a log line per symbol actually corrected."""
+    today = dt.date.today().isoformat()
+    try:
+        orders = kite_client.get_orders()
+    except Exception as e:
+        return [f"Exit-price correction skipped -- Kite orders fetch failed: {e}"]
+    if orders.empty:
+        return []
+
+    sells = orders[(orders["transaction_type"] == "SELL")
+                   & (orders["status"] == "COMPLETE")].copy()
+    if sells.empty:
+        return []
+    qty_col = "filled_quantity" if "filled_quantity" in sells.columns else "quantity"
+    sells["_qty"] = sells[qty_col].astype(float)
+    sells = sells[sells["_qty"] > 0]
+    if sells.empty:
+        return []
+
+    log = []
+    for sym, grp in sells.groupby("tradingsymbol"):
+        total_qty = grp["_qty"].sum()
+        avg_price = float((grp["average_price"] * grp["_qty"]).sum() / total_qty)
+        n = state_db.correct_trade_exit_price(sym, today, avg_price)
+        if n:
+            log.append(f"{sym}: exit_price corrected to Rs.{avg_price:.2f} "
+                      f"from Kite's real order book ({n} row(s))")
+    return log
+
+
+def main_exit_price_correction():
+    """Headless entry point for correct_todays_exit_prices() -- run once
+    shortly after market close (~15:31 IST). Logs to the same LOG_PATH as
+    every other automated run, and wrapped in state_db.job_run() so the
+    Job Log page has a persisted record. No-ops on an NSE trading holiday,
+    same reasoning as main()/main_gap_check()."""
+    if not nse_holidays.is_trading_day(dt.date.today()):
+        print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Skipping exit-price "
+             f"correction -- NSE holiday or weekend.")
+        return
+    os.makedirs("cache", exist_ok=True)
+    log_lines = [f"\n{'=' * 60}\n{dt.datetime.now():%d %b %Y %H:%M:%S} "
+                f"(exit-price correction)\n{'=' * 60}"]
+
+    def log(msg=""):
+        print(msg)
+        log_lines.append(msg)
+
+    with state_db.job_run("exit_price_correction", "scheduled") as jr:
+        try:
+            corrected = correct_todays_exit_prices()
+        except Exception as e:
+            log(f"FAILED -- {e}")
+            with open(LOG_PATH, "a") as f:
+                f.write("\n".join(log_lines) + "\n")
+            raise
+
+        if not corrected:
+            log("No sell fills today to reconcile (or nothing needed correcting).")
+        for line in corrected:
+            log(line)
+        with open(LOG_PATH, "a") as f:
+            f.write("\n".join(log_lines) + "\n")
+        jr["summary"] = (f"{len(corrected)} symbol(s) corrected" if corrected
+                        else "nothing to correct")
+
+
 def main():
     """Run headless, e.g. from Windows Task Scheduler -- see README's
     "Scheduled scan" section. Every run appends a timestamped block to
@@ -948,5 +1039,7 @@ if __name__ == "__main__":
     import sys
     if "--gap-check" in sys.argv:
         main_gap_check()
+    elif "--correct-exit-prices" in sys.argv:
+        main_exit_price_correction()
     else:
         main()

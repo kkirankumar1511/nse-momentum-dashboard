@@ -1883,6 +1883,40 @@ def close_trade(symbol: str, exit_price: float | None, exit_reason: str) -> None
         record_cash_flow(today, -dp_charge, f"DP charge -- {symbol} sold")
 
 
+def correct_trade_exit_price(symbol: str, exit_date: str, real_exit_price: float) -> int:
+    """Overwrites exit_price (and recomputed realized_pnl/realized_ret_pct)
+    on every trades row that closed for this symbol on this date -- see
+    live_rebalance.correct_todays_exit_prices(). close_trade() (and
+    reconciled_positions()) can only ever record an LTP-at-detection-time
+    APPROXIMATION as exit_price, since Kite's order-placement response
+    never includes the real fill price -- this replaces it with the real
+    average fill price once Kite's own end-of-day order book has it.
+    Also corrects the matching positions row(s) so the two stay in sync
+    (positions.realized_pnl mirrors trades.realized_pnl, same convention
+    reconciled_positions() already keeps). Returns how many trades rows
+    were updated (0 if none matched -- e.g. this symbol's close wasn't
+    today, or was already reconciled by a different day's run)."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, entry_price, qty FROM trades WHERE symbol = ? "
+        "AND exit_date = ? AND status = 'closed'", (symbol, exit_date)).fetchall()
+    for row in rows:
+        realized_pnl = (real_exit_price - row["entry_price"]) * row["qty"]
+        realized_ret_pct = (real_exit_price / row["entry_price"] - 1) * 100
+        conn.execute(
+            "UPDATE trades SET exit_price = ?, realized_pnl = ?, "
+            "realized_ret_pct = ? WHERE id = ?",
+            (real_exit_price, realized_pnl, realized_ret_pct, row["id"]))
+    conn.execute(
+        "UPDATE positions SET exit_price = ?, "
+        "realized_pnl = (? - entry_price) * qty "
+        "WHERE symbol = ? AND closed_date = ? AND status = 'closed'",
+        (real_exit_price, real_exit_price, symbol, exit_date))
+    conn.commit()
+    conn.close()
+    return len(rows)
+
+
 def get_trades(symbol: str | None = None, status: str | None = None,
               since: str | None = None) -> pd.DataFrame:
     """Also carries the position's latest known stop as
