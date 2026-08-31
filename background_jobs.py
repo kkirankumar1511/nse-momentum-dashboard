@@ -50,7 +50,8 @@ state_db.cleanup_stale_manual_jobs()
 
 
 def start_background_job(key: str, fn, *args, job_type: str | None = None,
-                         summarize_fn=None, **kwargs) -> bool:
+                         summarize_fn=None, meta: dict | None = None,
+                         **kwargs) -> bool:
     """Runs fn(*args, **kwargs, progress_cb=...) in a background thread.
     No-ops (returns False) if a job with this key is already running --
     otherwise returns True. `progress_cb(stage, frac)` and the eventual
@@ -63,13 +64,27 @@ def start_background_job(key: str, fn, *args, job_type: str | None = None,
     Log page shows manual and scheduled runs of the same job type
     together. Omit to skip persisted logging (falls back to the old
     in-memory-only behavior). summarize_fn(result) -> str, if given,
-    produces the one-line summary stashed on that job_runs row."""
+    produces the one-line summary stashed on that job_runs row.
+
+    meta: an arbitrary dict a caller wants to read back later via
+    get_background_job(key)["meta"] -- e.g. the exact form values
+    submitted for this run, so a page whose st.session_state gets wiped
+    mid-run (a real risk for anything long enough to outlive a browser
+    tab's WebSocket session -- switching away, closing the browser, or
+    just a network blip over 15-50+ minutes) can still redraw its inputs
+    from what was ACTUALLY submitted (this dict lives on the process-
+    global _JOBS entry, not st.session_state, so it survives that) rather
+    than silently reverting every field to its hardcoded default the
+    moment the session resets. Never passed to fn -- purely for the
+    caller's own later retrieval. None (default) -- unused by every
+    existing caller (Screener, Live Rebalance) -- leaves job["meta"] as
+    None, harmless since they don't read it back."""
     existing = _JOBS.get(key)
     if existing is not None and existing["thread"].is_alive():
         return False
 
     job = {"thread": None, "done": False, "result": None, "error": None,
-          "cancelled": False, "cancel_requested": False,
+          "cancelled": False, "cancel_requested": False, "meta": meta,
           "progress": (0.0, "Starting..."), "started_at": dt.datetime.now()}
 
     def _progress_cb(stage, frac):

@@ -3908,6 +3908,24 @@ def page_backtest():
     backtest_job = get_background_job("backtest_run")
     backtest_running = backtest_job is not None and not backtest_job["done"]
 
+    # While a backtest is running, every field below should show and stay
+    # locked to whatever was actually SUBMITTED for this run, not silently
+    # revert to a fresh default. A run can take 15-50+ minutes -- long
+    # enough to outlive the browser tab's own session (closing the browser,
+    # switching away, or just a network blip is enough), and st.session_
+    # state is per-session, not persisted across that. backtest_job["meta"]
+    # lives on the process-global job registry instead (see background_
+    # jobs.start_background_job's docstring), so it survives a session
+    # reset even though every widget's own state doesn't -- reading form
+    # values from there instead of the widgets' own value= defaults while
+    # locked is what actually fixes "values reset to default" rather than
+    # just disabling the (already-wrong) displayed values.
+    _bt_snapshot = (backtest_job.get("meta") or {}) if backtest_job else {}
+    _bt_locked = backtest_running and bool(_bt_snapshot)
+
+    def _bt_val(key, computed_default):
+        return _bt_snapshot.get(key, computed_default) if _bt_locked else computed_default
+
     _backtest_tip = html_lib.escape(
         "Replays the exact screener logic point-in-time with monthly "
         "rebalancing (any slot freed by a stop gets redeployed immediately, "
@@ -3973,10 +3991,12 @@ def page_backtest():
         with rc1:
             range_mode = st.segmented_control(
                 "Date range", ["Trailing years", "Custom dates"],
-                default="Trailing years", key="bt_range_mode", required=True)
+                default=_bt_val("range_mode", "Trailing years"), key="bt_range_mode",
+                required=True, disabled=_bt_locked)
         if range_mode == "Trailing years":
             with rc2:
-                years = st.slider("Years of history", 1.0, 5.0, 3.0, 0.5,
+                years = st.slider("Years of history", 1.0, 5.0, _bt_val("years", 3.0), 0.5,
+                                  disabled=_bt_locked,
                                   help="Up to 5 years supported via chunked Kite "
                                        "fetches (Kite's historical API caps a single "
                                        "request at ~2000 days).")
@@ -4005,21 +4025,28 @@ def page_backtest():
                 if "bt_custom_end_date_saved" not in st.session_state:
                     st.session_state["bt_custom_end_date_saved"] = dt.date.today()
                 start_date = rc2a.date_input(
-                    "Start date", value=st.session_state["bt_custom_start_date_saved"],
-                    max_value=dt.date.today(), key="bt_custom_start_date")
+                    "Start date",
+                    value=_bt_val("start_date", st.session_state["bt_custom_start_date_saved"]),
+                    max_value=dt.date.today(), key="bt_custom_start_date",
+                    disabled=_bt_locked)
                 end_date = rc2b.date_input(
-                    "End date", value=st.session_state["bt_custom_end_date_saved"],
-                    max_value=dt.date.today(), key="bt_custom_end_date")
-                st.session_state["bt_custom_start_date_saved"] = start_date
-                st.session_state["bt_custom_end_date_saved"] = end_date
+                    "End date",
+                    value=_bt_val("end_date", st.session_state["bt_custom_end_date_saved"]),
+                    max_value=dt.date.today(), key="bt_custom_end_date",
+                    disabled=_bt_locked)
+                if not _bt_locked:
+                    st.session_state["bt_custom_start_date_saved"] = start_date
+                    st.session_state["bt_custom_end_date_saved"] = end_date
             years = None
         with rc3:
-            bt_capital = st.number_input("Starting capital (₹)", value=1_000_000.0,
-                                        step=100000.0)
+            bt_capital = st.number_input(
+                "Starting capital (₹)", value=_bt_val("bt_capital", 1_000_000.0),
+                step=100000.0, disabled=_bt_locked)
         with rc4:
             bt_max_positions = st.number_input(
                 "Max open positions", min_value=1, max_value=30,
-                value=int(config.STRATEGY["max_positions"]), step=1,
+                value=_bt_val("max_positions", int(config.STRATEGY["max_positions"])),
+                step=1, disabled=_bt_locked,
                 help="Backtest-only override (config.STRATEGY['max_positions'] "
                      "is 10 live) -- more slots means more diversification but "
                      "smaller equal-weight targets per slot; fewer slots "
@@ -4049,7 +4076,8 @@ def page_backtest():
         _ov_muted("Trade management")
         use_mad_stop = st.checkbox(
             "Use MAD Volatility Trail stop instead of ATR", key="bt_use_mad_stop",
-            value=bool(config.STRATEGY.get("mad_stop_enabled", False)),
+            value=_bt_val("mad_stop_enabled", bool(config.STRATEGY.get("mad_stop_enabled", False))),
+            disabled=_bt_locked,
             help="OFF by default. Replaces BOTH the initial and trailing stop below "
                  "with the MAD trail's own one-sided ratcheting lower band (median + "
                  "MAD-scaled bands, ATR floor) -- falls back to the ATR stop/trailing "
@@ -4067,22 +4095,26 @@ def page_backtest():
             with mad1:
                 mad_med_len_v = st.number_input(
                     "Median length", min_value=5, max_value=100,
-                    value=int(config.STRATEGY.get("mad_stop_med_len", 21)), step=1,
+                    value=_bt_val("mad_stop_med_len", int(config.STRATEGY.get("mad_stop_med_len", 21))),
+                    step=1, disabled=_bt_locked,
                     help="Rolling window for the trail's median center line.")
             with mad2:
                 mad_mad_len_v = st.number_input(
                     "MAD length", min_value=5, max_value=100,
-                    value=int(config.STRATEGY.get("mad_stop_mad_len", 21)), step=1,
+                    value=_bt_val("mad_stop_mad_len", int(config.STRATEGY.get("mad_stop_mad_len", 21))),
+                    step=1, disabled=_bt_locked,
                     help="Rolling window for the median-absolute-deviation band width.")
             with mad3:
                 mad_dev_factor_v = st.number_input(
                     "Deviation factor", min_value=0.5, max_value=5.0,
-                    value=float(config.STRATEGY.get("mad_stop_dev_factor", 2.0)), step=0.1,
+                    value=_bt_val("mad_stop_dev_factor", float(config.STRATEGY.get("mad_stop_dev_factor", 2.0))),
+                    step=0.1, disabled=_bt_locked,
                     help="MAD band half-width multiplier -- wider band = looser stop.")
             with mad4:
                 mad_atr_floor_mult_v = st.number_input(
                     "ATR floor ×", min_value=0.5, max_value=5.0,
-                    value=float(config.STRATEGY.get("mad_stop_atr_floor_mult", 2.0)), step=0.1,
+                    value=_bt_val("mad_stop_atr_floor_mult", float(config.STRATEGY.get("mad_stop_atr_floor_mult", 2.0))),
+                    step=0.1, disabled=_bt_locked,
                     help="Floors the band width at this × ATR(14) so it never gets "
                          "unrealistically tight in a low-volatility lull.")
         else:
@@ -4095,33 +4127,36 @@ def page_backtest():
         with tm1:
             atr_stop_multiple_v = st.number_input(
                 "Initial stop (× ATR)", min_value=0.5, max_value=10.0,
-                value=float(config.STRATEGY["atr_stop_multiple"]), step=0.1)
+                value=_bt_val("atr_stop_multiple", float(config.STRATEGY["atr_stop_multiple"])),
+                step=0.1, disabled=_bt_locked)
         with tm2:
             ts1, ts2 = st.columns([1, 1])
             with ts1:
                 use_trailing = st.checkbox(
-                    "Trailing stop", value=bool(config.STRATEGY["trailing_stop_enabled"]),
-                    key="bt_use_trailing",
+                    "Trailing stop",
+                    value=_bt_val("trailing_stop_enabled", bool(config.STRATEGY["trailing_stop_enabled"])),
+                    key="bt_use_trailing", disabled=_bt_locked,
                     help="LIVE default is ON. Ratchets each position's stop up to "
                          "highest_close_since_entry - multiple*ATR as it gains, "
                          "never back down.")
             with ts2:
                 trailing_mult_v = st.number_input(
                     "ATR multiple", min_value=0.5, max_value=10.0,
-                    value=float(config.STRATEGY["trailing_atr_multiple"]), step=0.25,
-                    disabled=not use_trailing,
+                    value=_bt_val("trailing_atr_multiple", float(config.STRATEGY["trailing_atr_multiple"])),
+                    step=0.25, disabled=(not use_trailing) or _bt_locked,
                     help="A 5-year sweep found an inverted-U peaking at 4.0x (the "
                          "live default): CAGR 24.30% vs baseline 22.51%, Sharpe 1.73 "
                          "vs 1.50, max drawdown -14.37% vs -18.06%.")
         with tm3:
             risk_per_trade_pct_v = st.number_input(
                 "Risk per trade (% of capital)", min_value=0.1, max_value=10.0,
-                value=float(config.STRATEGY["risk_per_trade_pct"]), step=0.1)
+                value=_bt_val("risk_per_trade_pct", float(config.STRATEGY["risk_per_trade_pct"])),
+                step=0.1, disabled=_bt_locked)
         with tm4:
             rebalance_cadence_v = st.segmented_control(
                 "Rebalance cadence", ["daily", "weekly", "monthly"],
-                default=config.STRATEGY.get("rebalance_cadence", "daily"),
-                key="bt_rebalance_cadence",
+                default=_bt_val("rebalance_cadence", config.STRATEGY.get("rebalance_cadence", "daily")),
+                key="bt_rebalance_cadence", disabled=_bt_locked,
                 help="All three mirror the LIVE Admin setting exactly -- "
                      "'daily' re-checks the sell/keep-zone rule every trading "
                      "day (matches the live default); 'weekly' only on the "
@@ -4137,13 +4172,15 @@ def page_backtest():
         with ti1:
             rsi_min_v = st.number_input(
                 "RSI min", min_value=0.0, max_value=100.0,
-                value=float(config.STRATEGY["rsi_min"]), step=0.01, format="%.2f",
+                value=_bt_val("rsi_min", float(config.STRATEGY["rsi_min"])),
+                step=0.01, format="%.2f", disabled=_bt_locked,
                 help="Momentum names trade 45-80 in this system's regime; below "
                      "this is not yet in an uptrend.")
         with ti2:
             rsi_max_v = st.number_input(
                 "RSI max", min_value=0.0, max_value=100.0,
-                value=float(config.STRATEGY["rsi_max"]), step=0.01, format="%.2f",
+                value=_bt_val("rsi_max", float(config.STRATEGY["rsi_max"])),
+                step=0.01, format="%.2f", disabled=_bt_locked,
                 help="A 5-year A/B (max_positions=4) found raising this 78->80 "
                      "improved CAGR 7.36->8.15%, Sharpe 1.14->1.25 -- re-verify "
                      "any further move against that same baseline, not just "
@@ -4151,34 +4188,41 @@ def page_backtest():
         with ti3:
             ema_fast_v = st.number_input(
                 "EMA (fast)", min_value=5, max_value=100,
-                value=int(config.STRATEGY["ema_fast"]), step=1)
+                value=_bt_val("ema_fast", int(config.STRATEGY["ema_fast"])),
+                step=1, disabled=_bt_locked)
         ti4, ti5, ti6 = st.columns(3)
         with ti4:
             ema_slow_v = st.number_input(
                 "EMA (slow)", min_value=50, max_value=400,
-                value=int(config.STRATEGY["ema_slow"]), step=1)
+                value=_bt_val("ema_slow", int(config.STRATEGY["ema_slow"])),
+                step=1, disabled=_bt_locked)
         with ti5:
             mom_lookback_short_v = st.number_input(
                 "Momentum lookback — short (days)", min_value=5, max_value=252,
-                value=int(config.STRATEGY["mom_lookback_days_short"]), step=1)
+                value=_bt_val("mom_lookback_days_short", int(config.STRATEGY["mom_lookback_days_short"])),
+                step=1, disabled=_bt_locked)
         with ti6:
             mom_lookback_long_v = st.number_input(
                 "Momentum lookback — long (days)", min_value=5, max_value=504,
-                value=int(config.STRATEGY["mom_lookback_days_long"]), step=1)
+                value=_bt_val("mom_lookback_days_long", int(config.STRATEGY["mom_lookback_days_long"])),
+                step=1, disabled=_bt_locked)
         ti7, ti8 = st.columns(2)
         with ti7:
             skip_recent_days_v = st.number_input(
                 "Skip most recent (days)", min_value=0, max_value=30,
-                value=int(config.STRATEGY["skip_recent_days"]), step=1)
+                value=_bt_val("skip_recent_days", int(config.STRATEGY["skip_recent_days"])),
+                step=1, disabled=_bt_locked)
         with ti8:
             history_days_v = st.number_input(
                 "Candle history fetched (days)", min_value=300, max_value=3000,
-                value=int(config.STRATEGY["history_days"]), step=100)
+                value=_bt_val("history_days", int(config.STRATEGY["history_days"])),
+                step=100, disabled=_bt_locked)
         ti9, ti10 = st.columns([1, 1])
         with ti9:
             use_rsi_exit_gate = st.checkbox(
                 "Separate exit RSI ceiling", key="bt_use_rsi_exit_gate",
-                value=bool(config.STRATEGY.get("rsi_exit_gate_enabled", False)),
+                value=_bt_val("rsi_exit_gate_enabled", bool(config.STRATEGY.get("rsi_exit_gate_enabled", False))),
+                disabled=_bt_locked,
                 help="OFF by default and NOT the live behavior. When on, a "
                      "held position whose only failing gate is the entry-band "
                      "RSI max above stays held (instead of being force-sold) "
@@ -4191,13 +4235,14 @@ def page_backtest():
         with ti10:
             rsi_exit_max_v = st.number_input(
                 "Exit RSI ceiling", min_value=0.0, max_value=100.0,
-                value=float(config.STRATEGY.get("rsi_exit_max", config.STRATEGY["rsi_max"])),
-                step=1.0, format="%.2f", disabled=not use_rsi_exit_gate)
+                value=_bt_val("rsi_exit_max", float(config.STRATEGY.get("rsi_exit_max", config.STRATEGY["rsi_max"]))),
+                step=1.0, format="%.2f", disabled=(not use_rsi_exit_gate) or _bt_locked)
         ti11, _ti12 = st.columns([1, 2])
         with ti11:
             use_wm_rsi_gate = st.checkbox(
                 "Weekly/monthly EMA trend gate", key="bt_use_wm_rsi_gate",
-                value=bool(config.STRATEGY.get("weekly_monthly_gate_enabled", False)),
+                value=_bt_val("weekly_monthly_gate_enabled", bool(config.STRATEGY.get("weekly_monthly_gate_enabled", False))),
+                disabled=_bt_locked,
                 help="OFF by default and NOT the live behavior. Extra entry "
                      "gate on top of the daily checks above: weekly close "
                      "must be above its own 200-EMA, AND monthly close above "
@@ -4227,8 +4272,8 @@ def page_backtest():
             with ew1:
                 use_equal_weight = st.checkbox(
                     "Equal-weight allocator",
-                    value=bool(config.STRATEGY["advanced_equal_weight_sizing"]),
-                    key="bt_use_equal_weight",
+                    value=_bt_val("advanced_equal_weight_sizing", bool(config.STRATEGY["advanced_equal_weight_sizing"])),
+                    key="bt_use_equal_weight", disabled=_bt_locked,
                     help="LIVE default is ON. Sizes the whole day's buys in one "
                          "pass -- cross-slot borrowing within tolerance, partial "
                          "fill on shortfall, hard-stop-not-substitute, top-up of "
@@ -4237,8 +4282,8 @@ def page_backtest():
             with ew2:
                 equal_weight_tolerance_v = st.number_input(
                     "Tolerance", min_value=0.0, max_value=1.0,
-                    value=float(config.STRATEGY["equal_weight_tolerance_pct"]), step=0.01,
-                    format="%.2f", disabled=not use_equal_weight,
+                    value=_bt_val("equal_weight_tolerance_pct", float(config.STRATEGY["equal_weight_tolerance_pct"])),
+                    step=0.01, format="%.2f", disabled=(not use_equal_weight) or _bt_locked,
                     help="A 5-year A/B found 0.20 (the live default) beats the "
                          "original one-at-a-time fill on every metric at once: CAGR "
                          "43.06->44.39%, Sharpe 1.64->1.67, max drawdown "
@@ -4246,7 +4291,8 @@ def page_backtest():
             use_capital_equal_weight = st.checkbox(
                 "Capital-weighted sizing (uncheck for risk-based)",
                 key="bt_use_capital_equal_weight",
-                value=bool(config.STRATEGY.get("capital_equal_weight_sizing", True)),
+                value=_bt_val("capital_equal_weight_sizing", bool(config.STRATEGY.get("capital_equal_weight_sizing", True))),
+                disabled=_bt_locked,
                 help="ON by default, matches live. Sizes each position off "
                      "capital/portfolio value (the allocator above, or the "
                      "one-at-a-time fallback when it's off). Uncheck to size "
@@ -4259,8 +4305,8 @@ def page_backtest():
         with sc2:
             use_fundamentals = st.checkbox(
                 "Fundamental gate",
-                value=bool(config.STRATEGY["fundamental_gate_enabled"]),
-                key="bt_use_fundamentals",
+                value=_bt_val("fundamental_gate_enabled", bool(config.STRATEGY["fundamental_gate_enabled"])),
+                key="bt_use_fundamentals", disabled=_bt_locked,
                 help="This is the LIVE default (config.STRATEGY['fundamental_gate_"
                      "enabled']=True) -- uncheck only to see the pure-technical "
                      "baseline it was A/B'd against. Uses each filing's real "
@@ -4272,8 +4318,8 @@ def page_backtest():
         with sc3:
             fundamental_bonus_weight_v = st.number_input(
                 "Fundamental bonus weight", min_value=0.0, max_value=3.0,
-                value=float(config.STRATEGY["fundamental_bonus_weight"]), step=0.1,
-                disabled=not use_fundamentals,
+                value=_bt_val("fundamental_bonus_weight", float(config.STRATEGY["fundamental_bonus_weight"])),
+                step=0.1, disabled=(not use_fundamentals) or _bt_locked,
                 help="Tilts ranking toward higher-quality gate-passers (on top "
                      "of the gate itself, which only excludes/includes). A "
                      "5-year sweep found an inverted-U peaking at 0.5 (the live "
@@ -4284,7 +4330,8 @@ def page_backtest():
         with sc4:
             min_fundamental_score_v = st.number_input(
                 "Min fundamental score", min_value=0.0, max_value=100.0,
-                value=float(config.STRATEGY["min_fundamental_score"]), step=1.0,
+                value=_bt_val("min_fundamental_score", float(config.STRATEGY["min_fundamental_score"])),
+                step=1.0, disabled=_bt_locked,
                 help="NOT independently A/B-tuned -- config.py calls 50 (the "
                      "live default) 'a rough average-or-better bar, tune to "
                      "taste.' Only the gate's on/off status and the bonus "
@@ -4298,12 +4345,14 @@ def page_backtest():
         with sc5:
             near_high_threshold_v = st.number_input(
                 "52-week-high proximity (%)", min_value=50.0, max_value=100.0,
-                value=float(config.STRATEGY["near_high_threshold"]) * 100, step=1.0,
+                value=_bt_val("near_high_threshold", float(config.STRATEGY["near_high_threshold"])) * 100,
+                step=1.0, disabled=_bt_locked,
                 help="Price must be at least this % of its 52-week high to qualify.")
         with sc6:
             sector_bonus_weight_v = st.number_input(
                 "Sector bonus weight", min_value=0.0, max_value=1.0,
-                value=float(config.STRATEGY["sector_bonus_weight"]), step=0.05,
+                value=_bt_val("sector_bonus_weight", float(config.STRATEGY["sector_bonus_weight"])),
+                step=0.05, disabled=_bt_locked,
                 help="0 = off (recommended) -- re-tested with the equal-weight "
                      "allocator specifically: loses on CAGR and Sharpe at every "
                      "weight, and drawdown gets worse too, so there's no "
@@ -4312,7 +4361,8 @@ def page_backtest():
         with sc7:
             use_sector_diversification = st.checkbox(
                 "Sector diversification cap", key="bt_use_sector_diversification",
-                value=bool(config.STRATEGY.get("sector_diversification_enabled", False)),
+                value=_bt_val("sector_diversification_enabled", bool(config.STRATEGY.get("sector_diversification_enabled", False))),
+                disabled=_bt_locked,
                 help="OFF by default and NOT the live behavior. Unlike the bonus "
                      "above (a ranking tilt that can still leave a portfolio "
                      "stacked into one hot sector), this is a hard constraint: "
@@ -4332,18 +4382,18 @@ def page_backtest():
         with sc8:
             top_n_sectors_v = st.number_input(
                 "Top N sectors", min_value=1, max_value=10,
-                value=int(config.STRATEGY.get("top_n_sectors", 3)), step=1,
-                disabled=not use_sector_diversification)
+                value=_bt_val("top_n_sectors", int(config.STRATEGY.get("top_n_sectors", 3))),
+                step=1, disabled=(not use_sector_diversification) or _bt_locked)
         with sc9:
             max_positions_per_sector_v = st.number_input(
                 "Max positions / sector", min_value=1, max_value=10,
-                value=int(config.STRATEGY.get("max_positions_per_sector", 3)), step=1,
-                disabled=not use_sector_diversification)
+                value=_bt_val("max_positions_per_sector", int(config.STRATEGY.get("max_positions_per_sector", 3))),
+                step=1, disabled=(not use_sector_diversification) or _bt_locked)
         use_sector_composite = st.checkbox(
             "Use composite sector score (RS + 52w-high + breadth) instead of RS alone",
             key="bt_use_sector_composite",
-            value=bool(config.STRATEGY.get("sector_composite_score_enabled", False)),
-            disabled=not use_sector_diversification,
+            value=_bt_val("sector_composite_score_enabled", bool(config.STRATEGY.get("sector_composite_score_enabled", False))),
+            disabled=(not use_sector_diversification) or _bt_locked,
             help="Only affects which sectors count as 'top N' above -- OFF "
                  "ranks sectors on relative strength alone (the original "
                  "behavior); ON blends in two more signals, each research-"
@@ -4358,7 +4408,8 @@ def page_backtest():
 
         resistance_zone_weight_v = st.number_input(
             "Resistance zone weight", min_value=0.0, max_value=1.0,
-            value=float(config.STRATEGY.get("resistance_zone_weight", 0.0)), step=0.05,
+            value=_bt_val("resistance_zone_weight", float(config.STRATEGY.get("resistance_zone_weight", 0.0))),
+            step=0.05, disabled=_bt_locked,
             help="0 = off. Tilts ranking toward stocks with more clean room "
                  "before the nearest strong multi-year price zone above them "
                  "-- a level swing-touched repeatedly in the past (the last "
@@ -4373,7 +4424,8 @@ def page_backtest():
         with rg1:
             use_regime_filter = st.checkbox(
                 "Market regime filter", key="bt_use_regime_filter",
-                value=bool(config.STRATEGY.get("regime_filter_enabled", False)),
+                value=_bt_val("regime_filter_enabled", bool(config.STRATEGY.get("regime_filter_enabled", False))),
+                disabled=_bt_locked,
                 help="OFF by default. When NIFTY 50's own close is below its "
                      "200 EMA, caps how many NEW positions may open to "
                      "max_positions x the multiplier (right) -- never force-"
@@ -4392,8 +4444,8 @@ def page_backtest():
         with rg2:
             regime_position_multiplier_v = st.number_input(
                 "Regime position multiplier", min_value=0.1, max_value=1.0,
-                value=float(config.STRATEGY.get("regime_position_multiplier", 0.5)),
-                step=0.05, disabled=not use_regime_filter,
+                value=_bt_val("regime_position_multiplier", float(config.STRATEGY.get("regime_position_multiplier", 0.5))),
+                step=0.05, disabled=(not use_regime_filter) or _bt_locked,
                 help="Fraction of max_positions allowed while NIFTY is below "
                      "its 200 EMA -- 0.5 means half the normal slot count "
                      "(and, with equal-weight sizing, roughly half the "
@@ -4405,8 +4457,8 @@ def page_backtest():
             entry_confirm_days_v = st.number_input(
                 "Entry confirmation (consecutive rebalance events)",
                 min_value=0, max_value=10,
-                value=int(config.STRATEGY.get("entry_confirm_days", 0) or 0), step=1,
-                key="bt_entry_confirm_days",
+                value=_bt_val("entry_confirm_days", int(config.STRATEGY.get("entry_confirm_days", 0) or 0)),
+                step=1, key="bt_entry_confirm_days", disabled=_bt_locked,
                 help="0 = OFF (default). Requires a stock to have stayed in the "
                      "confirm-pool (right) for this many CONSECUTIVE rebalance "
                      "events before a NEW buy is allowed -- filters out one-event "
@@ -4421,8 +4473,10 @@ def page_backtest():
         with cf2:
             entry_confirm_pool_size_v = st.number_input(
                 "Confirm-pool size", min_value=1, max_value=100,
-                value=int(config.STRATEGY.get("entry_confirm_pool_size") or (bt_max_positions * 2)),
-                step=1, disabled=entry_confirm_days_v == 0, key="bt_entry_confirm_pool_size",
+                value=_bt_val("entry_confirm_pool_size",
+                             int(config.STRATEGY.get("entry_confirm_pool_size") or (bt_max_positions * 2))),
+                step=1, disabled=(entry_confirm_days_v == 0) or _bt_locked,
+                key="bt_entry_confirm_pool_size",
                 help="How many top-scored candidates count as the confirm-pool "
                      "each rebalance -- defaults to 2x portfolio size (e.g. "
                      "top-20 for a 10-position portfolio, same convention as the "
@@ -4504,11 +4558,23 @@ def page_backtest():
         # here without adding its key to that tuple too, this trips instead
         # of the two silently drifting apart.
         assert all(k in run_cfg for k in config.BACKTEST_TUNABLE_KEYS)
+        # Snapshot of every value actually submitted, keyed the same as
+        # run_cfg (plus the handful of fields run_cfg doesn't carry:
+        # date-range mode and the starting capital) -- read back by _bt_val
+        # above while this job is running/locked, so the form shows and
+        # stays on exactly what was submitted even if the browser session
+        # resets mid-run. See start_background_job's meta= docstring.
+        bt_meta = dict(run_cfg)
+        bt_meta.update({
+            "range_mode": range_mode, "years": years,
+            "start_date": start_date, "end_date": end_date,
+            "bt_capital": bt_capital,
+        })
         start_background_job(
             "backtest_run", _run_backtest_job,
             range_mode, years, start_date, end_date, use_fundamentals,
             run_cfg, bt_capital, rebalance_cadence_v,
-            job_type="backtest_run",
+            job_type="backtest_run", meta=bt_meta,
             summarize_fn=lambda r: (
                 f"CAGR {r['result']['metrics'].get('CAGR %', '?')}%, "
                 f"Sharpe {r['result']['metrics'].get('Sharpe', '?')}"))
