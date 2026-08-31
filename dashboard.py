@@ -5854,6 +5854,418 @@ def page_tradebook():
 
 
 # ---------------------------------------------------------------------------
+# Page: Guide ("how this app actually works")
+# ---------------------------------------------------------------------------
+
+_GUIDE_CSS = """
+<style>
+.guide-hero {
+    border-radius: 18px; padding: 32px 36px; margin-bottom: 20px;
+    background: linear-gradient(135deg, var(--ov-blue-d) 0%, var(--ov-purple-d) 55%, var(--ov-pink-d) 100%);
+    color: #fff; position: relative; overflow: hidden;
+}
+.guide-hero h1 { font-size: 28px; margin: 0 0 6px 0; font-weight: 800; letter-spacing: -0.02em; }
+.guide-hero p { font-size: 15px; margin: 0; opacity: 0.92; max-width: 640px; line-height: 1.55; }
+.guide-stats { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.guide-stat {
+    background: rgba(255,255,255,0.14); border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 10px; padding: 8px 14px; font-size: 12.5px; backdrop-filter: blur(2px);
+}
+.guide-stat b { font-size: 14px; display: block; }
+.guide-toc {
+    display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 22px 0;
+}
+.guide-toc a {
+    text-decoration: none; font-size: 12.5px; font-weight: 600; padding: 7px 13px;
+    border-radius: 999px; background: var(--ov-surface-2); border: 1px solid var(--ov-border);
+    color: var(--ov-text-secondary);
+}
+.guide-toc a:hover { border-color: var(--ov-border-strong); color: var(--ov-text-primary); }
+.guide-section { margin-bottom: 8px; }
+.guide-section h2 {
+    font-size: 19px; font-weight: 800; margin: 0 0 4px 0; display: flex;
+    align-items: center; gap: 9px; letter-spacing: -0.01em;
+}
+.guide-section .sub { color: var(--ov-text-muted); font-size: 13px; margin: 0 0 14px 0; }
+.guide-icon {
+    width: 30px; height: 30px; border-radius: 9px; display: inline-flex;
+    align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0;
+}
+.guide-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 18px 0; }
+.guide-flow-step {
+    background: var(--ov-surface-2); border: 1px solid var(--ov-border); border-radius: 10px;
+    padding: 9px 13px; font-size: 12.5px; font-weight: 700; color: var(--ov-text-primary);
+    text-align: center; line-height: 1.3;
+}
+.guide-flow-step span { display: block; font-size: 10.5px; font-weight: 500; color: var(--ov-text-muted); margin-top: 1px; }
+.guide-flow-arrow { color: var(--ov-text-muted); font-size: 15px; }
+.guide-card {
+    background: var(--ov-surface-2); border: 1px solid var(--ov-border); border-radius: 12px;
+    padding: 14px 16px; margin-bottom: 10px;
+}
+.guide-card h4 { margin: 0 0 6px 0; font-size: 13.5px; font-weight: 700; }
+.guide-card p, .guide-card li { font-size: 12.8px; color: var(--ov-text-secondary); line-height: 1.55; margin: 0 0 4px 0; }
+.guide-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.guide-grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.guide-formula {
+    font-family: 'SF Mono', Consolas, monospace; background: var(--ov-surface-1);
+    border: 1px dashed var(--ov-border-strong); border-radius: 10px; padding: 12px 15px;
+    font-size: 12.5px; margin: 8px 0 14px 0; color: var(--ov-text-primary); line-height: 1.7;
+}
+.guide-weights { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 16px 0; }
+.guide-weight-row { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.guide-weight-label { width: 168px; flex-shrink: 0; color: var(--ov-text-secondary); font-weight: 600; }
+.guide-weight-bar-bg { flex: 1; background: var(--ov-surface-1); border-radius: 6px; height: 16px; overflow: hidden; }
+.guide-weight-bar { height: 100%; border-radius: 6px; }
+.guide-weight-pct { width: 38px; text-align: right; font-weight: 700; font-size: 12px; }
+table.guide-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 6px 0 18px 0; }
+table.guide-table th {
+    text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em;
+    color: var(--ov-text-muted); padding: 6px 10px; border-bottom: 1px solid var(--ov-border-strong);
+}
+table.guide-table td { padding: 8px 10px; border-bottom: 1px solid var(--ov-border); color: var(--ov-text-secondary); vertical-align: top; }
+table.guide-table td:first-child { color: var(--ov-text-primary); font-weight: 600; white-space: nowrap; }
+.guide-pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 10.5px; font-weight: 700; }
+.guide-pages-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+.guide-page-card { border: 1px solid var(--ov-border); border-radius: 12px; padding: 12px 14px; background: var(--ov-surface-2); }
+.guide-page-card .icon { font-size: 18px; }
+.guide-page-card h5 { margin: 4px 0 3px 0; font-size: 13px; font-weight: 700; }
+.guide-page-card p { margin: 0; font-size: 12px; color: var(--ov-text-muted); line-height: 1.5; }
+</style>
+"""
+
+
+def _guide_section(icon: str, color: str, title: str, subtitle: str, anchor: str) -> str:
+    return (f'<div class="guide-section" id="{anchor}">'
+           f'<h2><span class="guide-icon" style="background:var(--ov-{color}-l);'
+           f'color:var(--ov-{color}-d);">{icon}</span>{html_lib.escape(title)}</h2>'
+           f'<p class="sub">{html_lib.escape(subtitle)}</p>')
+
+
+def _guide_flow(steps: list[tuple[str, str]]) -> str:
+    """steps: list of (label, sublabel)."""
+    parts = ['<div class="guide-flow">']
+    for i, (label, sub) in enumerate(steps):
+        if i:
+            parts.append('<span class="guide-flow-arrow">➜</span>')
+        parts.append(f'<div class="guide-flow-step">{html_lib.escape(label)}'
+                     f'<span>{html_lib.escape(sub)}</span></div>')
+    parts.append('</div>')
+    return "".join(parts)
+
+
+def page_guide():
+    st.markdown(_GUIDE_CSS, unsafe_allow_html=True)
+    cfg = config.STRATEGY
+    stop_mode = ("MAD Volatility Trail" if cfg.get("mad_stop_enabled") else
+                "ATR Trailing" if cfg.get("trailing_stop_enabled") else "Fixed ATR")
+    sizing_mode = ("Equal-weight (advanced allocator)"
+                  if cfg.get("capital_equal_weight_sizing", False)
+                     and cfg.get("advanced_equal_weight_sizing", True)
+                  else "Equal-weight (simple)" if cfg.get("capital_equal_weight_sizing", False)
+                  else "Risk-based (% of capital)")
+
+    st.markdown(
+        '<div class="guide-hero"><h1>📘 How This System Works</h1>'
+        '<p>A momentum-driven, rules-based swing-trading engine for NSE F&amp;O stocks — '
+        'it ranks the whole eligible universe every day, only ever buys a stock that clears '
+        'a stack of technical and fundamental checks, sizes and protects every position '
+        'automatically, and rebalances on a schedule you control. Everything below reflects '
+        'the exact logic actually running right now, pulled live from your current settings.</p>'
+        '<div class="guide-stats">'
+        + f'<div class="guide-stat"><b>{len(config.UNIVERSE)}</b>stocks in universe</div>'
+        + f'<div class="guide-stat"><b>{cfg.get("max_positions", 10)}</b>max positions</div>'
+        + f'<div class="guide-stat"><b>{cfg.get("rebalance_cadence", "daily").title()}</b>rebalance cadence</div>'
+        + f'<div class="guide-stat"><b>{stop_mode}</b>stop mechanism</div>'
+        + f'<div class="guide-stat"><b>{sizing_mode}</b>position sizing</div>'
+        + '</div></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="guide-toc">'
+        '<a href="#g-bigpicture">🗺️ The big picture</a>'
+        '<a href="#g-selection">🎯 How a stock earns its spot</a>'
+        '<a href="#g-protect">🛡️ Protecting what you own</a>'
+        '<a href="#g-rhythm">📅 The daily rhythm</a>'
+        '<a href="#g-safety">🚨 Execution &amp; safety nets</a>'
+        '<a href="#g-cash">💰 Cash management</a>'
+        '<a href="#g-pages">🧭 Tour of every page</a>'
+        '</div>', unsafe_allow_html=True)
+
+    # ---- The big picture -------------------------------------------------
+    st.markdown(_guide_section("🗺️", "blue", "The big picture", anchor="g-bigpicture",
+                               subtitle="One stock's entire journey through the system, start to finish."),
+               unsafe_allow_html=True)
+    st.markdown(_guide_flow([
+        ("Universe", f"~{len(config.UNIVERSE)} F&O stocks"),
+        ("Technical gates", "trend, RSI, 52w-high"),
+        ("Fundamental gate", "XBRL value score"),
+        ("Score & rank", "momentum + tilts"),
+        ("Sector cap", "diversification"),
+        ("Size & buy", "equal-weight/risk"),
+        ("Hold & protect", "stop ratchets up"),
+        ("Sell", "rebalance / stop / manual"),
+        ("Ledger", "charges, XIRR, tradebook"),
+    ]), unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:12.8px;color:var(--ov-text-muted);margin-top:-8px;">'
+        'Every box above is a real, separate decision this app makes — the sections below walk '
+        'through each one with the exact formulas and thresholds in use today.</p></div>',
+        unsafe_allow_html=True)
+
+    # ---- Selection ---------------------------------------------------
+    st.markdown(_guide_section("🎯", "green", "How a stock earns its spot", anchor="g-selection",
+                               subtitle="From ~200 F&O-eligible stocks down to a ranked shortlist."),
+               unsafe_allow_html=True)
+
+    st.markdown('<div class="guide-card"><h4>1. The universe</h4>'
+                f'<p>Every stock eligible for F&amp;O trading on NSE (fetched from NSE\'s own '
+                f'underlying-instruments list, refreshed weekly), filtered to only symbols '
+                f'actually tradable via Kite, minus anything you\'ve manually skipped in Admin. '
+                f'That\'s <b>{len(config.UNIVERSE)} stocks</b> right now.</p></div>',
+               unsafe_allow_html=True)
+
+    st.markdown('<div class="guide-card"><h4>2. Technical gates — every one must pass</h4>'
+               '<p>A stock failing ANY gate below is dropped entirely, not just scored lower.</p>',
+               unsafe_allow_html=True)
+    st.markdown(
+        '<table class="guide-table"><tr><th>Gate</th><th>Condition</th><th>Default</th></tr>'
+        '<tr><td>Trend structure</td><td>Price above both EMAs, and the fast EMA itself rising</td>'
+        f'<td>EMA {int(cfg.get("ema_fast",50))} / EMA {int(cfg.get("ema_slow",200))}</td></tr>'
+        '<tr><td>Near 52-week high</td><td>Price is at least this % of its 52-week high</td>'
+        f'<td>{cfg.get("near_high_threshold",0.85)*100:.0f}%</td></tr>'
+        '<tr><td>RSI band</td><td>14-day RSI inside this range — strong but not overheated</td>'
+        f'<td>{cfg.get("rsi_min",45)}–{cfg.get("rsi_max",80)}</td></tr>'
+        '<tr><td>Weekly/monthly trend</td><td>Price above its own weekly AND monthly EMA(200) — a higher-timeframe confirmation</td>'
+        f'<td>{"ON" if cfg.get("weekly_monthly_gate_enabled") else "off"}</td></tr>'
+        '<tr><td>Fundamental quality</td><td>Fundamental value score at or above the minimum (stocks with no data pass through)</td>'
+        f'<td>{"ON, min " + str(cfg.get("min_fundamental_score",50)) if cfg.get("fundamental_gate_enabled") else "off"}</td></tr>'
+        '<tr><td>Sector diversification</td><td>Stock\'s sector must be among the currently-strongest sector groups</td>'
+        f'<td>{"ON, top " + str(cfg.get("top_n_sectors",3)) if cfg.get("sector_diversification_enabled") else "off"}</td></tr>'
+        '</table></div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="guide-card"><h4>3. Momentum score — ranks everyone who passed the gates</h4>'
+               '<p>Every gate-passer gets one score, each ingredient converted to a Z-score '
+               '(how many standard deviations above/below the AVERAGE stock in today\'s universe) '
+               'before weighting, so a raw number in % or ratio terms never dominates just because '
+               'of its units:</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="guide-weights">'
+        + '<div class="guide-weight-row"><div class="guide-weight-label">6-month relative strength</div>'
+          '<div class="guide-weight-bar-bg"><div class="guide-weight-bar" style="width:40%;background:var(--ov-blue);"></div></div>'
+          '<div class="guide-weight-pct">40%</div></div>'
+        + '<div class="guide-weight-row"><div class="guide-weight-label">3-month relative strength</div>'
+          '<div class="guide-weight-bar-bg"><div class="guide-weight-bar" style="width:25%;background:var(--ov-teal);"></div></div>'
+          '<div class="guide-weight-pct">25%</div></div>'
+        + '<div class="guide-weight-row"><div class="guide-weight-label">52-week-high proximity</div>'
+          '<div class="guide-weight-bar-bg"><div class="guide-weight-bar" style="width:20%;background:var(--ov-purple);"></div></div>'
+          '<div class="guide-weight-pct">20%</div></div>'
+        + '<div class="guide-weight-row"><div class="guide-weight-label">Volume expansion</div>'
+          '<div class="guide-weight-bar-bg"><div class="guide-weight-bar" style="width:15%;background:var(--ov-amber);"></div></div>'
+          '<div class="guide-weight-pct">15%</div></div>'
+        + '</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="guide-formula">relative strength = stock\'s own return − NIFTY 50\'s return, over the same window<br>'
+        '52w-high proximity = today\'s close ÷ highest close in the last 252 trading days<br>'
+        'volume expansion = (avg. volume, last 20 days) ÷ (avg. volume, last 60 days)<br>'
+        'score = 0.40·Z(RS 6mo) + 0.25·Z(RS 3mo) + 0.20·Z(52w-high %) + 0.15·Z(vol. expansion)</div>',
+        unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:12.5px;color:var(--ov-text-muted);">Optional add-on tilts (each off unless '
+        'you\'ve enabled it in Admin) nudge the same score up or down without ever excluding a stock on '
+        'their own: a <b>fundamental-quality tilt</b> ('
+        + f'{cfg.get("fundamental_bonus_weight",0.5)} × Z-score of fundamental value score), a '
+        f'<b>sector-strength tilt</b> ({cfg.get("sector_bonus_weight",0.0)} × Z-score of the stock\'s '
+        'sector\'s own relative strength vs NIFTY), and a <b>resistance-clearance tilt</b> '
+        f'({cfg.get("resistance_zone_weight",0.0)} × Z-score of room-to-run before the next chart '
+        'resistance level).</p></div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="guide-card"><h4>4. Fundamental value score — 0 to 100, sector-aware</h4>'
+               '<p>Pulled from companies\' own primary-source XBRL regulatory filings (no scraping, '
+               'no AI guessing) — routed to one of five rubrics by the company\'s actual sector, since '
+               '"good" numbers mean different things for a bank vs a manufacturer:</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="guide-grid3">'
+        '<div class="guide-card"><h4>General companies</h4><ul>'
+        '<li>Profitability — ROE, net margin, free cash flow growth</li>'
+        '<li>Financial health — Debt/Equity, Current Ratio</li>'
+        '<li>Growth &amp; valuation — Revenue CAGR, PEG ratio</li></ul></div>'
+        '<div class="guide-card"><h4>Banks</h4><ul>'
+        '<li>Profitability — ROE, ROA, net interest margin</li>'
+        '<li>Asset quality — Gross/Net NPA % (lower is better)</li>'
+        '<li>Growth — Advances growth, profit growth</li></ul></div>'
+        '<div class="guide-card"><h4>NBFCs &amp; AMCs</h4><ul>'
+        '<li>Profitability — ROE, ROA</li>'
+        '<li>Leverage — Debt/Equity, judged on an NBFC-appropriate scale (3–6× is normal by design)</li>'
+        '<li>Growth — Loan-book growth, profit growth</li></ul></div>'
+        '<div class="guide-card"><h4>General insurers</h4><ul>'
+        '<li>Profitability — ROE, ROA</li>'
+        '<li>Underwriting — Combined ratio, claim ratio (lower is better)</li>'
+        '<li>Growth — Gross premium growth, profit growth</li></ul></div>'
+        '<div class="guide-card"><h4>Life insurers</h4><ul>'
+        '<li>Profitability — ROE</li>'
+        '<li>Growth — Net premium growth, profit growth</li></ul></div>'
+        '<div class="guide-card"><h4>How the 0–100 comes together</h4>'
+        '<p>Each metric is bucketed 0–5, averaged within its pillar, pillars averaged together '
+        'and rescaled to 100. A pillar with no data available is simply left out rather than '
+        'guessed at — missing data lowers confidence, never the score itself.</p></div>'
+        '</div></div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="guide-card"><h4>5. Sector strength &amp; diversification</h4>'
+               '<p>Every stock is mapped to its real NSE sector index (not a rough heatmap guess). '
+               'A sector\'s own relative strength is measured the exact same way a stock\'s is — '
+               'its index\'s return vs NIFTY\'s. When diversification is on, only stocks from the '
+               f'top {cfg.get("top_n_sectors",3)} strongest sector groups are eligible to buy at all, '
+               f'and no more than {cfg.get("max_positions_per_sector",3)} positions are ever held in '
+               'the same sector group at once — this only ever blocks a NEW purchase, it never forces '
+               'out a position you already hold.</p></div></div>', unsafe_allow_html=True)
+
+    # ---- Protecting what you own ------------------------------------
+    st.markdown(_guide_section("🛡️", "red", "Protecting what you own", anchor="g-protect",
+                               subtitle="How much of each stock you buy, and what keeps a loser from running away."),
+               unsafe_allow_html=True)
+
+    st.markdown('<div class="guide-card"><h4>Position sizing</h4>'
+               f'<p>Currently: <b>{sizing_mode}</b>. In equal-weight mode, every position targets an equal '
+               'slice of your total equity (capital ÷ max positions) — the "advanced" allocator can let a '
+               'pricier top-ranked stock borrow a little headroom from a not-yet-filled lower-ranked slot, '
+               'buys a partial size rather than skipping outright when cash is tight, and tops up any '
+               'existing under-sized position with leftover cash. Risk-based mode instead sizes every '
+               'buy so that a stop-loss hit would only cost a fixed % of your capital, regardless of '
+               'the stock\'s price.</p></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<table class="guide-table"><tr><th>Stop mechanism</th><th>How it works</th><th>Currently</th></tr>'
+        '<tr><td>Fixed ATR</td><td>Set once at entry: price − 2.5× ATR(14). Never moves.</td>'
+        f'<td><span class="guide-pill" style="background:var(--ov-blue-l);color:var(--ov-blue-d);">'
+        f'{"active" if stop_mode=="Fixed ATR" else "available"}</span></td></tr>'
+        '<tr><td>ATR trailing (chandelier)</td><td>Every day: highest close since entry − 4× ATR(14). '
+        'Only ever moves UP, never down.</td>'
+        f'<td><span class="guide-pill" style="background:var(--ov-green-l);color:var(--ov-green-d);">'
+        f'{"active" if stop_mode=="ATR Trailing" else "available"}</span></td></tr>'
+        '<tr><td>MAD volatility trail</td><td>A rolling median ± a volatility-scaled band (median '
+        'absolute deviation, floored by ATR) that ratchets up with price in an uptrend — adapts to '
+        'each stock\'s own volatility instead of one fixed multiple.</td>'
+        f'<td><span class="guide-pill" style="background:var(--ov-purple-l);color:var(--ov-purple-d);">'
+        f'{"active" if stop_mode=="MAD Volatility Trail" else "available"}</span></td></tr>'
+        '</table>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:12.5px;color:var(--ov-text-muted);">Whichever mechanism is active, the same '
+        'rule always applies: a stop can only ever tighten, never loosen — a quieter/lower candidate value '
+        'on any given day is simply ignored.</p></div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="guide-card"><h4>Market regime filter</h4>'
+               f'<p>{"Currently ON" if cfg.get("regime_filter_enabled") else "Currently off"} — when NIFTY 50 '
+               f'closes below its own {cfg.get("regime_ema_period",200)}-day EMA, the number of positions '
+               f'allowed to be open at once is cut '
+               f'to {int(cfg.get("regime_position_multiplier",0.5)*100)}% (rounded, minimum 1). This caps '
+               '<b>how many</b> positions can be open, not how much capital goes into each one — money that '
+               'isn\'t deployed into a blocked slot simply sits in cash rather than being spread thicker '
+               'across fewer stocks, and no existing holding is ever force-sold by this filter alone.</p>'
+               '</div></div>', unsafe_allow_html=True)
+
+    # ---- The daily rhythm --------------------------------------------
+    st.markdown(_guide_section("📅", "amber", "The daily rhythm", anchor="g-rhythm",
+                               subtitle="What runs every trading day, on autopilot, and when."),
+               unsafe_allow_html=True)
+    st.markdown('<div class="guide-card"><h4>Every single trading day, regardless of cadence</h4>'
+               '<ul><li>Every held position\'s stop is recalculated and ratcheted up if warranted</li>'
+               '<li>Any open slot (freed by a stop-loss or otherwise) gets filled from the current watchlist</li>'
+               '<li>Under-sized existing positions get topped up if cash allows</li>'
+               '<li>Any due recurring charge (e.g. quarterly Demat AMC) is posted to the Ledger</li></ul></div>',
+               unsafe_allow_html=True)
+    st.markdown('<div class="guide-card"><h4>Only on a rebalance day</h4>'
+               f'<p>Cadence is currently set to <b>{cfg.get("rebalance_cadence","daily").title()}</b> — '
+               '"Weekly" checks only on each week\'s last trading day, "Monthly" only on each month\'s '
+               'first trading day. Only ONE decision is gated by this: whether to re-rank the whole universe '
+               'and sell anything that dropped out of the top ranks or broke its trend — everything in the '
+               'box above still runs every single day no matter what.</p></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<table class="guide-table"><tr><th>Time (IST)</th><th>Job</th><th>What it does</th></tr>'
+        '<tr><td>07:00</td><td>Token check</td><td>Confirms the broker login is valid before the market opens</td></tr>'
+        '<tr><td>09:16</td><td>Gap-down check</td><td>Safety net — market-sells anything that gapped straight through its stop overnight</td></tr>'
+        '<tr><td>Mon 08:00</td><td>Fundamentals refresh</td><td>Re-pulls XBRL filings and recomputes every stock\'s value score</td></tr>'
+        '<tr><td>14:55</td><td>Rebalance scan</td><td>The main daily decision — sells, buys, top-ups, stop updates</td></tr>'
+        '<tr><td>14:56</td><td>Paper trade scan</td><td>A fully separate, isolated simulation — never touches real money</td></tr>'
+        '<tr><td>15:31</td><td>Exit-price correction</td><td>Swaps today\'s approximate exit prices for the real fill prices from the broker</td></tr>'
+        '</table></div>', unsafe_allow_html=True)
+
+    # ---- Execution & safety nets ---------------------------------------
+    st.markdown(_guide_section("🚨", "coral", "Execution & safety nets", anchor="g-safety",
+                               subtitle="What's automatic, what needs your click, and what catches the unexpected."),
+               unsafe_allow_html=True)
+    st.markdown(
+        '<div class="guide-grid2">'
+        '<div class="guide-card"><h4>Auto-execute trades</h4>'
+        f'<p>{"ON" if cfg.get("auto_execute_trades") else "Off"} — when on, the scheduled 14:55 scan places '
+        'its proposed sells/buys/top-ups as real orders with no confirmation click. The dashboard\'s own '
+        '"Run today\'s scan" button never auto-places orders regardless of this setting — it\'s always '
+        'review-first.</p></div>'
+        '<div class="guide-card"><h4>Auto-apply stop updates</h4>'
+        f'<p>{"ON" if cfg.get("auto_apply_stop_updates", True) else "Off"} — whenever a stop genuinely '
+        'ratchets up, the new stop is pushed straight to the broker\'s GTT order automatically. Low-risk by '
+        'design: this can only ever tighten protection, never place a new order or loosen an existing one.</p></div>'
+        '<div class="guide-card"><h4>Gap-down safety net</h4>'
+        '<p>A GTT\'s own triggered order is a limit order, which can go unfilled if a stock gaps hard through '
+        'its stop overnight. Each morning at 09:16 this checks for exactly that and fires an immediate market '
+        'sell instead — the one place this app places a real order with no human in the loop by design.</p></div>'
+        '<div class="guide-card"><h4>Catching a silent exit</h4>'
+        '<p>If a GTT stop-loss fires at the broker, or you sell something manually outside this app, nothing '
+        'tells this app directly. Instead, every scan compares its own records against your REAL broker '
+        'holdings — anything missing gets marked closed and logged, tagged "GTT / External" since the two '
+        'can\'t be told apart from the broker\'s API alone.</p></div>'
+        '<div class="guide-card"><h4>Exit-price accuracy</h4>'
+        '<p>The moment a position closes, its exit price is only an estimate (the last traded price at the '
+        'moment this app noticed). At 15:31 each day, a dedicated pass fetches the broker\'s own real order '
+        'book and corrects every trade that closed that day to its true average fill price.</p></div>'
+        '</div></div>', unsafe_allow_html=True)
+
+    # ---- Cash management ------------------------------------------------
+    st.markdown(_guide_section("💰", "teal", "Cash management", anchor="g-cash",
+                               subtitle="The small recurring costs of actually trading, tracked automatically."),
+               unsafe_allow_html=True)
+    st.markdown(
+        '<div class="guide-grid2">'
+        '<div class="guide-card"><h4>DP charges</h4>'
+        f'<p>Your depository charges ₹{cfg.get("dp_charge_per_scrip",15.34):.2f} per stock, per day you '
+        'sell it — this app logs that automatically to the Ledger the moment any position actually closes, '
+        'no matter which of the exit paths above caused it, so it\'s never forgotten.</p></div>'
+        '<div class="guide-card"><h4>Recurring charges</h4>'
+        '<p>Fixed, calendar-scheduled costs like quarterly Demat AMC — defined once on the Ledger page '
+        '(amount, cadence, next due date), then posted automatically every time they come due, correctly '
+        'anchored to the same day of the month cycle after cycle.</p></div>'
+        '</div></div>', unsafe_allow_html=True)
+
+    # ---- Pages tour -------------------------------------------------
+    st.markdown(_guide_section("🧭", "pink", "Tour of every page", anchor="g-pages",
+                               subtitle="What each tab in the sidebar actually shows you."),
+               unsafe_allow_html=True)
+    _pages_tour = [
+        ("🏠", "Overview", "Your portfolio at a glance — equity curve, today's snapshot, live holdings summary."),
+        ("📡", "Live Rebalance", "Today's proposed sells/buys/top-ups/stop-updates — review and execute, or watch auto-execute run."),
+        ("💼", "Positions & Trade", "Your real, live broker holdings and intraday positions, plus manual order entry."),
+        ("🔍", "Screener", "The full ranked universe — every gate, every score, browsable and chartable on demand."),
+        ("📊", "Fundamentals", "The XBRL-based value-score scan across the universe, with the rubric behind every number."),
+        ("⚙️", "Admin", "Every strategy setting in one form — stop mechanism, sizing, gates, automation toggles."),
+        ("💰", "Ledger", "Deposits/withdrawals for accurate XIRR, plus DP charges and recurring costs."),
+        ("📒", "Tradebook", "Every trade this app has ever opened, with its entry snapshot, real exit type, and live P&L."),
+        ("🗂️", "Job Log", "Status and history of every scheduled and manual job — did today's scan actually run?"),
+        ("📜", "Rebalance History", "The full audit trail of every sell/buy/top-up/stop-update ever proposed."),
+        ("🧪", "Backtest", "Run the exact same engine against history to test a change before trusting it live."),
+    ]
+    st.markdown(
+        '<div class="guide-pages-grid">'
+        + "".join(f'<div class="guide-page-card"><span class="icon">{icon}</span>'
+                  f'<h5>{html_lib.escape(name)}</h5><p>{html_lib.escape(desc)}</p></div>'
+                  for icon, name, desc in _pages_tour)
+        + '</div></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div style="text-align:center;color:var(--ov-text-muted);font-size:12px;padding:24px 0 8px 0;">'
+        'Every number on this page is read live from your current configuration — change a setting in '
+        'Admin, and this page reflects it the next time you open it.</div>', unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
 # Navigation
 # ---------------------------------------------------------------------------
 
@@ -5868,6 +6280,7 @@ page_job_log_p = st.Page(page_job_log, title="Job Log", icon="🗂️")
 page_rebalance_history_p = st.Page(page_rebalance_history, title="Rebalance History", icon="📜")
 page_ledger_p = st.Page(page_ledger, title="Ledger", icon="💰")
 page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
+page_guide_p = st.Page(page_guide, title="Guide", icon="📘")
 
 # Injected before the sidebar (not per-page) so every page -- not just
 # Overview, where this design system started -- gets the same compact
@@ -5883,6 +6296,9 @@ with st.sidebar:
     # with position="hidden" below so routing/query-params/current-page
     # tracking keep working exactly as before, just with no visible
     # built-in widget -- this whole block is just the visible menu.
+    st.markdown('<p class="ov-side-label">Learn</p>', unsafe_allow_html=True)
+    st.page_link(page_guide_p)
+
     st.markdown('<p class="ov-side-label">Trading</p>', unsafe_allow_html=True)
     st.page_link(page_cockpit_p)
     st.page_link(page_live_rebalance_p)
@@ -6018,5 +6434,5 @@ with st.container(key="ov-topbar"):
 nav = st.navigation([page_cockpit_p, page_live_rebalance_p, page_positions_trade_p,
                     page_screener_p, page_fundamentals_p, page_tradebook_p,
                     page_job_log_p, page_rebalance_history_p, page_backtest_p,
-                    page_admin_p, page_ledger_p], position="hidden")
+                    page_admin_p, page_ledger_p, page_guide_p], position="hidden")
 nav.run()
