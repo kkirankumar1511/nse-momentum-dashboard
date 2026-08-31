@@ -4873,7 +4873,7 @@ def page_backtest():
 
     _daily_pos = res.get("daily_positions")
     if _daily_pos is not None and not _daily_pos.empty:
-        with st.expander("Open positions on a specific date", expanded=False):
+        with st.expander("📅 Open positions on a specific date", expanded=True):
             st.caption("Reconstructed from the actual simulated state on that day "
                       "(real entry price/qty/stop, real close price) -- not an "
                       "approximation, and not limited to the final-day snapshot "
