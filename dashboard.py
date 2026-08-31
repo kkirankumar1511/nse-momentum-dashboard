@@ -5564,21 +5564,58 @@ def page_tradebook():
                            f"symbol can take up to a minute; instant after that)"):
                 _candles = bt.load_long_history_cached([_sym_sel], end_date=_fetch_end)
             _df = _candles.get(_sym_sel)
+
+            # If we're charting through today and the market's actually open
+            # right now, the day's cached candle can be hours stale (the
+            # long-history cache only fetches once the gap is non-zero, so
+            # once today's row exists it's never touched again this run) --
+            # patch it with a live LTP so "today" reflects the current
+            # price, not whatever it was at the day's first fetch.
+            if (_df is not None and not _df.empty and _fetch_end == dt.date.today()):
+                _now = dt.datetime.now()
+                _market_open = (nse_holidays.is_trading_day(_now.date())
+                                and dt.time(9, 15) <= _now.time() <= dt.time(15, 30))
+                if _market_open:
+                    try:
+                        _ltp = kite_client.get_ltp([_sym_sel]).get(_sym_sel)
+                    except Exception:
+                        _ltp = None
+                    if _ltp is not None:
+                        _df = _df.copy()
+                        _today_ts = pd.Timestamp(dt.date.today())
+                        if _today_ts in _df.index:
+                            _df.loc[_today_ts, "high"] = max(_df.loc[_today_ts, "high"], _ltp)
+                            _df.loc[_today_ts, "low"] = min(_df.loc[_today_ts, "low"], _ltp)
+                            _df.loc[_today_ts, "close"] = _ltp
+                        else:
+                            _df.loc[_today_ts] = {"open": _ltp, "high": _ltp,
+                                                  "low": _ltp, "close": _ltp, "volume": 0}
+                            _df = _df.sort_index()
+
             if _df is None or _df.empty:
                 st.warning(f"No candle data available for {_sym_sel}.")
             else:
                 _default_start = min(_first_entry, _last_relevant - pd.Timedelta(days=365))
                 _min_bound = min(_default_start, pd.Timestamp(_df.index.min())).date()
                 _max_bound = _last_relevant.date()
+                # Keyed by symbol + max_bound (today, or the trade's exit
+                # date) so switching symbols -- or the same symbol on a new
+                # day -- gets a fresh widget instead of Streamlit silently
+                # reusing a stale value= from days ago in a long-lived
+                # browser session (date_input's value= is only honored on
+                # a key's FIRST render, never on later reruns).
+                _range_key = f"{_sym_sel}_{_max_bound.isoformat()}"
                 c1, c2 = st.columns(2)
                 with c1:
                     _range_start = st.date_input(
                         "From", value=_default_start.date(),
-                        min_value=_min_bound, max_value=_max_bound, key="tb_chart_from")
+                        min_value=_min_bound, max_value=_max_bound,
+                        key=f"tb_chart_from_{_range_key}")
                 with c2:
                     _range_end = st.date_input(
                         "To", value=_max_bound,
-                        min_value=_min_bound, max_value=_max_bound, key="tb_chart_to")
+                        min_value=_min_bound, max_value=_max_bound,
+                        key=f"tb_chart_to_{_range_key}")
 
                 # For now (per explicit request): open positions show only
                 # the REAL applied-stop history (state_db's daily log) --
