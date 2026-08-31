@@ -1961,6 +1961,35 @@ def page_ledger():
             _ov_pagination_controls(display_ledger, key="admin_ledger")
 
     st.divider()
+    st.markdown(
+        '<div class="ov-header"><div><span class="ov-h1">🧾 Trading Charges</span>'
+        '<span class="ov-sub">· DP charges &amp; recurring costs like Demat AMC'
+        '</span></div></div>', unsafe_allow_html=True)
+
+    with st.container(border=True, key="ov-card-cash-management"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-teal);"></span>Cash management</p>',
+            unsafe_allow_html=True)
+        st.caption(
+            "The DP (Depository Participant) charge your broker debits per "
+            "scrip, per day you sell -- auto-logged below every time a "
+            "position actually closes (any path: rebalance sell, gap-down "
+            "stop, manual square-off, or a GTT/external fill), so it's "
+            "never missed the way a manually-remembered entry can be.")
+        with st.form("dp_charge_form"):
+            dp_charge_per_scrip = st.number_input(
+                "DP charge per scrip sold (₹)", min_value=0.0, max_value=100.0,
+                value=float(config.STRATEGY.get("dp_charge_per_scrip", 15.34)),
+                step=0.01, format="%.2f",
+                help="0 disables this entirely -- no cash-flow entry posted.")
+            if st.form_submit_button("Save", type="primary"):
+                state_db.update_strategy_config(
+                    {"dp_charge_per_scrip": float(dp_charge_per_scrip)})
+                config.STRATEGY["dp_charge_per_scrip"] = float(dp_charge_per_scrip)
+                st.success("Saved.")
+                st.rerun()
+
     _recurring = state_db.get_recurring_charges()
     _rec_sel_id = st.session_state.get("_admin_recurring_sel_id")
     _rec_editing = (_rec_sel_id is not None and not _recurring.empty
@@ -1972,9 +2001,9 @@ def page_ledger():
         "Fixed, predictable recurring costs (e.g. quarterly Demat AMC) -- "
         "define once and the daily scheduled job auto-posts a Ledger entry "
         "each time it's due, instead of you re-adding it by hand every "
-        "cycle. Per-sale DP charges are handled separately (Admin page) "
-        "since they're posted automatically on every real exit, not on a "
-        "fixed schedule.")
+        "cycle. Per-sale DP charges are handled separately (Cash "
+        "management, above) since they're posted automatically on every "
+        "real exit, not on a fixed schedule.")
     with st.container(border=True, key="ov-card-recurring-charges"):
         st.markdown(
             '<p class="ov-card-title"><span class="ov-dot" '
@@ -2229,19 +2258,6 @@ def page_admin():
                      "a real but smaller cost to CAGR -- a priced trade-off, "
                      "not a free win.")
 
-            st.markdown('<p class="ov-muted">Cash management</p>', unsafe_allow_html=True)
-            c4e, _c4f, _c4g = st.columns(3)
-            dp_charge_per_scrip = c4e.number_input(
-                "DP charge per scrip sold (₹)", min_value=0.0, max_value=100.0,
-                value=float(cfg.get("dp_charge_per_scrip", 15.34)), step=0.01, format="%.2f",
-                help="Auto-logged as a Ledger cash-flow entry every time a "
-                     "position actually closes (any path -- rebalance sell, "
-                     "gap-down stop, manual square-off) -- one entry per "
-                     "scrip per day, matching CDSL's real per-ISIN DP fee. "
-                     "0 disables this entirely. Recurring charges like "
-                     "quarterly Demat AMC are managed separately on the "
-                     "Ledger page.")
-
             st.markdown('<p class="ov-muted">Momentum &amp; trend</p>', unsafe_allow_html=True)
             c6, c7, c8 = st.columns(3)
             mom_lookback_days_short = c6.number_input(
@@ -2472,7 +2488,6 @@ def page_admin():
                 "trailing_atr_multiple": float(trailing_atr_multiple),
                 "auto_apply_stop_updates": bool(auto_apply_stop_updates),
                 "auto_execute_trades": bool(auto_execute_trades),
-                "dp_charge_per_scrip": float(dp_charge_per_scrip),
                 "rebalance_cadence": rebalance_cadence,
                 "mom_lookback_days_short": int(mom_lookback_days_short),
                 "mom_lookback_days_long": int(mom_lookback_days_long),

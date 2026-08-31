@@ -431,7 +431,7 @@ BACKTEST_TUNABLE_KEYS = (
 )
 # Admin-only automation toggles, on top of BACKTEST_TUNABLE_KEYS, that make
 # up everything the Admin form should render/edit.
-ADMIN_ONLY_KEYS = ("auto_apply_stop_updates", "auto_execute_trades", "dp_charge_per_scrip")
+ADMIN_ONLY_KEYS = ("auto_apply_stop_updates", "auto_execute_trades")
 ADMIN_EDITABLE_KEYS = BACKTEST_TUNABLE_KEYS + ADMIN_ONLY_KEYS
 
 STRATEGY = state_db.get_strategy_config(_STRATEGY_DEFAULTS)
