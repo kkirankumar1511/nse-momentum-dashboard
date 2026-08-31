@@ -3869,7 +3869,8 @@ def _run_backtest_job(range_mode, years, start_date, end_date, use_fundamentals,
         fundamentals_history=fundamentals_history,
         sector_candles=sector_candles, sector_membership=sector_membership,
         long_candles=long_candles, start_date=sim_start_date,
-        progress_cb=lambda s, f: report(s, 0.4 + f * 0.6))
+        progress_cb=lambda s, f: report(s, 0.4 + f * 0.6),
+        track_daily_positions=True)
     run_time = dt.datetime.now()
     os.makedirs("cache", exist_ok=True)
     run_meta = {
@@ -4869,6 +4870,36 @@ def page_backtest():
                     num_fmt={"entry_price": "₹{:.2f}", "current_price": "₹{:.2f}",
                             "stop": "₹{:.2f}", "qty": "{:.0f}"}),
                 unsafe_allow_html=True)
+
+    _daily_pos = res.get("daily_positions")
+    if _daily_pos is not None and not _daily_pos.empty:
+        with st.expander("Open positions on a specific date", expanded=False):
+            st.caption("Reconstructed from the actual simulated state on that day "
+                      "(real entry price/qty/stop, real close price) -- not an "
+                      "approximation, and not limited to the final-day snapshot "
+                      "above.")
+            _dp_dates = pd.to_datetime(_daily_pos["date"]).dt.date
+            _dp_min, _dp_max = _dp_dates.min(), _dp_dates.max()
+            query_date = st.date_input(
+                "Date", value=_dp_max, min_value=_dp_min, max_value=_dp_max,
+                key="bt_daily_pos_query_date")
+            day_rows = _daily_pos[_dp_dates == query_date]
+            if day_rows.empty:
+                st.info(f"No open positions on {query_date} in this run (either "
+                       "flat that day, or not a simulated trading day).")
+            else:
+                dpd = day_rows.drop(columns=["date"]).copy()
+                dpd["entry_date"] = pd.to_datetime(dpd["entry_date"]).dt.date.astype(str)
+                st.markdown(
+                    _ov_table_html(
+                        dpd.sort_values("unrealized_pnl", ascending=False),
+                        sym_cols=["symbol"], pnl_cols=["unrealized_pnl", "unrealized_ret_pct"],
+                        num_fmt={"entry_price": "₹{:.2f}", "current_price": "₹{:.2f}",
+                                "stop": "₹{:.2f}", "qty": "{:.0f}"}),
+                    unsafe_allow_html=True)
+    elif "daily_positions" not in res:
+        st.caption("📁 Position-on-a-date lookup isn't available for this cached "
+                  "run (older format) — re-run the backtest to use it.")
 
     tr = res["trades"].copy()
     if not tr.empty:

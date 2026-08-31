@@ -606,8 +606,19 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                  long_candles: dict | None = None,
                  start_date: dt.date | None = None,
                  progress_cb=None,
-                 precomputed_pivots: dict | None = None) -> dict:
+                 precomputed_pivots: dict | None = None,
+                 track_daily_positions: bool = False) -> dict:
     """Monthly-rebalanced long-only backtest.
+
+    track_daily_positions: off by default, zero cost when off. When True,
+    the return dict's "daily_positions" is a long-format DataFrame (one
+    row per open position per trading day, same columns as the existing
+    end-of-run "open_positions" snapshot plus a leading `date` column) --
+    lets a caller answer "what was open, at what unrealized P&L, on
+    arbitrary date X" for any X in the simulated range, not just the
+    final date. Reuses the same _price_asof() the daily mark-to-market
+    step already computes, so this is a pure by-product of bookkeeping
+    already happening every day, not a second pass over the data.
 
     precomputed_pivots: optional, {symbol: DataFrame} -- if omitted but
     long_candles and cfg["resistance_zone_weight"] are both set, this is
@@ -833,6 +844,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     positions: dict[str, Position] = {}
     trades: list[Trade] = []
     curve = []
+    daily_positions_rows: list[dict] = []
     # Recomputed once per day below (see bench_above_regime_ema) -- how
     # many positions try_enter()/the fill loops are allowed to hold open
     # RIGHT NOW. Only ever caps NEW entries, same "never forces an exit"
@@ -1119,6 +1131,21 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             for s, p in positions.items())
         curve.append((date, mtm))
 
+        if track_daily_positions:
+            for sym, pos in positions.items():
+                price = _price_asof(sym, date)
+                if price is None:
+                    continue
+                daily_positions_rows.append({
+                    "date": date, "symbol": sym, "entry_date": pos.entry_date,
+                    "entry_price": pos.entry_price, "current_price": price,
+                    "qty": pos.qty, "stop": pos.stop,
+                    "unrealized_pnl": (price - pos.entry_price) * pos.qty,
+                    "unrealized_ret_pct": (price / pos.entry_price - 1) * 100,
+                    "holding_days": (date - pos.entry_date).days,
+                    "sector": pos.sector,
+                })
+
     # Positions still open when the date range runs out are left OPEN, not
     # force-liquidated — a forced "end" close was fictional (the position
     # never actually exited) and was contaminating win rate / avg-hold /
@@ -1154,6 +1181,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             "pnl": t.pnl, "ret_pct": t.ret_pct, "holding_days": t.holding_days,
         } for t in trades]),
         "open_positions": open_positions_df,
+        "daily_positions": pd.DataFrame(daily_positions_rows),
         "final_capital": float(equity.iloc[-1]),
         "metrics": metrics,
     }
