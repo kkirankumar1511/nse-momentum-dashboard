@@ -1537,6 +1537,27 @@ def page_cockpit():
                     _rank_map = {sym: i + 1 for i, sym in enumerate(_screen_candidates.index)}
                 _keep_zone = (config.STRATEGY.get("max_positions") or 0) * 2
 
+                # Held positions whose ONLY failing gate is the entry-band
+                # RSI ceiling still get force-sell protection from screener.
+                # sell_check()'s rsi_exit_gate_enabled carve-out (see its own
+                # docstring) -- but until now they just silently vanished
+                # from this card's rank (NaN -> "—"), which read as "this
+                # dropped off the radar" even though it's actually safely
+                # held. Mirrors sell_check()'s exact protection condition
+                # (same non-RSI gates + rsi <= rsi_exit_max check) so this
+                # label only appears for a symbol genuinely covered by that
+                # mechanism, not just any gate failure.
+                _rsi_exit_protected = set()
+                if (_screen is not None and "all_gates" in _screen.columns
+                        and config.STRATEGY.get("rsi_exit_gate_enabled", False)):
+                    _rsi_exit_max = config.STRATEGY.get("rsi_exit_max", config.STRATEGY.get("rsi_max"))
+                    _ng = _screen[~_screen["all_gates"]]
+                    _protected = _ng[
+                        _ng["trend_ok"].fillna(True) & _ng["near_high_ok"].fillna(True)
+                        & _ng["quality_ok"].fillna(True) & _ng["price_ok"].fillna(True)
+                        & (_ng["rsi"] <= _rsi_exit_max)]
+                    _rsi_exit_protected = set(_protected.index)
+
                 # Sort by momentum rank (ascending -- rank 1 first), matching
                 # the "By momentum rank" label above; a symbol not in
                 # today's ranked universe (rank is NaN) sorts to the end
@@ -1569,12 +1590,20 @@ def page_cockpit():
                 pos_desc["entry_rank"] = pos_desc["symbol"].map(_entry_rank_map)
 
                 def _rank_badge_cls(v: str) -> str:
+                    if v == "RSI-held":
+                        return "ov-badge-amber"
                     if v == "—":
                         return "ov-badge-gray"
                     return "ov-badge-green" if int(v) <= _keep_zone else "ov-badge-red"
 
-                pos_desc["rank_fmt"] = pos_desc["rank"].apply(
-                    lambda v: str(int(v)) if pd.notna(v) else "—")
+                def _rank_fmt(row):
+                    if pd.notna(row["rank"]):
+                        return str(int(row["rank"]))
+                    if row["symbol"] in _rsi_exit_protected:
+                        return "RSI-held"
+                    return "—"
+
+                pos_desc["rank_fmt"] = pos_desc.apply(_rank_fmt, axis=1)
                 st.markdown(
                     _ov_table_html(
                         pos_desc, columns=["symbol", "value", "rank_fmt", "pnl"],
