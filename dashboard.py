@@ -5574,6 +5574,41 @@ def page_rebalance_history():
                 st.code(r["error_message"] or "(no error message captured)")
 
 
+def _exit_type_label(reason) -> str:
+    """Collapses a trades row's raw exit_reason into a short, scannable
+    category for the Tradebook's Exit reason column/filter. Only four
+    kinds of value are ever actually written (state_db.close_trade()'s
+    call sites): screener.sell_check()'s two long rank/gate-drop
+    explanations (rebalance sells), and three fixed internal keys
+    (gap_down_stop, manual_square_off, gtt_fill_or_external -- the last
+    covers BOTH a GTT stop-loss firing silently at the broker and a
+    manual sell made directly on Kite outside this app; the two can't be
+    told apart from Kite's API, see reconciled_positions()'s own
+    docstring). The full original text is unaffected in the downloaded
+    CSV, which is built from the untransformed trades data."""
+    if reason is None or (isinstance(reason, float) and pd.isna(reason)):
+        return "—"
+    reason = str(reason)
+    fixed = {
+        "gap_down_stop": "Stop (gap-down)",
+        "manual_square_off": "Manual",
+        "gtt_fill_or_external": "GTT / External",
+    }
+    if reason in fixed:
+        return fixed[reason]
+    if reason.startswith(("dropped out of top", "failed a technical gate")):
+        return "Rebalance"
+    # Unrecognized value (future/legacy data) -- show something readable
+    # rather than silently mislabeling it one of the categories above.
+    return reason.replace("_", " ").title() if "_" in reason and " " not in reason else reason
+
+
+_EXIT_TYPE_BADGES = {
+    "Rebalance": "ov-badge-blue", "Stop (gap-down)": "ov-badge-red",
+    "GTT / External": "ov-badge-purple", "Manual": "ov-badge-gray",
+}
+
+
 # ---------------------------------------------------------------------------
 # Page: Tradebook
 # ---------------------------------------------------------------------------
@@ -5630,8 +5665,8 @@ def page_tradebook():
             status_filter = st.multiselect("Status", ["open", "closed"],
                                            key="tb_status_filter")
         with f3:
-            reasons = sorted(trades["exit_reason"].dropna().unique())
-            reason_filter = st.multiselect("Exit reason", reasons, key="tb_reason_filter")
+            reason_types = sorted(trades["exit_reason"].dropna().map(_exit_type_label).unique())
+            reason_filter = st.multiselect("Exit reason", reason_types, key="tb_reason_filter")
         with f4:
             since_date = st.date_input("Entered since",
                                        value=dt.date.today() - dt.timedelta(days=365),
@@ -5643,7 +5678,7 @@ def page_tradebook():
         if status_filter:
             filtered = filtered[filtered["status"].isin(status_filter)]
         if reason_filter:
-            filtered = filtered[filtered["exit_reason"].isin(reason_filter)]
+            filtered = filtered[filtered["exit_reason"].map(_exit_type_label).isin(reason_filter)]
 
         st.caption(f"Showing {len(filtered)} of {len(trades)} trades")
         _priority_cols = ["symbol", "entry_date", "entry_price", "qty", "initial_stop",
@@ -5653,16 +5688,20 @@ def page_tradebook():
                           if c not in ("id", "position_id", "status") and c not in _priority_cols]
         display_cols = (["status"] + [c for c in _priority_cols if c in filtered.columns]
                        + _remaining_cols)
+        display_df = filtered[display_cols].copy()
+        if "exit_reason" in display_df.columns:
+            display_df["exit_reason"] = display_df["exit_reason"].map(_exit_type_label)
         st.markdown(
             _ov_table_html(
-                filtered[display_cols], sym_cols=["symbol"],
+                display_df, sym_cols=["symbol"],
                 pnl_cols=["realized_pnl", "realized_ret_pct"],
                 num_fmt={"entry_price": "₹{:.2f}", "exit_price": "₹{:.2f}",
                         "initial_stop": "₹{:.2f}", "latest_recommended_stop": "₹{:.2f}",
                         "entry_score": "{:.2f}", "entry_rsi": "{:.1f}",
                         "entry_pct_52w_high": "{:.2f}", "entry_vol_expansion": "{:.2f}",
                         "entry_fundamental_score": "{:.1f}"},
-                badges={"status": {"open": "ov-badge-green", "closed": "ov-badge-gray"}}),
+                badges={"status": {"open": "ov-badge-green", "closed": "ov-badge-gray"},
+                       "exit_reason": _EXIT_TYPE_BADGES}),
             unsafe_allow_html=True)
         st.download_button("Download tradebook CSV (filtered view)",
                            filtered.to_csv(index=False), "tradebook.csv")

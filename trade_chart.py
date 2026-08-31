@@ -226,6 +226,20 @@ def build_symbol_figure(symbol: str, df: pd.DataFrame, trades: list[dict],
                            line=dict(width=1, color="#4a0e0e")),
                 text=[f"SELL{suffix}"], textposition="top center"))
 
+    # Plotly's default date x-axis is a continuous calendar timeline, so it
+    # reserves visual space for weekends (and NSE holidays) even though no
+    # candle exists there -- shows up as a gap between Friday's and
+    # Monday's candles. rangebreaks tells it to skip those spans entirely
+    # instead of leaving a blank gap.
+    if not plot_df.empty:
+        import nse_holidays
+        _lo, _hi = plot_df.index.min().date().isoformat(), plot_df.index.max().date().isoformat()
+        _holidays = sorted(d for d in nse_holidays.get_holidays(verbose=False) if _lo <= d <= _hi)
+        fig.update_xaxes(rangebreaks=[
+            dict(bounds=["sat", "mon"]),
+            dict(values=_holidays),
+        ])
+
     # No Plotly-native title here -- the caller (dashboard.py) renders the
     # symbol/date-range heading as a separate Streamlit element above the
     # chart, so it never fights the horizontal legend for the same
