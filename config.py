@@ -378,6 +378,14 @@ _STRATEGY_DEFAULTS = {
     # dashboard's manual buttons call, so the two paths can't drift apart.
     "auto_execute_trades": False,
 
+    # DP (Depository Participant) charge CDSL/your broker debits per scrip
+    # per day you sell -- state_db.close_trade() auto-logs this as a
+    # cash_flows entry every real exit (any path: rebalance sell, gap-down
+    # stop, manual square-off, GTT-fill reconciliation), so it's never
+    # missed the way a manually-remembered ledger entry can be. 0 disables
+    # this entirely (no cash_flows entry posted).
+    "dp_charge_per_scrip": 15.34,
+
     # Rebalance cadence: "daily" re-evaluates the sell/keep-zone rule every
     # time the scheduled scan runs (Mon-Fri); "monthly" only evaluates it
     # on the first trading day of each calendar month (nse_holidays.
@@ -423,7 +431,7 @@ BACKTEST_TUNABLE_KEYS = (
 )
 # Admin-only automation toggles, on top of BACKTEST_TUNABLE_KEYS, that make
 # up everything the Admin form should render/edit.
-ADMIN_ONLY_KEYS = ("auto_apply_stop_updates", "auto_execute_trades")
+ADMIN_ONLY_KEYS = ("auto_apply_stop_updates", "auto_execute_trades", "dp_charge_per_scrip")
 ADMIN_EDITABLE_KEYS = BACKTEST_TUNABLE_KEYS + ADMIN_ONLY_KEYS
 
 STRATEGY = state_db.get_strategy_config(_STRATEGY_DEFAULTS)

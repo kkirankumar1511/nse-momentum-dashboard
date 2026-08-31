@@ -1960,6 +1960,121 @@ def page_ledger():
                         unsafe_allow_html=True)
             _ov_pagination_controls(display_ledger, key="admin_ledger")
 
+    st.divider()
+    _recurring = state_db.get_recurring_charges()
+    _rec_sel_id = st.session_state.get("_admin_recurring_sel_id")
+    _rec_editing = (_rec_sel_id is not None and not _recurring.empty
+                   and _rec_sel_id in _recurring["id"].values)
+    _interval_labels = {1: "Monthly", 3: "Quarterly", 6: "Half-yearly", 12: "Yearly"}
+    _interval_months = {v: k for k, v in _interval_labels.items()}
+
+    _recurring_tip = html_lib.escape(
+        "Fixed, predictable recurring costs (e.g. quarterly Demat AMC) -- "
+        "define once and the daily scheduled job auto-posts a Ledger entry "
+        "each time it's due, instead of you re-adding it by hand every "
+        "cycle. Per-sale DP charges are handled separately (Admin page) "
+        "since they're posted automatically on every real exit, not on a "
+        "fixed schedule.")
+    with st.container(border=True, key="ov-card-recurring-charges"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-purple);"></span>Recurring charges'
+            f'<span class="ov-info-icon" title="{_recurring_tip}">ℹ️</span>'
+            + ('<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+               'Editing the entry selected below</span>' if _rec_editing else '')
+            + '</p>', unsafe_allow_html=True)
+        if _rec_editing:
+            _rec_row = _recurring.set_index("id").loc[_rec_sel_id]
+            _rdef_note = _rec_row["note"]
+            _rdef_amount = float(_rec_row["amount"])
+            _rdef_interval = int(_rec_row["interval_months"])
+            _rdef_due = pd.to_datetime(_rec_row["next_due_date"]).date()
+            _rdef_active = bool(_rec_row["active"])
+        else:
+            _rdef_note, _rdef_amount, _rdef_interval = "", 0.0, 3
+            _rdef_due, _rdef_active = dt.date.today(), True
+        with st.form(f"recurring_charge_form_{_rec_sel_id if _rec_editing else 'new'}",
+                     clear_on_submit=not _rec_editing):
+            rcf1, rcf2 = st.columns(2)
+            rc_note = rcf1.text_input("Note (e.g. \"Demat AMC\")", value=_rdef_note)
+            rc_amount = rcf2.number_input(
+                "Amount (₹) — always a charge, sign handled automatically",
+                min_value=0.0, value=_rdef_amount, step=1.0, format="%.2f")
+            rcf3, rcf4, rcf5 = st.columns(3)
+            rc_interval_label = rcf3.selectbox(
+                "Repeats", list(_interval_labels.values()),
+                index=list(_interval_labels.keys()).index(_rdef_interval))
+            rc_due = rcf4.date_input("Next due date", value=_rdef_due)
+            rc_active = rcf5.checkbox("Active", value=_rdef_active)
+            if _rec_editing:
+                rfb1, rfb2 = st.columns(2)
+                rc_submitted = rfb1.form_submit_button(
+                    "Save changes", type="primary", use_container_width=True)
+                rc_delete_clicked = rfb2.form_submit_button(
+                    "Delete", key="admin_recurring_delete_btn", use_container_width=True)
+            else:
+                rc_submitted = st.form_submit_button("Add recurring charge", type="primary")
+                rc_delete_clicked = False
+        if rc_submitted:
+            if not rc_note.strip():
+                st.error("Note can't be empty.")
+            elif rc_amount <= 0:
+                st.error("Amount must be positive.")
+            elif _rec_editing:
+                state_db.update_recurring_charge(
+                    _rec_sel_id, rc_note.strip(), float(rc_amount),
+                    _interval_months[rc_interval_label], rc_due.isoformat(), bool(rc_active))
+                st.session_state["_admin_recurring_sel_id"] = None
+                st.success("Updated.")
+                st.rerun()
+            else:
+                state_db.add_recurring_charge(
+                    rc_note.strip(), float(rc_amount),
+                    _interval_months[rc_interval_label], rc_due.isoformat())
+                st.success("Added.")
+                st.rerun()
+        if rc_delete_clicked:
+            state_db.delete_recurring_charge(_rec_sel_id)
+            st.session_state["_admin_recurring_sel_id"] = None
+            st.success("Deleted.")
+            st.rerun()
+        if _rec_editing:
+            if st.button("+ Add a new recurring charge instead", key="admin_recurring_new_btn"):
+                st.session_state["_admin_recurring_sel_id"] = None
+                st.rerun()
+
+        if _recurring.empty:
+            st.caption("No recurring charges defined yet.")
+        else:
+            with st.container(key="admin_recurring_rows"):
+                rh1, rh2, rh3, rh4, rh5 = st.columns([0.4, 2.0, 1.2, 1.2, 1.2])
+                rh2.markdown('<span class="ov-manual-th">Note</span>', unsafe_allow_html=True)
+                rh3.markdown('<span class="ov-manual-th r">Amount (₹)</span>', unsafe_allow_html=True)
+                rh4.markdown('<span class="ov-manual-th">Repeats</span>', unsafe_allow_html=True)
+                rh5.markdown('<span class="ov-manual-th">Next due</span>', unsafe_allow_html=True)
+                for _, r in _recurring.iterrows():
+                    rid = int(r["id"])
+                    rrc1, rrc2, rrc3, rrc4, rrc5 = st.columns([0.4, 2.0, 1.2, 1.2, 1.2])
+                    with rrc1:
+                        if st.button("●" if rid == _rec_sel_id else "○",
+                                    key=f"admin_recurring_radio_{rid}",
+                                    help="Select to edit/delete"):
+                            st.session_state["_admin_recurring_sel_id"] = (
+                                None if rid == _rec_sel_id else rid)
+                            st.rerun()
+                    _note_disp = html_lib.escape(r["note"]) + ("" if r["active"] else " (inactive)")
+                    rrc2.markdown(f'<span class="ov-manual-cell">{_note_disp}</span>',
+                                 unsafe_allow_html=True)
+                    rrc3.markdown(
+                        f'<span class="ov-manual-cell r ov-sym">{-abs(float(r["amount"])):,.2f}</span>',
+                        unsafe_allow_html=True)
+                    rrc4.markdown(
+                        f'<span class="ov-manual-cell">'
+                        f'{_interval_labels.get(int(r["interval_months"]), f"{int(r["interval_months"])}mo")}</span>',
+                        unsafe_allow_html=True)
+                    rrc5.markdown(f'<span class="ov-manual-cell">{r["next_due_date"]}</span>',
+                                 unsafe_allow_html=True)
+
 
 # ---------------------------------------------------------------------------
 # Page: Admin
@@ -2113,6 +2228,19 @@ def page_admin():
                      "reduces max drawdown (~-50% to ~-35% over 10 years) at "
                      "a real but smaller cost to CAGR -- a priced trade-off, "
                      "not a free win.")
+
+            st.markdown('<p class="ov-muted">Cash management</p>', unsafe_allow_html=True)
+            c4e, _c4f, _c4g = st.columns(3)
+            dp_charge_per_scrip = c4e.number_input(
+                "DP charge per scrip sold (₹)", min_value=0.0, max_value=100.0,
+                value=float(cfg.get("dp_charge_per_scrip", 15.34)), step=0.01, format="%.2f",
+                help="Auto-logged as a Ledger cash-flow entry every time a "
+                     "position actually closes (any path -- rebalance sell, "
+                     "gap-down stop, manual square-off) -- one entry per "
+                     "scrip per day, matching CDSL's real per-ISIN DP fee. "
+                     "0 disables this entirely. Recurring charges like "
+                     "quarterly Demat AMC are managed separately on the "
+                     "Ledger page.")
 
             st.markdown('<p class="ov-muted">Momentum &amp; trend</p>', unsafe_allow_html=True)
             c6, c7, c8 = st.columns(3)
@@ -2344,6 +2472,7 @@ def page_admin():
                 "trailing_atr_multiple": float(trailing_atr_multiple),
                 "auto_apply_stop_updates": bool(auto_apply_stop_updates),
                 "auto_execute_trades": bool(auto_execute_trades),
+                "dp_charge_per_scrip": float(dp_charge_per_scrip),
                 "rebalance_cadence": rebalance_cadence,
                 "mom_lookback_days_short": int(mom_lookback_days_short),
                 "mom_lookback_days_long": int(mom_lookback_days_long),

@@ -836,6 +836,18 @@ def main():
         print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Skipping rebalance scan -- "
              f"NSE holiday or weekend.")
         return
+
+    # Recurring charges (e.g. quarterly Demat AMC) -- checked once per
+    # scheduled run, independent of the Kite connection below, so a
+    # due charge still gets logged even on a day the rebalance scan itself
+    # fails. Never raises: a bookkeeping miss shouldn't block the real
+    # scan.
+    try:
+        for line in state_db.post_due_recurring_charges():
+            print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} {line}")
+    except Exception as e:
+        print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Recurring-charge check failed: {e}")
+
     os.makedirs("cache", exist_ok=True)
     log_lines = [f"\n{'=' * 60}\n{dt.datetime.now():%d %b %Y %H:%M:%S}\n{'=' * 60}"]
 

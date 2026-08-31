@@ -77,6 +77,22 @@ CREATE TABLE IF NOT EXISTS cash_flows (
     note TEXT
 );
 
+-- Recurring charges (e.g. quarterly Demat AMC) -- a declarative definition
+-- posted automatically to cash_flows by post_due_recurring_charges() each
+-- time next_due_date is reached, instead of the user re-adding a manual
+-- cash_flows row every time it comes due. interval_months steps calendar-
+-- correctly (via a real month-add, not a fixed day-count), so a charge
+-- anchored to e.g. the 24th doesn't drift off that date over years the
+-- way naive "+91 days" quarterly math would.
+CREATE TABLE IF NOT EXISTS recurring_charges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    note TEXT NOT NULL,
+    amount REAL NOT NULL,
+    interval_months INTEGER NOT NULL,
+    next_due_date TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE TABLE IF NOT EXISTS equity_log (
     date TEXT PRIMARY KEY,
     value REAL NOT NULL
@@ -871,6 +887,90 @@ def delete_cash_flow(id: int) -> None:
     conn.execute("DELETE FROM cash_flows WHERE id = ?", (id,))
     conn.commit()
     conn.close()
+
+
+def _add_months(date_iso: str, months: int) -> str:
+    """Calendar-correct month add (not a fixed day-count) -- a charge
+    anchored to e.g. the 24th stays on the 24th every cycle instead of
+    drifting. Clamps to the target month's last day for an overflow (e.g.
+    31 Jan + 1 month -> 28/29 Feb)."""
+    import calendar
+    d = dt.date.fromisoformat(date_iso)
+    total = d.month - 1 + months
+    year = d.year + total // 12
+    month = total % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return dt.date(year, month, day).isoformat()
+
+
+def get_recurring_charges() -> pd.DataFrame:
+    """Every recurring-charge definition (e.g. quarterly Demat AMC),
+    active or not -- the Ledger page's own small CRUD section, separate
+    from the one-off manual cash_flows entries."""
+    conn = get_conn()
+    df = pd.read_sql(
+        "SELECT id, note, amount, interval_months, next_due_date, active "
+        "FROM recurring_charges ORDER BY next_due_date, id", conn)
+    conn.close()
+    return df
+
+
+def add_recurring_charge(note: str, amount: float, interval_months: int,
+                         next_due_date: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO recurring_charges (note, amount, interval_months, "
+        "next_due_date, active) VALUES (?, ?, ?, ?, 1)",
+        (note, amount, interval_months, next_due_date))
+    conn.commit()
+    conn.close()
+
+
+def update_recurring_charge(id: int, note: str, amount: float, interval_months: int,
+                            next_due_date: str, active: bool) -> None:
+    conn = get_conn()
+    conn.execute(
+        "UPDATE recurring_charges SET note = ?, amount = ?, interval_months = ?, "
+        "next_due_date = ?, active = ? WHERE id = ?",
+        (note, amount, interval_months, next_due_date, int(active), id))
+    conn.commit()
+    conn.close()
+
+
+def delete_recurring_charge(id: int) -> None:
+    conn = get_conn()
+    conn.execute("DELETE FROM recurring_charges WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+
+
+def post_due_recurring_charges() -> list[str]:
+    """Posts a cash_flows entry (dated on the actual due date, not
+    necessarily today, so a late-running job doesn't misdate it) for every
+    active recurring charge whose next_due_date has arrived, then advances
+    next_due_date by interval_months -- looped, in case more than one
+    cycle was missed (e.g. the job didn't run for a while). Safe to call
+    every day: a charge not yet due is untouched. Returns a log line per
+    charge actually posted, for the caller's own run log."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM recurring_charges WHERE active = 1").fetchall()
+    conn.close()
+    today = dt.date.today().isoformat()
+    posted = []
+    for row in rows:
+        due = row["next_due_date"]
+        while due <= today:
+            record_cash_flow(due, -abs(row["amount"]), row["note"])
+            posted.append(f"{row['note']}: Rs.{row['amount']:.2f} posted for {due}")
+            due = _add_months(due, row["interval_months"])
+        if due != row["next_due_date"]:
+            conn = get_conn()
+            conn.execute("UPDATE recurring_charges SET next_due_date = ? WHERE id = ?",
+                        (due, row["id"]))
+            conn.commit()
+            conn.close()
+    return posted
 
 
 def ensure_first_cash_flow_captured(available_cash: float) -> None:
@@ -1743,7 +1843,17 @@ def close_trade(symbol: str, exit_price: float | None, exit_reason: str) -> None
     realized_ret_pct are then left null, same NULL-tolerant convention
     positions.realized_pnl already uses. No-ops (does nothing) if there's
     no open trade for this symbol -- callers that aren't sure one exists
-    (e.g. reconciled_positions' fallback path) can call this unconditionally."""
+    (e.g. reconciled_positions' fallback path) can call this unconditionally.
+
+    Also auto-logs the DP (Depository Participant) charge for this sale as
+    a cash_flows entry, per config.STRATEGY["dp_charge_per_scrip"] (0 ->
+    no-op) -- this is the single chokepoint every real exit path goes
+    through (rebalance sell, gap-down stop, manual square-off, GTT-fill
+    reconciliation), so hooking it here is the only way to guarantee it's
+    never missed the way a manually-remembered ledger entry can be.
+    Deferred import: config.py imports state_db at module level, so a
+    top-level `import config` here would be circular; both are fully
+    loaded by the time any caller actually reaches this function."""
     conn = get_conn()
     row = conn.execute(
         "SELECT * FROM trades WHERE symbol = ? AND status = 'open' "
@@ -1766,6 +1876,11 @@ def close_trade(symbol: str, exit_price: float | None, exit_reason: str) -> None
          holding_days, row["id"]))
     conn.commit()
     conn.close()
+
+    import config
+    dp_charge = config.STRATEGY.get("dp_charge_per_scrip", 0.0)
+    if dp_charge > 0:
+        record_cash_flow(today, -dp_charge, f"DP charge -- {symbol} sold")
 
 
 def get_trades(symbol: str | None = None, status: str | None = None,
