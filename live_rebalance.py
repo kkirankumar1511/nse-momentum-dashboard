@@ -133,8 +133,19 @@ def compute_stop_updates(held_symbols: set[str], cfg: dict) -> list[dict]:
         if new_stop is None:
             continue  # neither mad_stop nor trailing_stop is enabled (or
                       # MAD has no value yet) -- nothing to log or apply
+        # Round to paisa precision before comparing/storing/sending to Kite.
+        # The MAD trail recomputes from scratch over the full price history
+        # every run, so two consecutive days can land a few millionths of a
+        # rupee apart for what's really the same value -- that noise used
+        # to pass the raw-float "> current_stop" check as a genuine ratchet,
+        # then Kite's own modify_gtt_trigger call (which compares at real
+        # currency precision) rejected it outright: "No changes detected.
+        # Modify the trigger parameters before submitting." (hit live on
+        # SONACOMS, 2026-09-01: current_stop=771.3750740681 vs a freshly
+        # computed 771.375075941754 -- both round to the same Rs.771.38).
+        new_stop = round(new_stop, 2)
         state_db.update_position_stop(sym, highest_close, atr_now, new_stop)
-        if new_stop <= pos["current_stop"]:
+        if new_stop <= round(pos["current_stop"], 2):
             continue  # no ratchet this run -- nothing to apply or report
 
         entry = {
