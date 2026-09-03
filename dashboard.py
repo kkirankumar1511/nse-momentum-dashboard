@@ -1297,6 +1297,21 @@ def _live_kpi_row():
         live_merged = merged_holdings()
         live_cash = available_cash
 
+    # Idle-cash sweep: whatever's parked in the cash-sweep instrument
+    # (e.g. LIQUIDCASE) is still YOUR liquid capital, just earning
+    # interest instead of sitting as raw broker margin -- folded into
+    # "Cash" here so it (and everything derived from it below: Total
+    # capital, % deployed, XIRR) reflects true total liquid capital, not
+    # just whatever Kite's margins API calls "available". 0 whenever the
+    # feature is off or the lookup fails, byte-identical to before this
+    # existed. The raw Kite-cash vs LIQUIDCASE split is still visible
+    # separately on the Ledger page's Cash management card.
+    if config.STRATEGY.get("cash_sweep_enabled", False):
+        try:
+            live_cash += lr.get_cash_sweep_holding()[1]
+        except Exception:
+            pass
+
     live_invested = float((live_merged["qty"] * live_merged["avg_price"]).sum()) if not live_merged.empty else 0.0
     live_holdings_value = float((live_merged["qty"] * live_merged["ltp"]).sum()) if not live_merged.empty else 0.0
     live_unrealized_pnl = float(live_merged["pnl"].sum()) if not live_merged.empty else 0.0
@@ -1389,7 +1404,20 @@ def page_cockpit():
         merged["value"] = merged["qty"] * merged["ltp"]
     invested_amount = float((merged["qty"] * merged["avg_price"]).sum()) if not merged.empty else 0.0
     holdings_value = float(merged["value"].sum()) if not merged.empty else 0.0
-    portfolio_value = available_cash + holdings_value
+    # Whatever's parked in the cash-sweep instrument is still real capital
+    # -- fold it in here too, not just the live KPI strip, since this
+    # portfolio_value is what gets PERSISTED as today's equity snapshot
+    # below. Leaving it out would make the equity curve/XIRR history show
+    # a fake drop the moment cash moves into the sweep instrument, when
+    # nothing was actually lost. 0 whenever the feature is off or the
+    # lookup fails, byte-identical to before this existed.
+    cash_sweep_value = 0.0
+    if config.STRATEGY.get("cash_sweep_enabled", False):
+        try:
+            cash_sweep_value = lr.get_cash_sweep_holding()[1]
+        except Exception:
+            pass
+    portfolio_value = available_cash + holdings_value + cash_sweep_value
 
     if portfolio_value > 0:
         log = log_equity_snapshot(portfolio_value, invested_amount, holdings_value)
@@ -1645,8 +1673,12 @@ def page_cockpit():
         # e.g. 10 positions each truly at 7.5% of a $200k account with
         # $50k idle cash would each read as exactly 10.0%/on-target
         # instead of correctly showing -2.5% drift, since 15k/150k
-        # (holdings-only) = 10% even though 15k/200k (true) = 7.5%.
-        total_equity = available_cash + total_value
+        # (holdings-only) = 10% even though 15k/200k (true) = 7.5%. Same
+        # reasoning extends to cash_sweep_value (computed at the top of
+        # this page) -- live_rebalance.propose_rebalance()'s own sizing
+        # denominator already includes it, so this gauge would otherwise
+        # show a smaller total than what actually sizes new buys.
+        total_equity = available_cash + total_value + cash_sweep_value
         alloc_desc = merged.sort_values("value", ascending=False).reset_index(drop=True)
 
         allocbar_segments, alloc_rows = [], []
