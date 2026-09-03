@@ -1433,6 +1433,14 @@ def page_cockpit():
                   "zero balance). Check the Kite login if this persists.")
     state_db.ensure_first_cash_flow_captured(available_cash)
 
+    _pending_corp_actions = state_db.get_corporate_action_flags(status="pending")
+    if not _pending_corp_actions.empty:
+        _n = len(_pending_corp_actions)
+        st.warning(
+            f"⚠️ Possible stock split/bonus detected on {_n} position"
+            f"{'s' if _n != 1 else ''} ({', '.join(_pending_corp_actions['symbol'])}) -- "
+            "review on the Positions & Trade page before it affects the stop-loss.")
+
     _live_kpi_row()
 
     col_chart, col_positions = st.columns(2)
@@ -3661,6 +3669,63 @@ def page_positions_trade():
                      "the rest of this page (square-off, orders, trade forms) isn't "
                      "affected, so nothing you're typing gets reset by it.")
     run_every = None if refresh_choice == "Off" else refresh_choice
+
+    # Corporate-action review -- live_rebalance.detect_corporate_actions()
+    # (run daily as part of the scheduled scan) flags a symbol whose real
+    # Kite qty no longer matches our own positions.qty, the signature of a
+    # stock split or bonus issue. Shown at the very top, above everything
+    # else, since a stale GTT stop-loss is a real risk to a live position.
+    # Deliberately confirm-first, never automatic -- the same qty mismatch
+    # could also mean you bought more of this symbol manually outside the
+    # app, which is NOT a split and would corrupt entry_price if the
+    # split math were applied to it, so a human needs to actually judge
+    # which case this is before anything gets touched.
+    _pending_corp_actions = state_db.get_corporate_action_flags(status="pending")
+    if not _pending_corp_actions.empty:
+        with st.container(border=True, key="ov-card-corp-action"):
+            st.markdown(
+                '<p class="ov-card-title"><span class="ov-dot" '
+                'style="background:var(--ov-coral);"></span>⚠️ Possible stock split / '
+                f'bonus detected <span class="ov-badge ov-badge-amber">'
+                f'{len(_pending_corp_actions)}</span></p>', unsafe_allow_html=True)
+            st.caption(
+                "Your real broker quantity for these no longer matches what this app "
+                "has on file, with no buy/sell/top-up on record to explain it -- usually "
+                "a split or bonus issue, but could also mean you bought more of it "
+                "manually outside the app (which is NOT a split, and applying split math "
+                "to that would corrupt the entry price). Check the ratio makes sense "
+                "before confirming -- a clean 2.0× is a 1:1 bonus, 1.5× is 3:2, etc.")
+            for _, _f in _pending_corp_actions.iterrows():
+                _ratio = float(_f["ratio"])
+                _new_entry = float(_f["old_entry_price"]) / _ratio
+                _new_stop = float(_f["old_current_stop"]) / _ratio
+                with st.container(border=True, key=f"corp_action_{_f['id']}"):
+                    cac1, cac2 = st.columns([2, 1])
+                    with cac1:
+                        st.markdown(
+                            f"**{_f['symbol']}** — {int(_f['our_qty'])} → "
+                            f"{int(_f['live_qty'])} units (×{_ratio:.4f})  \n"
+                            f"Entry price: ₹{_f['old_entry_price']:.2f} → ₹{_new_entry:.2f} · "
+                            f"Stop: ₹{_f['old_current_stop']:.2f} → ₹{_new_stop:.2f}"
+                            + (f" · GTT {int(_f['old_gtt_trigger_id'])} will be updated to match"
+                               if pd.notna(_f["old_gtt_trigger_id"]) else " · no GTT on file"))
+                    with cac2:
+                        cb1, cb2 = st.columns(2)
+                        if cb1.button("Confirm", key=f"corp_confirm_{_f['id']}",
+                                      type="primary", use_container_width=True):
+                            _result = lr.apply_corporate_action_adjustment(int(_f["id"]))
+                            if _result.get("gtt") and "FAILED" in str(_result["gtt"]):
+                                st.warning(f"Position/trade records fixed, but the GTT "
+                                          f"push failed: {_result['gtt']}")
+                            else:
+                                st.success(f"{_f['symbol']} adjusted.")
+                            st.rerun()
+                        if cb2.button("Dismiss", key=f"corp_dismiss_{_f['id']}",
+                                      use_container_width=True,
+                                      help="Use this if it wasn't actually a split -- "
+                                          "e.g. you bought more shares manually."):
+                            state_db.resolve_corporate_action_flag(int(_f["id"]), "dismissed")
+                            st.rerun()
 
     # Own small fragment (not the big orders/holdings one below) so this
     # timestamp still ticks with the same run_every, but can render
@@ -6302,8 +6367,13 @@ def page_guide():
     st.markdown(_guide_section("🚨", "coral", "Execution & safety nets", anchor="g-safety",
                                subtitle="What's automatic, what needs your click, and what catches the unexpected."),
                unsafe_allow_html=True)
+    _pending_corp_actions_n = 0
+    try:
+        _pending_corp_actions_n = len(state_db.get_corporate_action_flags(status="pending"))
+    except Exception:
+        pass
     st.markdown(
-        '<div class="guide-grid2">'
+        '<div class="guide-grid3">'
         '<div class="guide-card"><h4>Auto-execute trades</h4>'
         f'<p>{"ON" if cfg.get("auto_execute_trades") else "Off"} — when on, the scheduled 14:55 scan places '
         'its proposed sells/buys/top-ups as real orders with no confirmation click. The dashboard\'s own '
@@ -6326,6 +6396,16 @@ def page_guide():
         '<p>The moment a position closes, its exit price is only an estimate (the last traded price at the '
         'moment this app noticed). At 15:31 each day, a dedicated pass fetches the broker\'s own real order '
         'book and corrects every trade that closed that day to its true average fill price.</p></div>'
+        '<div class="guide-card"><h4>Split / bonus detection</h4>'
+        '<p>Checked once daily: if a held stock\'s real broker quantity no longer matches what\'s on file, '
+        'with nothing this app did to explain it, that\'s flagged for review on Positions &amp; Trade — a '
+        'split or bonus changes qty and price together without any order this app placed, which would '
+        'otherwise silently leave the stop-loss GTT pointing at stale numbers. Deliberately '
+        '<b>confirm-first, never automatic</b>: the same mismatch could also mean shares were bought '
+        'manually outside the app, which isn\'t a split at all.'
+        + (f'<br><b>{_pending_corp_actions_n} pending review right now.</b>'
+           if _pending_corp_actions_n else '')
+        + '</p></div>'
         '</div></div>', unsafe_allow_html=True)
 
     # ---- Cash management ------------------------------------------------

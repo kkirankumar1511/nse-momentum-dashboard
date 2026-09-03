@@ -215,6 +215,98 @@ def get_live_holdings() -> pd.DataFrame:
     return grouped[["quantity", "average_price"]]
 
 
+def detect_corporate_actions() -> list[dict]:
+    """Compares our stored positions.qty against Kite's REAL held qty for
+    every open position -- a mismatch that isn't explained by anything
+    this app did itself (no buy/sell/top-up went through our own code to
+    change it) is the signature of a stock split or bonus issue: the
+    exchange changed the qty and price at the broker without any order
+    this app placed, silently invalidating our own entry_price/
+    current_stop/highest_close AND the real GTT stop-loss order (still
+    referencing the pre-split qty/price).
+
+    Read-only and safe to run automatically every day: this only detects
+    and persists a 'pending' flag (state_db.corporate_action_flags) for
+    review -- it never touches the positions/trades tables or the real
+    GTT itself. See apply_corporate_action_adjustment() for the actual
+    (user-confirmed) fix. Idempotent -- won't create a second pending
+    flag for a symbol that already has one outstanding.
+
+    Returns the flags newly inserted this run (empty list if nothing
+    changed or reconciliation itself failed)."""
+    try:
+        held = get_live_holdings()
+    except Exception:
+        return []
+    our_positions = state_db.get_open_positions()
+    new_flags = []
+    for sym, pos in our_positions.items():
+        if sym not in held.index:
+            continue  # fully exited -- reconciled_positions()'s job, not this
+        live_qty = int(held.loc[sym, "quantity"])
+        our_qty = int(pos["qty"])
+        if live_qty == our_qty or our_qty <= 0 or live_qty <= 0:
+            continue
+        if state_db.has_pending_corporate_action_flag(sym):
+            continue  # already flagged, awaiting review -- don't duplicate
+        ratio = live_qty / our_qty
+        state_db.insert_corporate_action_flag(
+            sym, pos.get("id"), our_qty, live_qty, ratio,
+            float(pos["entry_price"]), float(pos["current_stop"]),
+            float(pos["highest_close"]), pos.get("gtt_trigger_id"))
+        new_flags.append({"symbol": sym, "our_qty": our_qty, "live_qty": live_qty,
+                          "ratio": ratio})
+    return new_flags
+
+
+def apply_corporate_action_adjustment(flag_id: int) -> dict:
+    """User-confirmed fix for one detect_corporate_actions() flag:
+    rescales entry_price/current_stop/highest_close by 1/ratio (qty went
+    up by `ratio`, so per-share price must have gone down by the same
+    factor for total position value to be unchanged -- the whole point of
+    a split/bonus), updates qty to the real live qty, applies the same
+    rescale to the matching open trades row so P&L stays correct at exit,
+    and pushes the corrected qty/trigger price to the real GTT if one was
+    on file. Marks the flag 'applied' once the position/trade bookkeeping
+    is fixed, even if the GTT push itself fails (that's the more
+    time-sensitive fix) -- the result dict says exactly what happened."""
+    flags = state_db.get_corporate_action_flags(status=None)
+    match = flags[flags["id"] == flag_id]
+    if match.empty:
+        return {"error": f"No such flag: {flag_id}"}
+    f = match.iloc[0]
+    if f["status"] != "pending":
+        return {"error": f"Flag {flag_id} is already {f['status']}"}
+
+    ratio = float(f["ratio"])
+    new_entry_price = float(f["old_entry_price"]) / ratio
+    new_current_stop = float(f["old_current_stop"]) / ratio
+    new_highest_close = float(f["old_highest_close"]) / ratio
+    new_qty = int(f["live_qty"])
+    sym = f["symbol"]
+
+    if f["position_id"] is not None and not pd.isna(f["position_id"]):
+        state_db.apply_corporate_action_to_position(
+            int(f["position_id"]), new_qty, new_entry_price,
+            new_current_stop, new_highest_close)
+    state_db.apply_corporate_action_to_trade(sym, new_qty, new_entry_price, new_current_stop)
+
+    gtt_result = None
+    gtt_id = f["old_gtt_trigger_id"]
+    if gtt_id is not None and not pd.isna(gtt_id):
+        try:
+            ltp = kite_client.get_ltp([sym])[sym]
+            kite_client.modify_gtt_trigger(int(gtt_id), sym, new_qty, new_current_stop, ltp)
+            gtt_result = "updated"
+        except Exception as e:
+            gtt_result = f"FAILED -- {e} -- update or replace this GTT manually"
+
+    state_db.resolve_corporate_action_flag(flag_id, "applied")
+    return {"symbol": sym, "ratio": ratio, "new_qty": new_qty,
+           "new_entry_price": round(new_entry_price, 2),
+           "new_current_stop": round(new_current_stop, 2), "gtt": gtt_result}
+
+
 def get_cash_sweep_holding(cfg: dict | None = None) -> tuple[int, float]:
     """Real qty + current market value of the idle-cash-sweep instrument
     actually held right now, queried fresh from Kite -- never tracked in
@@ -1104,6 +1196,20 @@ def main():
             with open(LOG_PATH, "a") as f:
                 f.write("\n".join(log_lines) + "\n")
             raise
+
+        # Corporate-action detection (stock split / bonus issue) -- purely
+        # read-only, just flags a mismatch for manual review on the
+        # Positions & Trade page; never touches the positions/trades
+        # tables or the real GTT itself (see
+        # apply_corporate_action_adjustment()). Never raises: a detection
+        # miss shouldn't block the real scan.
+        try:
+            for flag in detect_corporate_actions():
+                log(f"⚠️ Possible split/bonus detected: {flag['symbol']} "
+                   f"{flag['our_qty']} → {flag['live_qty']} units "
+                   f"(×{flag['ratio']:.4f}) -- review on Positions & Trade")
+        except Exception as e:
+            log(f"Corporate-action check failed: {e}")
 
         def cb(stage, frac):
             pass  # progress bar text is meaningless in a headless/logged run

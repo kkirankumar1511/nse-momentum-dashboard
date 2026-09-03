@@ -118,6 +118,31 @@ CREATE TABLE IF NOT EXISTS equity_log (
     value REAL NOT NULL
 );
 
+-- Detected but not-yet-applied corporate actions (stock split / bonus
+-- issue) on a currently-held position -- see live_rebalance.
+-- detect_corporate_actions()/apply_corporate_action_adjustment(). A split
+-- or bonus changes a stock's qty and price simultaneously at the broker
+-- without any order this app placed, silently invalidating our own
+-- entry_price/current_stop/highest_close bookkeeping AND the real GTT
+-- stop-loss order sitting at the broker (still referencing the pre-split
+-- qty/price) -- flagged for manual review/confirm rather than applied
+-- automatically, since it touches a live stop-loss with real money behind
+-- it. status: 'pending' | 'applied' | 'dismissed'.
+CREATE TABLE IF NOT EXISTS corporate_action_flags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    detected_date TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    position_id INTEGER,
+    our_qty INTEGER NOT NULL,
+    live_qty INTEGER NOT NULL,
+    ratio REAL NOT NULL,
+    old_entry_price REAL NOT NULL,
+    old_current_stop REAL NOT NULL,
+    old_highest_close REAL NOT NULL,
+    old_gtt_trigger_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending'
+);
+
 CREATE TABLE IF NOT EXISTS rebalance_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_time TEXT NOT NULL,
@@ -753,6 +778,96 @@ def get_open_positions() -> dict[str, dict]:
     rows = conn.execute("SELECT * FROM positions WHERE status = 'open'").fetchall()
     conn.close()
     return {r["symbol"]: dict(r) for r in rows}
+
+
+def has_pending_corporate_action_flag(symbol: str) -> bool:
+    """Idempotency guard for detect_corporate_actions() -- one pending
+    flag per symbol at a time, so a daily re-detect doesn't pile up
+    duplicate rows for the same still-unresolved split/bonus."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM corporate_action_flags WHERE symbol = ? AND status = 'pending'",
+        (symbol,)).fetchone()
+    conn.close()
+    return row is not None
+
+
+def insert_corporate_action_flag(symbol: str, position_id: int | None, our_qty: int,
+                                 live_qty: int, ratio: float, old_entry_price: float,
+                                 old_current_stop: float, old_highest_close: float,
+                                 old_gtt_trigger_id: int | None) -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO corporate_action_flags (detected_date, symbol, position_id, "
+        "our_qty, live_qty, ratio, old_entry_price, old_current_stop, "
+        "old_highest_close, old_gtt_trigger_id, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+        (dt.date.today().isoformat(), symbol, position_id, our_qty, live_qty, ratio,
+         old_entry_price, old_current_stop, old_highest_close, old_gtt_trigger_id))
+    conn.commit()
+    conn.close()
+
+
+def get_corporate_action_flags(status: str | None = "pending") -> pd.DataFrame:
+    conn = get_conn()
+    if status:
+        df = pd.read_sql(
+            "SELECT * FROM corporate_action_flags WHERE status = ? "
+            "ORDER BY detected_date DESC, id DESC", conn, params=(status,))
+    else:
+        df = pd.read_sql(
+            "SELECT * FROM corporate_action_flags ORDER BY detected_date DESC, id DESC", conn)
+    conn.close()
+    return df
+
+
+def resolve_corporate_action_flag(flag_id: int, status: str) -> None:
+    """status: 'applied' or 'dismissed'."""
+    conn = get_conn()
+    conn.execute("UPDATE corporate_action_flags SET status = ? WHERE id = ?",
+                (status, flag_id))
+    conn.commit()
+    conn.close()
+
+
+def apply_corporate_action_to_position(position_id: int, new_qty: int, new_entry_price: float,
+                                       new_current_stop: float, new_highest_close: float) -> None:
+    """Rescales one position's bookkeeping after a confirmed split/bonus --
+    see live_rebalance.apply_corporate_action_adjustment(). recommended_stop
+    is rescaled too when it was already set (proportionally, same ratio),
+    left NULL otherwise."""
+    conn = get_conn()
+    row = conn.execute("SELECT recommended_stop FROM positions WHERE id = ?",
+                       (position_id,)).fetchone()
+    new_recommended = None
+    if row is not None and row["recommended_stop"] is not None:
+        old_row = conn.execute(
+            "SELECT current_stop FROM positions WHERE id = ?", (position_id,)).fetchone()
+        if old_row is not None and old_row["current_stop"]:
+            ratio = new_current_stop / old_row["current_stop"]
+            new_recommended = row["recommended_stop"] * ratio
+    conn.execute(
+        "UPDATE positions SET qty = ?, entry_price = ?, current_stop = ?, "
+        "highest_close = ?, recommended_stop = ?, updated_at = datetime('now') "
+        "WHERE id = ?",
+        (new_qty, new_entry_price, new_current_stop, new_highest_close,
+         new_recommended, position_id))
+    conn.commit()
+    conn.close()
+
+
+def apply_corporate_action_to_trade(symbol: str, new_qty: int, new_entry_price: float,
+                                    new_initial_stop: float) -> None:
+    """Rescales the matching OPEN trades row so realized P&L stays correct
+    once this position eventually closes -- otherwise entry_price would
+    stay in pre-split terms while qty/exit_price are post-split."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE trades SET qty = ?, entry_price = ?, initial_stop = ? "
+        "WHERE symbol = ? AND status = 'open'",
+        (new_qty, new_entry_price, new_initial_stop, symbol))
+    conn.commit()
+    conn.close()
 
 
 def get_stop_update_log(position_id: int) -> pd.DataFrame:
