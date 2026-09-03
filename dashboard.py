@@ -6316,10 +6316,27 @@ def page_guide():
 
     # ---- Cash management ------------------------------------------------
     st.markdown(_guide_section("💰", "teal", "Cash management", anchor="g-cash",
-                               subtitle="The small recurring costs of actually trading, tracked automatically."),
+                               subtitle="Keeping idle capital working, and the small recurring costs of actually trading — both tracked automatically."),
                unsafe_allow_html=True)
+    _sweep_qty, _sweep_value = (0, 0.0)
+    if cfg.get("cash_sweep_enabled", False):
+        try:
+            _sweep_qty, _sweep_value = lr.get_cash_sweep_holding(cfg)
+        except Exception:
+            pass
     st.markdown(
-        '<div class="guide-grid2">'
+        '<div class="guide-grid3">'
+        '<div class="guide-card"><h4>Idle cash sweep</h4>'
+        f'<p>{"Currently ON" if cfg.get("cash_sweep_enabled") else "Currently off"} — uninvested cash is '
+        f'automatically parked in <b>{cfg.get("cash_sweep_symbol","LIQUIDCASE")}</b>, a liquid-fund ETF, so '
+        'it earns interest instead of sitting idle — swept in after every rebalance run, gap-down sell, or '
+        'manual trade, no minimum amount (buying it carries no DP charge). Whenever a new buy needs more '
+        'cash than what\'s free, just enough gets automatically redeemed back first to cover the gap — the '
+        'real DP charge applies there, since that IS a sell. It\'s never counted as one of your momentum '
+        'positions, and its value is folded into "Cash" everywhere on the Overview page so nothing looks '
+        'like it went missing.'
+        + (f'<br><b>Currently parked: {_sweep_qty} units, ₹{_sweep_value:,.0f}</b>' if _sweep_qty else '')
+        + '</p></div>'
         '<div class="guide-card"><h4>DP charges</h4>'
         f'<p>Your depository charges ₹{cfg.get("dp_charge_per_scrip",15.34):.2f} per stock, per day you '
         'sell it — this app logs that automatically to the Ledger the moment any position actually closes, '
