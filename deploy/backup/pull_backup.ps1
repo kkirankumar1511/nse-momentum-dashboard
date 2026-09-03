@@ -57,7 +57,12 @@ $VpsUser = "root"
 $SshKeyPath = "$env:USERPROFILE\.ssh\nse_backup_key"
 $RemoteBackupDir = "/opt/nse-momentum-dashboard/backups"
 $LocalBackupDir = "D:\trading-db-backup"
-$RetentionDays = 60
+# D:\trading-db-backup is itself synced to Google Drive via Drive for
+# Desktop's "back up this folder" feature (set up 2026-09-03) -- so this
+# one retention number IS the Google Drive retention too, not just local.
+# No separate copy step needed: whatever lands/gets pruned here, Drive
+# mirrors automatically in the background.
+$RetentionDays = 30
 
 New-Item -ItemType Directory -Force -Path $LocalBackupDir | Out-Null
 $LogFile = Join-Path $LocalBackupDir "pull_backup.log"
@@ -93,4 +98,4 @@ Get-ChildItem -Path $LocalBackupDir -Filter "state_*.db.gz.age" |
         Write-Log "Pruning old local backup: $($_.Name)"
         Remove-Item $_.FullName -Force
     }
-Write-Log "Rotation complete -- keeping last $RetentionDays days locally."
+Write-Log "Rotation complete -- keeping last $RetentionDays days locally (and on Google Drive, via Drive for Desktop's folder backup)."
