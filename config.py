@@ -386,6 +386,19 @@ _STRATEGY_DEFAULTS = {
     # this entirely (no cash_flows entry posted).
     "dp_charge_per_scrip": 15.34,
 
+    # Idle-cash sweep: park uninvested cash in a liquid-fund ETF
+    # (cash_sweep_symbol) so it earns some interest instead of sitting
+    # idle, redeeming just enough automatically whenever a real buy/top-up
+    # needs more cash than what's free. False by default -- like
+    # auto_execute_trades, this places real automatic orders (on a NEW
+    # instrument the app has never traded before), so it's a deliberate
+    # opt-in, not silently on. Buying it carries no DP charge (only a SELL
+    # does, per real CDSL rules), so there's no minimum sweep-in amount --
+    # every idle rupee gets swept once this is on. See live_rebalance.
+    # sweep_idle_cash()/ensure_cash_for_buys()/get_cash_sweep_holding().
+    "cash_sweep_enabled": False,
+    "cash_sweep_symbol": "LIQUIDCASE",
+
     # Rebalance cadence: "daily" re-evaluates the sell/keep-zone rule every
     # time the scheduled scan runs (Mon-Fri); "monthly" only evaluates it
     # on the first trading day of each calendar month (nse_holidays.

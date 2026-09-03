@@ -93,6 +93,26 @@ CREATE TABLE IF NOT EXISTS recurring_charges (
     active INTEGER NOT NULL DEFAULT 1
 );
 
+-- Idle-cash sweep audit trail (parking uninvested cash in a liquid-fund
+-- ETF like LIQUIDCASE to earn interest instead of sitting idle) -- kept
+-- entirely separate from `positions`/`trades` since this isn't a momentum
+-- trade (no stop-loss, no ranking, never counts toward max_positions or
+-- the Tradebook's win-rate/P&L stats). The real, current holding is never
+-- tracked here -- always queried fresh from Kite (see live_rebalance.
+-- get_cash_sweep_holding()) -- this table is pure history/audit, not a
+-- source of truth for "how much do we hold right now".
+CREATE TABLE IF NOT EXISTS cash_sweep_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    action TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    qty INTEGER NOT NULL,
+    price REAL,
+    amount REAL NOT NULL,
+    reason TEXT,
+    order_id TEXT
+);
+
 CREATE TABLE IF NOT EXISTS equity_log (
     date TEXT PRIMARY KEY,
     value REAL NOT NULL
@@ -971,6 +991,30 @@ def post_due_recurring_charges() -> list[str]:
             conn.commit()
             conn.close()
     return posted
+
+
+def record_cash_sweep(date: str, action: str, symbol: str, qty: int, price: float,
+                      amount: float, reason: str, order_id: str | None = None) -> None:
+    """One row per real buy/sell of the cash-sweep instrument -- see
+    live_rebalance.sweep_idle_cash()/ensure_cash_for_buys(). Pure audit
+    trail; not the source of truth for the current holding (that's always
+    queried fresh from Kite)."""
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO cash_sweep_log (date, action, symbol, qty, price, amount, "
+        "reason, order_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (date, action, symbol, qty, price, amount, reason, order_id))
+    conn.commit()
+    conn.close()
+
+
+def get_cash_sweep_log() -> pd.DataFrame:
+    conn = get_conn()
+    df = pd.read_sql(
+        "SELECT date, action, symbol, qty, price, amount, reason, order_id "
+        "FROM cash_sweep_log ORDER BY date DESC, id DESC", conn)
+    conn.close()
+    return df
 
 
 def ensure_first_cash_flow_captured(available_cash: float) -> None:

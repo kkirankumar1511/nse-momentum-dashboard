@@ -32,6 +32,7 @@ this job to run. This job only proposes the rebalance-rule exits/entries.
 from __future__ import annotations
 
 import datetime as dt
+import math
 import os
 
 import pandas as pd
@@ -176,7 +177,14 @@ def get_live_holdings() -> pd.DataFrame:
     """Combined CNC holdings + any same-day positions, one row per symbol
     (qty, avg entry price), indexed by tradingsymbol. Delivery momentum
     swings mostly live in holdings; positions covers a same-day buy before
-    it settles into holdings overnight."""
+    it settles into holdings overnight.
+
+    Deliberately excludes the idle-cash-sweep instrument (config.STRATEGY
+    ["cash_sweep_symbol"], e.g. LIQUIDCASE) -- it isn't a momentum swing
+    position and must never count toward max_positions, sector caps, or
+    the sell-check loop. Its value is added back separately wherever
+    total capital is computed -- see get_cash_sweep_holding() and its
+    callers in propose_rebalance()."""
     frames = []
     pos = kite_client.get_positions()
     if not pos.empty and "quantity" in pos.columns:
@@ -196,11 +204,116 @@ def get_live_holdings() -> pd.DataFrame:
     if not frames:
         return pd.DataFrame(columns=["quantity", "average_price"])
     combined = pd.concat(frames, ignore_index=True)
+    sweep_sym = config.STRATEGY.get("cash_sweep_symbol", "LIQUIDCASE")
+    combined = combined[combined["tradingsymbol"] != sweep_sym]
+    if combined.empty:
+        return pd.DataFrame(columns=["quantity", "average_price"])
     combined["cost"] = combined["quantity"] * combined["average_price"]
     grouped = combined.groupby("tradingsymbol").agg(
         quantity=("quantity", "sum"), cost=("cost", "sum"))
     grouped["average_price"] = grouped["cost"] / grouped["quantity"]
     return grouped[["quantity", "average_price"]]
+
+
+def get_cash_sweep_holding(cfg: dict | None = None) -> tuple[int, float]:
+    """Real qty + current market value of the idle-cash-sweep instrument
+    actually held right now, queried fresh from Kite -- never tracked in
+    our own positions table (it isn't a momentum trade, see
+    cash_sweep_log's own comment in state_db.py). Returns (0, 0.0) on any
+    lookup failure or if nothing is held, never raises."""
+    cfg = cfg or config.STRATEGY
+    sym = cfg.get("cash_sweep_symbol", "LIQUIDCASE")
+    try:
+        qty = 0
+        for df in (kite_client.get_holdings(), kite_client.get_positions()):
+            if not df.empty and "tradingsymbol" in df.columns:
+                rows = df[(df["tradingsymbol"] == sym) & (df["quantity"] > 0)]
+                qty += int(rows["quantity"].sum())
+        if qty <= 0:
+            return 0, 0.0
+        ltp = kite_client.get_ltp([sym])[sym]
+        return qty, round(qty * ltp, 2)
+    except Exception:
+        return 0, 0.0
+
+
+def ensure_cash_for_buys(needed: float, cfg: dict | None = None) -> dict | None:
+    """Call right before placing real buy/top-up orders: if today's total
+    buy cost exceeds real available cash, redeems just enough of the
+    cash-sweep instrument first (a real SELL order, so the usual DP
+    charge applies -- unlike buying it) to close the gap. Kite's own
+    order rejection remains the final safety net if this estimate is off
+    (e.g. price moved between this check and the buy order). No-ops
+    (returns None) when cash_sweep_enabled is off, cash is already
+    sufficient, or nothing is actually held to redeem."""
+    cfg = cfg or config.STRATEGY
+    if not cfg.get("cash_sweep_enabled", False) or needed <= 0:
+        return None
+    sym = cfg.get("cash_sweep_symbol", "LIQUIDCASE")
+    try:
+        margins = kite_client.get_margins()
+        available_cash = margins["equity"]["available"]["live_balance"]
+    except Exception:
+        return None
+    shortfall = needed - available_cash
+    if shortfall <= 0:
+        return None
+    qty_held, _ = get_cash_sweep_holding(cfg)
+    if qty_held <= 0:
+        return None
+    try:
+        ltp = kite_client.get_ltp([sym])[sym]
+    except Exception:
+        return None
+    qty_to_sell = min(qty_held, math.ceil(shortfall / ltp))
+    if qty_to_sell <= 0:
+        return None
+    try:
+        oid = kite_client.place_order(sym, qty_to_sell, "SELL")
+    except Exception as e:
+        return {"action": "redeem", "symbol": sym, "error": str(e)}
+    amount = round(qty_to_sell * ltp, 2)
+    today = dt.date.today().isoformat()
+    state_db.record_cash_sweep(
+        today, "sell", sym, qty_to_sell, ltp, amount,
+        f"Redeemed to cover a Rs.{shortfall:,.0f} cash shortfall for today's buys", oid)
+    dp_charge = cfg.get("dp_charge_per_scrip", 0.0)
+    if dp_charge > 0:
+        state_db.record_cash_flow(today, -dp_charge, f"DP charge -- {sym} sold")
+    return {"action": "redeem", "symbol": sym, "qty": qty_to_sell, "price": ltp,
+           "amount": amount, "order_id": oid}
+
+
+def sweep_idle_cash(cfg: dict | None = None) -> dict | None:
+    """Call after any cash-affecting action settles (a rebalance run, a
+    gap-down sell, a manual trade): parks whatever real cash is currently
+    idle into the cash-sweep instrument. Buying it carries no DP charge
+    (that's only ever levied on a sell), so there's no minimum -- every
+    idle rupee that can afford at least 1 unit gets swept. No-ops when
+    cash_sweep_enabled is off or cash can't afford even 1 unit."""
+    cfg = cfg or config.STRATEGY
+    if not cfg.get("cash_sweep_enabled", False):
+        return None
+    sym = cfg.get("cash_sweep_symbol", "LIQUIDCASE")
+    try:
+        margins = kite_client.get_margins()
+        available_cash = margins["equity"]["available"]["live_balance"]
+        ltp = kite_client.get_ltp([sym])[sym]
+    except Exception:
+        return None
+    qty_to_buy = int(available_cash // ltp) if ltp > 0 else 0
+    if qty_to_buy <= 0:
+        return None
+    try:
+        oid = kite_client.place_order(sym, qty_to_buy, "BUY")
+    except Exception as e:
+        return {"action": "sweep", "symbol": sym, "error": str(e)}
+    amount = round(qty_to_buy * ltp, 2)
+    today = dt.date.today().isoformat()
+    state_db.record_cash_sweep(today, "buy", sym, qty_to_buy, ltp, amount,
+                               "Swept idle cash", oid)
+    return {"action": "sweep", "symbol": sym, "qty": qty_to_buy, "price": ltp,
+           "amount": amount, "order_id": oid}
 
 
 def get_unsettled_quantities() -> dict[str, int]:
@@ -265,6 +378,19 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
 
     report("Loading current holdings...", 0.05)
     held = get_live_holdings()
+
+    # Idle-cash sweep (cash_sweep_enabled): treat whatever's currently
+    # parked in the cash-sweep instrument as spendable capital for SIZING
+    # purposes -- otherwise the strategy would systematically undersize
+    # buys just because some capital happens to be earning interest
+    # instead of sitting as raw cash. Actually turning that theoretical
+    # availability into real cash (redeeming it) only happens at EXECUTION
+    # time, right before real buy orders go out -- see
+    # ensure_cash_for_buys(), called from main()/the dashboard's manual
+    # Execute buttons. 0.0 whenever the feature is off, byte-identical to
+    # before this existed.
+    cash_sweep_value = (get_cash_sweep_holding(cfg)[1]
+                       if cfg.get("cash_sweep_enabled", False) else 0.0)
 
     # Market regime filter (backtest.py:817, 926-929): when NIFTY's own
     # close is below its own regime_ema_period EMA, caps how many NEW
@@ -338,9 +464,11 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
     still_held = set(held.index) - sold_syms
     open_slots = max(effective_max_positions - len(still_held), 0)
 
-    # Total portfolio value (cash + everything held, current prices) --
-    # the equal-weight denominator, unchanged either sizing mode.
-    total_equity = available_cash + _holdings_value(held, ranked)
+    # Total portfolio value (cash + everything held, current prices, plus
+    # whatever's parked in the cash sweep instrument -- see the comment at
+    # this function's top) -- the equal-weight denominator, unchanged
+    # either sizing mode.
+    total_equity = available_cash + _holdings_value(held, ranked) + cash_sweep_value
     target_per_slot = total_equity / cfg["max_positions"]
 
     # Sell proceeds use each symbol's CURRENT price (from the screener,
@@ -362,7 +490,7 @@ def propose_rebalance(available_cash: float, cfg: dict | None = None,
         settled_qty = qty - unsettled_qty
         sell_proceeds += price * settled_qty
         unsettled_proceeds += price * unsettled_qty
-    cash_pool = available_cash + sell_proceeds
+    cash_pool = available_cash + sell_proceeds + cash_sweep_value
 
     # Sector diversification cap (backtest.py:521-557, _apply_sector_cap)
     # -- filters which NEW-entry candidates are even eligible before any
@@ -823,6 +951,13 @@ def main_gap_check():
                 log(f"🔴 {a['symbol']}: gapped to ₹{a['ltp']:.2f} (stop ₹{a['stop']:.2f}) -- "
                    f"market SELL order {a['order_id']}, GTT deleted: {a['gtt_deleted']}"
                    + (f" -- {a['error']}" if a.get("error") else ""))
+        # A gap-down sell frees cash immediately -- sweep any idle leftover
+        # into the cash-sweep instrument the same run. No-ops when
+        # cash_sweep_enabled is off or nothing actually sold.
+        if actions:
+            sweep_result = sweep_idle_cash()
+            if sweep_result:
+                log(f"💰 Cash sweep: {sweep_result}")
         with open(LOG_PATH, "a") as f:
             f.write("\n".join(log_lines) + "\n")
         jr["summary"] = (f"{len(actions)} gap action(s)" if actions
@@ -1012,6 +1147,18 @@ def main():
                 state_db.mark_rebalance_sells_executed(run_id, sold)
                 state_db.mark_rebalance_sells_failed(run_id, sell_failed)
                 open_slots += len(sold)
+            # Idle-cash sweep: redeem just enough of the cash-sweep
+            # instrument BEFORE placing real buy/top-up orders, if today's
+            # total buy cost needs more than what's free as real cash --
+            # see ensure_cash_for_buys()'s own docstring. No-ops entirely
+            # when cash_sweep_enabled is off.
+            buy_cost = (float((result["buys"]["qty"] * result["buys"]["price"]).sum())
+                       if not result["buys"].empty else 0.0)
+            topup_cost = (float((result["top_ups"]["extra_qty"] * result["top_ups"]["price"]).sum())
+                         if not result["top_ups"].empty else 0.0)
+            sweep_action = ensure_cash_for_buys(buy_cost + topup_cost)
+            if sweep_action:
+                log(f"\n💰 Cash sweep: {sweep_action}")
             if not result["buys"].empty:
                 buy_log, bought, buy_failed = execute_buys(result["buys"])
                 log("\n".join(buy_log))
@@ -1024,6 +1171,12 @@ def main():
                 state_db.mark_rebalance_top_ups_executed(run_id, topped_up)
                 state_db.mark_rebalance_top_ups_failed(run_id, topup_failed)
             state_db.set_rebalance_open_slots(run_id, open_slots)
+            # Sweep whatever's left over back into the cash-sweep
+            # instrument once everything above has settled -- no-ops when
+            # cash_sweep_enabled is off.
+            sweep_result = sweep_idle_cash()
+            if sweep_result:
+                log(f"💰 Cash sweep: {sweep_result}")
             log("\nTrades executed automatically -- see the log above for each order.")
         else:
             log("Nothing was placed or modified -- review and execute/apply manually "

@@ -1989,6 +1989,42 @@ def page_ledger():
                 st.success("Saved.")
                 st.rerun()
 
+        st.divider()
+        st.markdown("**Idle cash sweep**")
+        st.caption(
+            "Park uninvested cash in a liquid-fund ETF so it earns interest "
+            "instead of sitting idle -- swept in automatically after any "
+            "rebalance run, gap-down sell, or manual trade, and redeemed "
+            "back (just enough to cover the shortfall) whenever a new buy "
+            "needs more cash than what's free. Buying it carries no DP "
+            "charge (that only applies to a sell), so every idle rupee "
+            "gets swept, no minimum. This places real automatic orders on "
+            "a new instrument, so it starts off, same as auto-execute.")
+        _sweep_qty, _sweep_value = (0, 0.0)
+        if config.STRATEGY.get("cash_sweep_enabled", False):
+            try:
+                _sweep_qty, _sweep_value = lr.get_cash_sweep_holding()
+            except Exception:
+                pass
+        if _sweep_qty:
+            st.markdown(
+                f'<div class="ov-row"><span class="ov-card-meta">Currently parked</span>'
+                f'<span class="ov-sym">{_sweep_qty} units · ₹{_sweep_value:,.0f}</span></div>',
+                unsafe_allow_html=True)
+        with st.form("cash_sweep_form"):
+            csf1, csf2 = st.columns([1, 2])
+            cash_sweep_enabled = csf1.checkbox(
+                "Enabled", value=bool(config.STRATEGY.get("cash_sweep_enabled", False)))
+            cash_sweep_symbol = csf2.text_input(
+                "Instrument", value=config.STRATEGY.get("cash_sweep_symbol", "LIQUIDCASE"))
+            if st.form_submit_button("Save", type="primary"):
+                updates = {"cash_sweep_enabled": bool(cash_sweep_enabled),
+                          "cash_sweep_symbol": cash_sweep_symbol.strip().upper()}
+                state_db.update_strategy_config(updates)
+                config.STRATEGY.update(updates)
+                st.success("Saved.")
+                st.rerun()
+
     _recurring = state_db.get_recurring_charges()
     _rec_sel_id = st.session_state.get("_admin_recurring_sel_id")
     _rec_editing = (_rec_sel_id is not None and not _recurring.empty
@@ -3230,6 +3266,11 @@ def page_live_rebalance():
                         _sells_actionable["symbol"].isin(selected_sells)]
                     log, succeeded, failed = lr.execute_sells(_to_execute)
                     st.session_state["sell_exec_log"] = log
+                    if succeeded:
+                        # A sell just freed cash -- sweep any idle leftover
+                        # into the cash-sweep instrument. No-ops when
+                        # cash_sweep_enabled is off.
+                        lr.sweep_idle_cash()
                     resolved = succeeded + list(failed)
                     if resolved:
                         result["open_slots"] = result.get("open_slots", 0) + len(succeeded)
@@ -3313,6 +3354,10 @@ def page_live_rebalance():
                             use_container_width=True, key="lr_execute_buys"):
                     _to_execute = _buys_actionable[
                         _buys_actionable["symbol"].isin(selected_buys)]
+                    # Redeem just enough of the cash-sweep instrument first
+                    # if these buys need more than what's free as real
+                    # cash. No-ops when cash_sweep_enabled is off.
+                    lr.ensure_cash_for_buys(float((_to_execute["qty"] * _to_execute["price"]).sum()))
                     log, succeeded, failed = lr.execute_buys(_to_execute, place_gtt=place_gtt)
                     st.session_state["buy_exec_log"] = log
                     resolved = succeeded + list(failed)
@@ -3391,6 +3436,11 @@ def page_live_rebalance():
                                 use_container_width=True, key="lr_execute_topups"):
                         _to_execute = _topups_actionable[
                             _topups_actionable["symbol"].isin(selected_topups)]
+                        # Redeem just enough of the cash-sweep instrument
+                        # first if these top-ups need more than what's free
+                        # as real cash. No-ops when cash_sweep_enabled is off.
+                        lr.ensure_cash_for_buys(
+                            float((_to_execute["extra_qty"] * _to_execute["price"]).sum()))
                         log, succeeded, failed = lr.execute_top_ups(_to_execute)
                         st.session_state["topup_exec_log"] = log
                         resolved = succeeded + list(failed)
@@ -3919,6 +3969,10 @@ def page_positions_trade():
                         exit_ltp = None
                     state_db.close_trade(symbol, exit_ltp, "manual_square_off")
                     state_db.close_position(symbol, exit_ltp)
+                    # This just freed cash -- sweep any idle leftover into
+                    # the cash-sweep instrument. No-ops when
+                    # cash_sweep_enabled is off.
+                    lr.sweep_idle_cash()
                     # A stale GTT left pointing at a position you no longer
                     # hold can trigger and attempt to sell shares that aren't
                     # there, or just confusingly linger in the Kite GTT list.
@@ -3934,6 +3988,11 @@ def page_positions_trade():
                 except Exception as e:
                     st.error(f"Order failed: {e}")
             else:
+                if side == "BUY":
+                    # Redeem just enough of the cash-sweep instrument first
+                    # if this buy needs more than what's free as real cash.
+                    # No-ops when cash_sweep_enabled is off.
+                    lr.ensure_cash_for_buys(float(qty) * float(limit_price or ltp))
                 try:
                     oid = kite_client.place_order(symbol, qty, side,
                                                   order_type=order_type, price=limit_price)
@@ -3941,6 +4000,10 @@ def page_positions_trade():
                     st.error(f"Order failed: {e}")
                 else:
                     st.success(f"Order placed: {oid}")
+                    if side == "SELL":
+                        # This just freed cash -- sweep any idle leftover.
+                        # No-ops when cash_sweep_enabled is off.
+                        lr.sweep_idle_cash()
                     if side == "BUY":
                         gtt_id = None
                         if place_gtt:
