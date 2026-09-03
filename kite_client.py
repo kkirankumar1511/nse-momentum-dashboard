@@ -87,6 +87,20 @@ def instrument_map() -> dict:
 
 
 @lru_cache(maxsize=1)
+def get_cash_instruments() -> list[str]:
+    """NSE-listed liquid-fund ETFs suitable for parking idle cash -- every
+    tradable equity symbol containing "LIQUID" (LIQUIDBEES, LIQUIDCASE,
+    HDFCLIQUID, ABSLLIQUID, etc.), sorted. Feeds the Ledger page's
+    cash-sweep instrument dropdown (see live_rebalance.sweep_idle_cash())
+    -- fetched live rather than hardcoded so a new fund listing or a
+    delisting is picked up automatically. Cached for the process
+    lifetime, same pattern as tick_size_map() -- this list changes on
+    the order of months, not within a session."""
+    im = instrument_map()
+    return sorted(s for s in im if "LIQUID" in s.upper())
+
+
+@lru_cache(maxsize=1)
 def tick_size_map() -> dict:
     """symbol -> tick_size (Rs) for NSE equities. Kite rejects any LIMIT
     price that isn't an exact multiple of a stock's own tick size, which

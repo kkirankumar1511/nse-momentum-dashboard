@@ -2043,15 +2043,29 @@ def page_ledger():
                 f'<div class="ov-row"><span class="ov-card-meta">Currently parked</span>'
                 f'<span class="ov-sym">{_sweep_qty} units · ₹{_sweep_value:,.0f}</span></div>',
                 unsafe_allow_html=True)
+        # Fetched live from Kite's own instrument list (every tradable
+        # symbol containing "LIQUID"), not hardcoded -- a new fund listing
+        # or a delisting is picked up automatically. Falls back to just
+        # the currently-saved value if the fetch fails (e.g. Kite session
+        # issue) or that value isn't in the fetched list, so a legacy/
+        # custom choice never silently disappears from the dropdown.
+        try:
+            _cash_instruments = kite_client.get_cash_instruments()
+        except Exception:
+            _cash_instruments = []
+        _current_symbol = config.STRATEGY.get("cash_sweep_symbol", "LIQUIDCASE")
+        if _current_symbol not in _cash_instruments:
+            _cash_instruments = sorted(set(_cash_instruments) | {_current_symbol})
         with st.form("cash_sweep_form"):
             csf1, csf2 = st.columns([1, 2])
             cash_sweep_enabled = csf1.checkbox(
                 "Enabled", value=bool(config.STRATEGY.get("cash_sweep_enabled", False)))
-            cash_sweep_symbol = csf2.text_input(
-                "Instrument", value=config.STRATEGY.get("cash_sweep_symbol", "LIQUIDCASE"))
+            cash_sweep_symbol = csf2.selectbox(
+                "Instrument", _cash_instruments,
+                index=_cash_instruments.index(_current_symbol))
             if st.form_submit_button("Save", type="primary"):
                 updates = {"cash_sweep_enabled": bool(cash_sweep_enabled),
-                          "cash_sweep_symbol": cash_sweep_symbol.strip().upper()}
+                          "cash_sweep_symbol": cash_sweep_symbol}
                 state_db.update_strategy_config(updates)
                 config.STRATEGY.update(updates)
                 st.success("Saved.")
