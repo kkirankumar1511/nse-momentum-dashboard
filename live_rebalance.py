@@ -393,7 +393,16 @@ def sweep_idle_cash(cfg: dict | None = None) -> dict | None:
         ltp = kite_client.get_ltp([sym])[sym]
     except Exception:
         return None
-    qty_to_buy = int(available_cash // ltp) if ltp > 0 else 0
+    # Small safety buffer: get_margins()'s "available" figure can be a
+    # hair optimistic right after a same-day sell (its proceeds haven't
+    # actually SETTLED yet -- T+1 -- even though this call already shows
+    # them as available), so sweeping the FULL reported amount can get
+    # the buy order rejected outright by Kite's own real-time margin
+    # check. Hit live 2026-09-04: reported available Rs.76,119 moments
+    # after a SONACOMS sale, real order rejected needing Rs.336 more.
+    # Held-back cash just gets swept the next run instead of lost.
+    CASH_SWEEP_BUFFER = 1000.0
+    qty_to_buy = int(max(available_cash - CASH_SWEEP_BUFFER, 0) // ltp) if ltp > 0 else 0
     if qty_to_buy <= 0:
         return None
     try:
