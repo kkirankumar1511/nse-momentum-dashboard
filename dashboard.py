@@ -1096,7 +1096,17 @@ def merged_holdings() -> pd.DataFrame:
     aggregate .sum() totals downstream happened to still be correct.
     Grouping here means every reader -- the Holdings table, invested/
     holdings-value totals, and the per-stock allocation view -- always
-    sees one accurate row per symbol."""
+    sees one accurate row per symbol.
+
+    Deliberately excludes the idle-cash-sweep instrument (config.STRATEGY
+    ["cash_sweep_symbol"], e.g. LIQUIDCASE), same reasoning and same fix
+    as live_rebalance.get_live_holdings(): it isn't a momentum swing
+    position, so it must never inflate holdings-value/invested-amount,
+    double-count against the separate cash_sweep_value already folded
+    into "Cash" (page_cockpit/_live_kpi_row), or show up as "Unclassified"
+    in the sector-allocation view. Its value is surfaced separately -- see
+    live_rebalance.get_cash_sweep_holding()."""
+    sweep_sym = config.STRATEGY.get("cash_sweep_symbol", "LIQUIDCASE")
     pos = kite_client.get_positions()
     hold = kite_client.get_holdings()
     rows = []
@@ -1111,12 +1121,12 @@ def merged_holdings() -> pd.DataFrame:
         # same-day SONACOMS sell left qty=-13 in positions(), 0 in
         # holdings() -- summed to a phantom -13 "holding" instead of
         # correctly disappearing.
-        for _, r in pos[pos["quantity"] > 0].iterrows():
+        for _, r in pos[(pos["quantity"] > 0) & (pos["tradingsymbol"] != sweep_sym)].iterrows():
             rows.append({"symbol": r["tradingsymbol"], "qty": r["quantity"],
                         "avg_price": r["average_price"], "ltp": r["last_price"],
                         "pnl": r["pnl"]})
     if not hold.empty and "quantity" in hold.columns:
-        for _, r in hold[hold["quantity"] > 0].iterrows():
+        for _, r in hold[(hold["quantity"] > 0) & (hold["tradingsymbol"] != sweep_sym)].iterrows():
             rows.append({"symbol": r["tradingsymbol"], "qty": r["quantity"],
                         "avg_price": r["average_price"], "ltp": r["last_price"],
                         "pnl": r["pnl"]})
@@ -3744,13 +3754,19 @@ def page_positions_trade():
 
     @st.fragment(run_every=run_every)
     def _live_holdings():
+        _sweep_sym = cfg.get("cash_sweep_symbol", "LIQUIDCASE")
+        _all_hold = kite_client.get_holdings()
+        _cash_row = (_all_hold[_all_hold["tradingsymbol"] == _sweep_sym]
+                    if not _all_hold.empty else _all_hold)
+
         with st.container(border=True, key="ov-card-pt-holdings"):
             st.markdown(
                 '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
                 '<span class="ov-dot" '
                 'style="background:var(--ov-purple);"></span>Holdings (CNC)</p>',
                 unsafe_allow_html=True)
-            live_hold = kite_client.get_holdings()
+            live_hold = (_all_hold[_all_hold["tradingsymbol"] != _sweep_sym]
+                        if not _all_hold.empty else _all_hold)
             if live_hold.empty:
                 st.caption("No holdings.")
             else:
@@ -3777,6 +3793,35 @@ def page_positions_trade():
                     f'<div class="ov-row"><span class="ov-card-meta">Total holdings P&amp;L</span>'
                     f'<span class="ov-sym {_hold_pnl_cls}">₹{_hold_pnl:+,.0f}</span></div>',
                     unsafe_allow_html=True)
+
+        # Separate from the momentum-stock holdings above -- idle cash
+        # parked in the cash-sweep instrument isn't a swing position (no
+        # stop-loss, doesn't count toward max_positions), so it gets its
+        # own small card instead of being mixed into "Holdings (CNC)".
+        # Shown whenever the feature is on, or a leftover balance still
+        # exists after turning it off.
+        if cfg.get("cash_sweep_enabled", False) or not _cash_row.empty:
+            with st.container(border=True, key="ov-card-pt-cash"):
+                st.markdown(
+                    '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
+                    '<span class="ov-dot" style="background:var(--ov-teal);"></span>'
+                    f'Cash ({_sweep_sym})</p>', unsafe_allow_html=True)
+                if _cash_row.empty:
+                    st.caption("No idle cash currently parked.")
+                else:
+                    _r = _cash_row.iloc[0]
+                    _cur_val = float(_r["quantity"]) * float(_r["last_price"])
+                    st.markdown(
+                        f'<div class="ov-row"><span class="ov-card-meta">Units</span>'
+                        f'<span class="ov-sym">{int(_r["quantity"])}</span></div>'
+                        f'<div class="ov-row"><span class="ov-card-meta">Avg. price</span>'
+                        f'<span class="ov-sym">₹{float(_r["average_price"]):.2f}</span></div>'
+                        f'<div class="ov-row"><span class="ov-card-meta">Current value</span>'
+                        f'<span class="ov-sym">₹{_cur_val:,.0f}</span></div>'
+                        f'<div class="ov-row"><span class="ov-card-meta">P&amp;L</span>'
+                        f'<span class="ov-sym {"ov-pos" if float(_r["pnl"]) >= 0 else "ov-neg"}">'
+                        f'₹{float(_r["pnl"]):+,.0f}</span></div>',
+                        unsafe_allow_html=True)
 
     @st.fragment(run_every=run_every)
     def _live_orders():
@@ -3840,6 +3885,7 @@ def page_positions_trade():
     pos = kite_client.get_positions()
     hold = kite_client.get_holdings()
 
+    _sweep_sym = cfg.get("cash_sweep_symbol", "LIQUIDCASE")
     all_syms = []
     if not pos.empty:
         # > 0, not != 0 -- a same-day SELL leaves a NEGATIVE "day"
@@ -3853,7 +3899,10 @@ def page_positions_trade():
         all_syms += list(pos[pos["quantity"] > 0]["tradingsymbol"])
     if not hold.empty:
         all_syms += list(hold[hold["quantity"] > 0]["tradingsymbol"])
-    all_syms = sorted(set(all_syms))
+    # Exclude the cash-sweep instrument -- it isn't a momentum swing
+    # position, so it has no stop-loss concept and shouldn't appear as
+    # "unprotected" here.
+    all_syms = sorted(set(all_syms) - {_sweep_sym})
 
     col_orders, col_gtt = st.columns(2)
     with col_orders:
@@ -5899,7 +5948,18 @@ def page_tradebook():
         if filtered.empty:
             st.info("No trades match the filters above to chart.")
         else:
-            _chart_syms = sorted(filtered["symbol"].unique())
+            _include_closed = st.checkbox(
+                "Include closed trades in the dropdown", value=False,
+                key="tb_chart_include_closed",
+                help="Off by default so the list stays short and focused on what "
+                     "you're actually holding -- check this to also browse the "
+                     "chart for a symbol whose trades have all closed.")
+            _chart_pool = filtered if _include_closed else filtered[filtered["status"] == "open"]
+            _chart_syms = sorted(_chart_pool["symbol"].unique())
+            if not _chart_syms:
+                st.info("No open trades match the filters above."
+                       + ("" if _include_closed else " Check 'Include closed trades' above to browse closed ones."))
+                st.stop()
             _sym_sel = st.selectbox("Symbol", _chart_syms, key="tb_chart_sym")
 
             _sym_trades = trades[trades["symbol"] == _sym_sel].sort_values("entry_date")
