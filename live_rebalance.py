@@ -329,6 +329,51 @@ def get_cash_sweep_holding(cfg: dict | None = None) -> tuple[int, float]:
         return 0, 0.0
 
 
+def compute_portfolio_value(cfg: dict | None = None) -> dict:
+    """Canonical 'what's my total portfolio value right now' calc --
+    available cash + real momentum-stock holdings at current price +
+    whatever's parked in the cash-sweep instrument. The SAME basis
+    dashboard.py's page_cockpit() logs from on every page visit, factored
+    out here so the scheduled exit-price-correction job can log a daily
+    snapshot too (see main_exit_price_correction()) without a second,
+    separately-maintained copy of "how do I total this up" -- exactly
+    the kind of drift that let the cash-sweep instrument get double-
+    counted in three different places earlier before each was fixed.
+    Reuses get_live_holdings() (already excludes the cash-sweep symbol)
+    rather than re-deriving that exclusion a third time.
+
+    Returns {"portfolio_value", "invested_amount", "holdings_value"},
+    all 0.0 on any lookup failure -- callers should treat an all-zero
+    result as "couldn't compute today, skip logging" rather than a real
+    reading, same guard page_cockpit() already applies."""
+    cfg = cfg or config.STRATEGY
+    try:
+        available_cash = kite_client.get_margins()["equity"]["available"]["live_balance"]
+    except Exception:
+        return {"portfolio_value": 0.0, "invested_amount": 0.0, "holdings_value": 0.0}
+
+    held = get_live_holdings()
+    invested_amount = 0.0
+    holdings_value = 0.0
+    if not held.empty:
+        try:
+            ltps = kite_client.get_ltp(list(held.index))
+        except Exception:
+            ltps = {}
+        invested_amount = float((held["quantity"] * held["average_price"]).sum())
+        holdings_value = float(sum(
+            qty * ltps.get(sym, avg_price)
+            for sym, qty, avg_price in zip(held.index, held["quantity"], held["average_price"])))
+
+    cash_sweep_value = (get_cash_sweep_holding(cfg)[1]
+                       if cfg.get("cash_sweep_enabled", False) else 0.0)
+    return {
+        "portfolio_value": available_cash + holdings_value + cash_sweep_value,
+        "invested_amount": invested_amount,
+        "holdings_value": holdings_value,
+    }
+
+
 def ensure_cash_for_buys(needed: float, cfg: dict | None = None) -> dict | None:
     """Call right before placing real buy/top-up orders: if today's total
     buy cost exceeds real available cash, redeems just enough of the
@@ -1150,6 +1195,26 @@ def main_exit_price_correction():
             log("No sell fills today to reconcile (or nothing needed correcting).")
         for line in corrected:
             log(line)
+
+        # Daily equity snapshot -- guarantees one gets logged every trading
+        # day regardless of whether the Overview page is ever visited (the
+        # ONLY other place this gets written), run once here at a
+        # controlled, post-market-close time rather than depending on
+        # whichever page load happens to be last. A same-day Overview
+        # visit later still overwrites this with its own fresher read --
+        # both compute the same way (compute_portfolio_value() vs.
+        # page_cockpit()'s equivalent), so they should agree within a
+        # few rupees of live price movement between the two reads.
+        snapshot = compute_portfolio_value()
+        if snapshot["portfolio_value"] > 0:
+            state_db.log_equity_snapshot(
+                snapshot["portfolio_value"], snapshot["invested_amount"],
+                snapshot["holdings_value"])
+            log(f"\nEquity snapshot logged: Rs.{snapshot['portfolio_value']:,.2f}")
+        else:
+            log("\nEquity snapshot skipped -- couldn't compute a valid portfolio value "
+               "(Kite connection issue).")
+
         with open(LOG_PATH, "a") as f:
             f.write("\n".join(log_lines) + "\n")
         jr["summary"] = (f"{len(corrected)} symbol(s) corrected" if corrected
