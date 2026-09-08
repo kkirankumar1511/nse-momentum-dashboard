@@ -1979,6 +1979,19 @@ def get_job_runs(job_type: str | None = None, status: str | None = None,
     return df
 
 
+def prune_job_runs(days: int = 30) -> int:
+    """Deletes job_runs rows older than `days` days (by started_at), so the
+    table doesn't grow unbounded over the life of the deployment. Meant to
+    be called once daily -- see live_rebalance.main_exit_price_correction()."""
+    conn = get_conn()
+    cutoff = (dt.datetime.now() - dt.timedelta(days=days)).isoformat()
+    cur = conn.execute("DELETE FROM job_runs WHERE started_at < ?", (cutoff,))
+    n = cur.rowcount
+    conn.commit()
+    conn.close()
+    return n
+
+
 def get_last_job_run(job_type: str) -> dict | None:
     """For the Job Log page's quick-glance strip -- last run of one job
     type, whatever its status."""

@@ -1215,6 +1215,13 @@ def main_exit_price_correction():
             log("\nEquity snapshot skipped -- couldn't compute a valid portfolio value "
                "(Kite connection issue).")
 
+        # Job Log retention -- keep only the last 30 days so job_runs
+        # doesn't grow unbounded. Run once here, daily, alongside the
+        # other end-of-day maintenance in this job.
+        pruned = state_db.prune_job_runs(days=30)
+        if pruned:
+            log(f"Job Log: pruned {pruned} run(s) older than 30 days.")
+
         with open(LOG_PATH, "a") as f:
             f.write("\n".join(log_lines) + "\n")
         jr["summary"] = (f"{len(corrected)} symbol(s) corrected" if corrected
