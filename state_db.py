@@ -553,12 +553,27 @@ def _migrate_equity_log_schema(conn: sqlite3.Connection) -> None:
 
     Both are only ever populated going forward (log_equity_snapshot is
     called once/day) -- there's no way to backfill historical figures
-    for days before each column existed."""
+    for days before each column existed.
+
+    excluded (added later): soft-delete flag for a snapshot later found
+    to be corrupted (e.g. a stale/transient Kite margins read that got
+    written as that day's value -- log_equity_snapshot's upsert has no
+    sanity check against the previous day, so a bad read sticks
+    permanently once written). get_equity_log() filters these out by
+    default -- the row stays in the table for audit rather than being
+    hard-deleted, see soft_delete_equity_log_date()."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(equity_log)")}
     if "invested_amount" not in cols:
         conn.execute("ALTER TABLE equity_log ADD COLUMN invested_amount REAL")
     if "holdings_value" not in cols:
         conn.execute("ALTER TABLE equity_log ADD COLUMN holdings_value REAL")
+    if "soft_deleted" not in cols:
+        # Named soft_deleted, not "excluded" -- SQLite's own ON CONFLICT
+        # DO UPDATE clause (log_equity_snapshot() above) already uses
+        # "excluded" as its reserved pseudo-table name for the row being
+        # inserted; naming a real column that too would be a confusing
+        # collision risk for anyone editing that UPSERT later.
+        conn.execute("ALTER TABLE equity_log ADD COLUMN soft_deleted INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -1178,7 +1193,7 @@ def log_equity_snapshot(value: float, invested_amount: float | None = None,
     return log
 
 
-def get_equity_log() -> pd.DataFrame:
+def get_equity_log(include_soft_deleted: bool = False) -> pd.DataFrame:
     """Read-only variant of log_equity_snapshot() for callers that want
     today's chart data WITHOUT writing a new row -- e.g. page_cockpit()
     skips the write entirely when the freshly-computed portfolio_value
@@ -1186,12 +1201,34 @@ def get_equity_log() -> pd.DataFrame:
     returning 0 would otherwise get logged as a real snapshot and put a
     fake drop-to-zero in the equity curve; this happened for real before
     this guard existed -- see the 2026-07-18..24 rows manually cleaned
-    up from a live install)."""
+    up from a live install).
+
+    Soft-deleted rows (soft_deleted=1, see
+    soft_delete_equity_log_date()) are filtered out by default -- every
+    normal reader (the equity chart, XIRR, max-drawdown, day-change)
+    should never see them. Pass include_soft_deleted=True only for an
+    audit/admin view of the full, uncensored history."""
     conn = get_conn()
+    where = "" if include_soft_deleted else "WHERE soft_deleted = 0"
     log = pd.read_sql(
-        "SELECT date, value, invested_amount, holdings_value FROM equity_log ORDER BY date", conn)
+        f"SELECT date, value, invested_amount, holdings_value, soft_deleted "
+        f"FROM equity_log {where} ORDER BY date", conn)
     conn.close()
     return log
+
+
+def soft_delete_equity_log_date(date: str, deleted: bool = True) -> None:
+    """Marks (or unmarks) one equity_log row as soft-deleted -- for a
+    snapshot later found to be corrupted (e.g. a stale Kite margins read
+    that got written as that day's value, see log_equity_snapshot's own
+    docstring). The row stays in the table -- get_equity_log() just
+    filters it out by default -- rather than a hard DELETE, so it's
+    reversible and still there for audit if needed."""
+    conn = get_conn()
+    conn.execute("UPDATE equity_log SET soft_deleted = ? WHERE date = ?",
+                (int(deleted), date))
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
