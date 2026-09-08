@@ -5737,14 +5737,16 @@ def page_job_log():
                 str(r["error_message"]).strip().splitlines()[-1]
                 if pd.notna(r["error_message"]) and str(r["error_message"]).strip() else ""),
             axis=1)
+        _display_page = _ov_page_slice(_display_runs, key="joblog_history", page_size=20)
         st.markdown(
             _ov_table_html(
-                _display_runs, num_fmt={"duration_sec": "{:.1f}s"},
+                _display_page, num_fmt={"duration_sec": "{:.1f}s"},
                 badges={
                     "status": {"success": "ov-badge-green", "failed": "ov-badge-red",
                               "running": "ov-badge-amber"},
                     "trigger_type": {"scheduled": "ov-badge-blue", "manual": "ov-badge-purple"}}),
             unsafe_allow_html=True)
+        _ov_pagination_controls(_display_runs, key="joblog_history", page_size=20)
 
     failed = runs[runs["status"] == "failed"]
     if not failed.empty:
