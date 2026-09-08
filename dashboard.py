@@ -3801,17 +3801,27 @@ def page_positions_trade():
         # Shown whenever the feature is on, or a leftover balance still
         # exists after turning it off.
         if cfg.get("cash_sweep_enabled", False) or not _cash_row.empty:
+            try:
+                _avail_margin = kite_client.get_margins()["equity"]["available"]["live_balance"]
+            except Exception:
+                _avail_margin = None
             with st.container(border=True, key="ov-card-pt-cash"):
                 st.markdown(
                     '<p class="ov-card-title" style="border-bottom:0px solid var(--ov-border);">'
                     '<span class="ov-dot" style="background:var(--ov-teal);"></span>'
-                    f'Cash ({_sweep_sym})</p>', unsafe_allow_html=True)
+                    'Cash</p>', unsafe_allow_html=True)
+                if _avail_margin is not None:
+                    st.markdown(
+                        f'<div class="ov-row"><span class="ov-card-meta">Available margin</span>'
+                        f'<span class="ov-sym">₹{_avail_margin:,.2f}</span></div>',
+                        unsafe_allow_html=True)
                 if _cash_row.empty:
-                    st.caption("No idle cash currently parked.")
+                    st.caption(f"No idle cash currently parked in {_sweep_sym}.")
                 else:
                     _r = _cash_row.iloc[0]
                     _cur_val = float(_r["quantity"]) * float(_r["last_price"])
                     st.markdown(
+                        f'<p class="ov-card-meta" style="margin:10px 0 2px 0;">{_sweep_sym}</p>'
                         f'<div class="ov-row"><span class="ov-card-meta">Units</span>'
                         f'<span class="ov-sym">{int(_r["quantity"])}</span></div>'
                         f'<div class="ov-row"><span class="ov-card-meta">Avg. price</span>'
@@ -3821,6 +3831,14 @@ def page_positions_trade():
                         f'<div class="ov-row"><span class="ov-card-meta">P&amp;L</span>'
                         f'<span class="ov-sym {"ov-pos" if float(_r["pnl"]) >= 0 else "ov-neg"}">'
                         f'₹{float(_r["pnl"]):+,.0f}</span></div>',
+                        unsafe_allow_html=True)
+                    if _avail_margin is not None:
+                        _total_cash = _avail_margin + _cur_val
+                        st.markdown(
+                            f'<div class="ov-row" style="border-top:1px solid var(--ov-border);'
+                            f'margin-top:8px;padding-top:8px;">'
+                            f'<span class="ov-card-meta"><b>Total cash</b></span>'
+                            f'<span class="ov-sym"><b>₹{_total_cash:,.2f}</b></span></div>',
                         unsafe_allow_html=True)
 
     @st.fragment(run_every=run_every)
