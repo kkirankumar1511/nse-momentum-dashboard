@@ -991,6 +991,18 @@ def check_gap_down_stops() -> list[dict]:
     now-stale GTT so it can't also sit there confusingly pointed at a
     position that no longer exists.
 
+    A real race exists here: the GTT's OWN trigger can fire on the exact
+    same gap moments before this scheduled check runs (both react to the
+    same market-open LTP crossing the stop). When that happens the
+    position is already flat by the time this runs -- square_off_position()
+    correctly returns None in that case (see its own docstring for the
+    2026-09-09 incident this guards against: an earlier version of that
+    function misread the resulting negative same-day CNC quantity as a
+    short needing a buy-cover, and bought the just-sold position straight
+    back). That's reflected here as already_closed=True, not folded into
+    the same shape as a real sell, so the caller's log line can say so
+    plainly instead of claiming "market SELL order None".
+
     This is the one place in this module that places a real order
     automatically, without a human confirmation step -- deliberately, since
     the whole point is to react before a human could realistically check
@@ -998,8 +1010,8 @@ def check_gap_down_stops() -> list[dict]:
     else.
 
     Returns one {"symbol", "qty", "stop", "ltp", "order_id", "gtt_deleted",
-    "error"} dict per position that was gapped below its stop (empty list
-    if nothing needed exiting)."""
+    "already_closed", "error"} dict per position that was gapped below its
+    stop (empty list if nothing needed exiting)."""
     positions = state_db.get_open_positions()
     if not positions:
         return []
@@ -1026,15 +1038,24 @@ def check_gap_down_stops() -> list[dict]:
             continue  # not gapped below stop -- nothing to do
 
         action = {"symbol": sym, "qty": pos["qty"], "stop": pos["current_stop"],
-                  "ltp": ltp, "order_id": None, "gtt_deleted": False, "error": None}
+                  "ltp": ltp, "order_id": None, "gtt_deleted": False,
+                  "already_closed": False, "error": None}
         try:
-            action["order_id"] = kite_client.square_off_position(sym)
-            still_held.discard(sym)
-            state_db.close_trade(sym, ltp, "gap_down_stop")
+            order_id = kite_client.square_off_position(sym)
         except Exception as e:
             action["error"] = f"Market sell FAILED: {e}"
             actions.append(action)
             continue
+        if order_id is None:
+            # Already flat -- the GTT's own trigger almost certainly fired
+            # on this same gap moments before this scheduled check ran.
+            # Nothing to sell; just reconcile our own bookkeeping to match
+            # reality instead of leaving a stale "open" row.
+            action["already_closed"] = True
+        else:
+            action["order_id"] = order_id
+        still_held.discard(sym)
+        state_db.close_trade(sym, ltp, "gap_down_stop")
 
         gtt_id = gtt_by_symbol.get(sym)
         if gtt_id:
@@ -1091,8 +1112,13 @@ def main_gap_check():
         if not actions:
             log("No positions gapped below their stop.")
         for a in actions:
-            if a.get("error") and a.get("order_id") is None:
+            if a.get("error") and a.get("order_id") is None and not a.get("already_closed"):
                 log(f"⚠️ {a['symbol']}: {a['error']}")
+            elif a.get("already_closed"):
+                log(f"🔴 {a['symbol']}: gapped to ₹{a['ltp']:.2f} (stop ₹{a['stop']:.2f}) -- "
+                   f"already closed (GTT fired first, nothing left to sell), "
+                   f"GTT deleted: {a['gtt_deleted']}"
+                   + (f" -- {a['error']}" if a.get("error") else ""))
             else:
                 log(f"🔴 {a['symbol']}: gapped to ₹{a['ltp']:.2f} (stop ₹{a['stop']:.2f}) -- "
                    f"market SELL order {a['order_id']}, GTT deleted: {a['gtt_deleted']}"

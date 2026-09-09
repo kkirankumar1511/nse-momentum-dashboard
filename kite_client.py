@@ -374,14 +374,34 @@ def delete_gtt(trigger_id: int) -> None:
 
 def square_off_position(symbol: str) -> str | None:
     """Close the net position in `symbol` at market. Handles both
-    positions (MIS/NRML) and CNC holdings."""
+    positions (MIS/NRML) and CNC holdings.
+
+    A CNC (delivery) row showing a NEGATIVE net quantity is NOT a real
+    short -- Zerodha doesn't allow naked CNC shorting for retail, so this
+    is always the same-day-sell settlement-lag artifact (a same-day sell
+    of an existing holding leaves a negative "day" position that nets to
+    0 against the holding overnight -- see get_live_holdings()'s docstring
+    in live_rebalance.py for the same quirk documented elsewhere). The old
+    unconditional "negative -> BUY" logic treated that as a short to
+    cover and placed a BUY -- confirmed live 2026-09-09: check_gap_down_
+    stops() called this right after COFORGE's own GTT had already sold it
+    moments earlier at market open (a real race -- the GTT can trigger on
+    a gap before this scheduled check even runs), and it bought the
+    position straight back, silently undoing the GTT's protective exit.
+    Only a genuine intraday product (MIS/NRML) can have a real short here
+    -- for CNC, skip a negative row and fall through to the holdings
+    check below, which correctly returns None (nothing left to sell) once
+    the position is genuinely already flat."""
     kite = get_kite()
 
     for p in kite.positions().get("net", []):
-        if p["tradingsymbol"] == symbol and p["quantity"] != 0:
-            side = "SELL" if p["quantity"] > 0 else "BUY"
-            return place_order(symbol, abs(p["quantity"]), side,
-                               product=p["product"])
+        if p["tradingsymbol"] != symbol or p["quantity"] == 0:
+            continue
+        if p["quantity"] < 0 and p["product"] == "CNC":
+            continue  # phantom same-day-sell artifact, not a real short
+        side = "SELL" if p["quantity"] > 0 else "BUY"
+        return place_order(symbol, abs(p["quantity"]), side,
+                           product=p["product"])
 
     for h in kite.holdings():
         qty = h["quantity"] + h.get("t1_quantity", 0)
