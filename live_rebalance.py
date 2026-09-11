@@ -374,14 +374,28 @@ def compute_portfolio_value(cfg: dict | None = None) -> dict:
     }
 
 
+# Same reasoning as sweep_idle_cash()'s CASH_SWEEP_BUFFER, applied the
+# other direction: ensure_cash_for_buys() used to redeem EXACTLY the
+# calculated shortfall, no margin -- confirmed live 2026-09-11, NYKAA's
+# buy was rejected ("Add 43.19") minutes after an Rs.8,758 shortfall
+# redemption that should have covered it, purely because the real
+# available-cash figure drifted a few rupees between this check and the
+# actual buy order landing (LTP tick, rounding). With 700+ units of
+# LIQUIDCASE typically held (~Rs.80k+), redeeming a bit extra costs
+# nothing -- any leftover gets swept straight back in by sweep_idle_cash()
+# later in the same run, exactly as it already does today.
+CASH_SHORTFALL_BUFFER = 1000.0
+
+
 def ensure_cash_for_buys(needed: float, cfg: dict | None = None) -> dict | None:
     """Call right before placing real buy/top-up orders: if today's total
-    buy cost exceeds real available cash, redeems just enough of the
-    cash-sweep instrument first (a real SELL order, so the usual DP
-    charge applies -- unlike buying it) to close the gap. Kite's own
-    order rejection remains the final safety net if this estimate is off
-    (e.g. price moved between this check and the buy order). No-ops
-    (returns None) when cash_sweep_enabled is off, cash is already
+    buy cost exceeds real available cash, redeems the cash-sweep
+    instrument first (a real SELL order, so the usual DP charge applies --
+    unlike buying it) to close the gap, plus CASH_SHORTFALL_BUFFER extra
+    margin so a small price/rounding drift between this check and the
+    actual buy order doesn't still leave it short. Kite's own order
+    rejection remains the final safety net if even that's not enough. No-
+    ops (returns None) when cash_sweep_enabled is off, cash is already
     sufficient, or nothing is actually held to redeem."""
     cfg = cfg or config.STRATEGY
     if not cfg.get("cash_sweep_enabled", False) or needed <= 0:
@@ -402,7 +416,7 @@ def ensure_cash_for_buys(needed: float, cfg: dict | None = None) -> dict | None:
         ltp = kite_client.get_ltp([sym])[sym]
     except Exception:
         return None
-    qty_to_sell = min(qty_held, math.ceil(shortfall / ltp))
+    qty_to_sell = min(qty_held, math.ceil((shortfall + CASH_SHORTFALL_BUFFER) / ltp))
     if qty_to_sell <= 0:
         return None
     try:
@@ -413,7 +427,8 @@ def ensure_cash_for_buys(needed: float, cfg: dict | None = None) -> dict | None:
     today = dt.date.today().isoformat()
     state_db.record_cash_sweep(
         today, "sell", sym, qty_to_sell, ltp, amount,
-        f"Redeemed to cover a Rs.{shortfall:,.0f} cash shortfall for today's buys", oid)
+        f"Redeemed to cover a Rs.{shortfall:,.0f} cash shortfall for today's buys "
+        f"(+Rs.{CASH_SHORTFALL_BUFFER:,.0f} buffer)", oid)
     dp_charge = cfg.get("dp_charge_per_scrip", 0.0)
     if dp_charge > 0:
         state_db.record_cash_flow(today, -dp_charge, f"DP charge -- {sym} sold")
