@@ -418,11 +418,17 @@ def precompute_daily_series(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     close = df["close"]
     ema_f = ema(close, cfg["ema_fast"])
     ema_s = ema(close, cfg["ema_slow"])
+    ema_9 = ema(close, 9)
     _, _, hist = macd(close)
     return pd.DataFrame({
         "ema_fast": ema_f,
         "ema_slow": ema_s,
         "ema50_rising": ema_f > ema_f.shift(5),
+        # BACKTEST EXPERIMENT (trend_gate_ema9_21_cross_enabled, off by
+        # default) -- a simple 9/21 EMA cross as an alternative trend_ok
+        # definition, see apply_gates(). ema_fast is 21 in this config, so
+        # this reuses it rather than adding a separate "ema21" series.
+        "ema9_above_ema21": ema_9 > ema_f,
         "macd_bullish": hist > 0,
         "atr": atr(df, cfg["atr_period"]),
         "rsi": rsi(close, cfg["rsi_period"]),
@@ -524,16 +530,19 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
         ema_fast_v = float(precomputed_row["ema_fast"])
         ema_slow_v = float(precomputed_row["ema_slow"])
         ema50_rising_v = bool(precomputed_row["ema50_rising"])
+        ema9_above_ema21_v = bool(precomputed_row["ema9_above_ema21"])
         macd_bullish_v = bool(precomputed_row["macd_bullish"])
         atr_now = float(precomputed_row["atr"])
         rsi_now = float(precomputed_row["rsi"])
     else:
         ema_f = ema(close, cfg["ema_fast"])
         ema_s = ema(close, cfg["ema_slow"])
+        ema_9 = ema(close, 9)
         _, _, hist = macd(close)
         ema_fast_v = float(ema_f.iloc[-1])
         ema_slow_v = float(ema_s.iloc[-1])
         ema50_rising_v = float(ema_f.iloc[-1]) > float(ema_f.iloc[-6])
+        ema9_above_ema21_v = float(ema_9.iloc[-1]) > float(ema_f.iloc[-1])
         macd_bullish_v = float(hist.iloc[-1]) > 0
         atr_now = float(atr(df, cfg["atr_period"]).iloc[-1])
         rsi_now = float(rsi(close, cfg["rsi_period"]).iloc[-1])
@@ -604,6 +613,7 @@ def compute_snapshot(df: pd.DataFrame, bench: pd.DataFrame, cfg: dict,
         "above_ema50": price > ema_fast_v,
         "above_ema200": price > ema_slow_v,
         "ema50_rising": ema50_rising_v,
+        "ema9_above_ema21": ema9_above_ema21_v,
         "macd_bullish": macd_bullish_v,
         "vol_expansion": volume_expansion(volume),
         "avg_volume_3m": float(volume.tail(cfg["mom_lookback_days_short"]).mean()),

@@ -169,7 +169,16 @@ def apply_gates(tech: pd.DataFrame,
     """
     t = tech.copy()
 
-    t["trend_ok"] = t["above_ema50"] & t["above_ema200"] & t["ema50_rising"]
+    # BACKTEST-ONLY experiment, off by default (config.py's
+    # trend_gate_ema9_21_cross_enabled) -- a plain 9/21 EMA cross instead
+    # of the usual 3-condition trend structure. Only trend_ok's own
+    # formula changes; every other gate (near_high/rsi/quality/price) and
+    # sell_check()'s separate, independent "closed below 200 EMA"
+    # immediate-exit rule are untouched.
+    if cfg.get("trend_gate_ema9_21_cross_enabled", False):
+        t["trend_ok"] = t["ema9_above_ema21"]
+    else:
+        t["trend_ok"] = t["above_ema50"] & t["above_ema200"] & t["ema50_rising"]
     t["near_high_ok"] = t["pct_52w_high"] >= cfg["near_high_threshold"]
     t["rsi_ok"] = t["rsi"].between(cfg["rsi_min"], cfg["rsi_max"])
 

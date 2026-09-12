@@ -169,6 +169,16 @@ _STRATEGY_DEFAULTS = {
     # the Backtest UI first and A/B before considering for live.
     "weekly_monthly_gate_enabled": False,
 
+    # BACKTEST-ONLY experiment, off by default: replaces trend_ok's usual
+    # 3-condition definition (above_ema50 & above_ema200 & ema50_rising)
+    # with a plain 9/21 EMA cross -- trend_ok = ema9 above ema21 (ema_fast,
+    # 21 in this config), trend_ok = False once ema9 crosses below it.
+    # Requested 2026-09-12 to re-test after OFSS/COFORGE both failed the
+    # existing trend gate on a short-term pullback despite still being
+    # well above their 55-EMA -- see indicators.compute_snapshot's
+    # ema9_above_ema21 field.
+    "trend_gate_ema9_21_cross_enabled": False,
+
     # Risk management
     "atr_period": 14,
     "atr_stop_multiple": 2.5,          # initial stop = entry - 2.5*ATR
@@ -433,6 +443,7 @@ BACKTEST_TUNABLE_KEYS = (
     "fundamental_bonus_weight", "min_fundamental_score",
     "mom_lookback_days_short", "mom_lookback_days_long", "skip_recent_days",
     "rsi_exit_gate_enabled", "rsi_exit_max", "weekly_monthly_gate_enabled",
+    "trend_gate_ema9_21_cross_enabled",
     "near_high_threshold", "ema_fast", "ema_slow", "atr_stop_multiple",
     "mad_stop_enabled", "mad_stop_med_len", "mad_stop_mad_len",
     "mad_stop_dev_factor", "mad_stop_atr_floor_mult", "risk_per_trade_pct",
