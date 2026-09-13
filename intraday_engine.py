@@ -36,7 +36,9 @@ import intraday_market as mkt
 import intraday_strategy as strat
 import live_ticker
 import kite_client
+import notify
 import nse_holidays
+import state_db
 
 EMA_WARMUP_DAYS = 120  # >> "several weeks" Spec.md §1 asks for, comfortably covers EMA21/ATR14 warmup
 # Fallback only -- config.STRATEGY["intraday_paper_capital"]/["intraday_live_capital"]
@@ -51,6 +53,20 @@ DEFAULT_PAPER_CAPITAL = 1_000_000.0
 # just bounds how quickly the loop notices them.
 CHECK_INTERVAL_SECONDS = 1
 TICK_STALE_SECONDS = 20  # fall back to a REST get_ltp() if the feed goes quiet this long
+
+
+def _push(title: str, message: str) -> None:
+    """Sends a push to every subscribed device (same pattern/helper as
+    state_db.job_run()'s own notify calls) -- no-op if VAPID keys aren't
+    configured or nobody's subscribed. Never allowed to interrupt the
+    engine's own trading logic: notification delivery is best-effort,
+    not a hard dependency for anything that calls this."""
+    try:
+        for dead in notify.send_webpush_all(state_db.get_push_subscriptions(),
+                                            title, message, notify.DASHBOARD_URL):
+            state_db.delete_push_subscription(dead)
+    except Exception as e:
+        print(f"[intraday_engine] push notification failed -- {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +203,9 @@ def _open_position_from_trigger(tracker: CandidateTracker, event: dict,
         tracker.date, tracker.symbol, tracker.direction, str(event["entry_time"]),
         entry_price, stop_price, target, qty, mode,
         signal_time=str(event["signal_time"]), order_id=order_id)
+    _push(f"KK Trading — {tracker.symbol} position opened ({mode})",
+         f"{tracker.direction} qty {qty} @ ₹{entry_price:.2f} -- "
+         f"stop ₹{stop_price:.2f}, target ₹{target:.2f}")
     return {"type": "position_opened", "position_id": tracker.position_id,
            "qty": qty, "entry_price": entry_price, "stop_price": stop_price, "target": target}
 
@@ -262,6 +281,8 @@ def _close_leg(tracker: CandidateTracker, pos: dict, leg_type: str, qty: int,
     idb.close_position_leg(tracker.position_id, leg_type, qty, exit_price, str(now), gross, cost, net, order_id)
     if leg_type in ("stop", "squareoff"):
         tracker.done = True
+    _push(f"KK Trading — {pos['symbol']} {leg_type} hit ({mode})",
+         f"qty {qty} @ ₹{exit_price:.2f} -- net P&L ₹{net:+,.2f}")
     return {"type": "leg_closed", "leg_type": leg_type, "qty": qty, "exit_price": exit_price, "net_pnl": net}
 
 
@@ -354,10 +375,25 @@ def run_live(mode: str = "paper") -> None:
          f"candidates={sel['candidates']}")
     if sel["day_bias"] is None:
         print("No clear day bias -- no trading today.")
+        _push("KK Trading — no intraday trade today",
+             f"NIFTY 50 first-15m ratio was {sel['nifty_ratio']:.2f} -- doesn't "
+             f"clear the LONG (>2.0) or SHORT (<0.5) threshold. Sitting out "
+             f"today ({mode} mode).")
         return
     if not sel["candidates"]:
         print("Day bias set but no valid candidates -- no trading today.")
+        _push("KK Trading — no intraday trade today",
+             f"Day bias was {sel['day_bias']} (ratio {sel['nifty_ratio']:.2f}) "
+             f"but no valid F&O candidates found. Sitting out today ({mode} mode).")
         return
+
+    _cands_df = idb.get_candidates(date_str)
+    _cand_summary = ", ".join(
+        f"#{int(r['rank'])} {r['symbol']} ({r['ret_first15_pct']:+.2f}%)"
+        for _, r in _cands_df.iterrows())
+    _push(f"KK Trading — {sel['day_bias']} day ({mode})",
+         f"NIFTY 50 ratio {sel['nifty_ratio']:.2f} -> {sel['day_bias']}. "
+         f"Candidates: {_cand_summary}")
 
     capital = idb.get_capital(mode)["current_capital"]
     capital_alloc = (capital / strat.MAX_TRADES_PER_DAY) * strat.LEVERAGE
@@ -457,6 +493,8 @@ def run_live(mode: str = "paper") -> None:
     total_day_pnl = float(all_legs_today["net_pnl"].sum()) if not all_legs_today.empty else 0.0
     new_capital = idb.apply_day_pnl(mode, total_day_pnl)
     print(f"\nDay done. Net P&L: Rs.{total_day_pnl:+,.2f}  New capital: Rs.{new_capital:,.2f}")
+    _push(f"KK Trading — intraday day done ({mode})",
+         f"Net P&L ₹{total_day_pnl:+,.2f} -- new capital ₹{new_capital:,.2f}")
 
 
 if __name__ == "__main__":
