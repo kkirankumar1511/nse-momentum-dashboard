@@ -319,6 +319,25 @@ def get_ltp(symbols: list[str]) -> dict[str, float]:
     return {k.split(":")[1]: v["last_price"] for k, v in data.items()}
 
 
+def get_quote_with_change(symbols: list[str]) -> dict[str, dict]:
+    """symbol -> {"last_price", "prev_close", "change_pct"} -- prev_close
+    is Kite's own ohlc.close (previous trading day's close), the same
+    convention Kite's own app uses for day-change%. Heavier than
+    get_ltp() (kite.quote()'s full payload vs LTP-only), so only used
+    where a day-change % is actually shown, not every plain price."""
+    kite = get_kite()
+    keys = [f"NSE:{s}" for s in symbols]
+    data = kite.quote(keys)
+    out = {}
+    for k, v in data.items():
+        sym = k.split(":")[1]
+        last_price = v["last_price"]
+        prev_close = (v.get("ohlc") or {}).get("close")
+        change_pct = ((last_price - prev_close) / prev_close * 100) if prev_close else None
+        out[sym] = {"last_price": last_price, "prev_close": prev_close, "change_pct": change_pct}
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Orders
 # ---------------------------------------------------------------------------

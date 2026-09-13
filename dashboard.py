@@ -5915,15 +5915,20 @@ def page_intraday_dashboard():
             '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-blue);">'
             '</span>NIFTY 50</p>', unsafe_allow_html=True)
         try:
-            nifty_ltp = kite_client.get_ltp(["NIFTY 50"]).get("NIFTY 50")
+            nifty_q = kite_client.get_quote_with_change(["NIFTY 50"]).get("NIFTY 50")
         except Exception:
-            nifty_ltp = None
+            nifty_q = None
         try:
             live_ad = imkt.fetch_advance_decline("NIFTY 50")
         except Exception:
             live_ad = None
         c1, c2 = st.columns(2)
-        c1.metric("Current price", f"₹{nifty_ltp:,.2f}" if nifty_ltp else "—")
+        if nifty_q:
+            _chg = nifty_q["change_pct"]
+            c1.metric("Current price", f"₹{nifty_q['last_price']:,.2f}",
+                     f"{_chg:+.2f}%" if _chg is not None else None)
+        else:
+            c1.metric("Current price", "—")
         if live_ad:
             c2.metric("Live A/D (whole day)",
                      f"{live_ad['advances']} / {live_ad['declines']}",
@@ -5964,9 +5969,9 @@ def page_intraday_dashboard():
             with col:
               with st.container(border=True, key=f"ov-card-cand-{c['symbol']}"):
                 try:
-                    ltp = kite_client.get_ltp([c["symbol"]]).get(c["symbol"])
+                    cand_q = kite_client.get_quote_with_change([c["symbol"]]).get(c["symbol"])
                 except Exception:
-                    ltp = None
+                    cand_q = None
                 try:
                     _profile = su.resolve_sector_profiles([c["symbol"]], verbose=False).get(c["symbol"], {})
                     sector = _profile.get("primary_sector")
@@ -5977,7 +5982,14 @@ def page_intraday_dashboard():
                 _ret_val = c["ret_first15_pct"]
                 _ret_cls = "ov-pos" if _ret_val >= 0 else "ov-neg"
                 _ret_box = _ov_metric_html("First-15m return", f"{_ret_val:+.2f}%", value_cls=_ret_cls)
-                _ltp_box = _ov_metric_html("Current LTP", f"₹{ltp:,.2f}" if ltp else "—")
+                if cand_q:
+                    _chg = cand_q["change_pct"]
+                    _chg_note = f"{_chg:+.2f}% today" if _chg is not None else None
+                    _chg_cls = "ov-pos" if (_chg or 0) >= 0 else "ov-neg"
+                    _ltp_box = _ov_metric_html("Current LTP", f"₹{cand_q['last_price']:,.2f}",
+                                              _chg_note, note_cls=_chg_cls)
+                else:
+                    _ltp_box = _ov_metric_html("Current LTP", "—")
                 st.markdown(f'<div class="ov-grid-metrics">{_ret_box}{_ltp_box}</div>',
                            unsafe_allow_html=True)
 
@@ -5987,9 +5999,9 @@ def page_intraday_dashboard():
                 # visible right alongside the stock itself.
                 if sector:
                     try:
-                        sector_ltp = kite_client.get_ltp([sector]).get(sector)
+                        sector_q = kite_client.get_quote_with_change([sector]).get(sector)
                     except Exception:
-                        sector_ltp = None
+                        sector_q = None
                     try:
                         sector_ad = imkt.fetch_advance_decline(sector)
                     except Exception:
@@ -5998,8 +6010,15 @@ def page_intraday_dashboard():
                         f'<p class="ov-card-title" style="margin-top:10px;font-size:12px;">'
                         f'<span class="ov-dot" style="background:var(--ov-blue);"></span>'
                         f'Sector · {html_lib.escape(sector)}</p>', unsafe_allow_html=True)
-                    _sec_price_box = _ov_metric_html(
-                        "Sector price", f"₹{sector_ltp:,.2f}" if sector_ltp else "—")
+                    if sector_q:
+                        _s_chg = sector_q["change_pct"]
+                        _s_chg_note = f"{_s_chg:+.2f}% today" if _s_chg is not None else None
+                        _s_chg_cls = "ov-pos" if (_s_chg or 0) >= 0 else "ov-neg"
+                        _sec_price_box = _ov_metric_html(
+                            "Sector price", f"₹{sector_q['last_price']:,.2f}",
+                            _s_chg_note, note_cls=_s_chg_cls)
+                    else:
+                        _sec_price_box = _ov_metric_html("Sector price", "—")
                     _sec_ad_box = _ov_metric_html(
                         "Sector A/D",
                         f"{sector_ad['advances']} / {sector_ad['declines']}" if sector_ad else "—")
