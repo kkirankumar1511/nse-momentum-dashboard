@@ -425,6 +425,31 @@ _STRATEGY_DEFAULTS = {
     # re-checking against your own risk tolerance rather than assuming
     # it's forever the right choice.
     "rebalance_cadence": "daily",
+
+    # Intraday "DaysLowVolumnBreakout" strategy (separate from everything
+    # above, which is all the CNC swing/momentum strategy) -- the SOLE
+    # source of truth intraday_engine.py's __main__ reads at every plain
+    # (no-flags) launch to decide paper vs live, so a scheduled daily
+    # launch auto-trades live the very next run after this is saved on --
+    # no per-day manual step (dashboard.py's page_intraday_dashboard()
+    # reads it the same way to label the mode badge). False by default --
+    # a currently-running paper engine process does NOT hot-swap, it
+    # needs restarting to pick up a change here.
+    "intraday_live_enabled": False,
+
+    # Starting capital for the intraday strategy's OWN capital tracks
+    # (intraday_capital_state, one row per mode -- kept fully separate
+    # from the CNC swing book's cash, and paper/live kept separate from
+    # each other so switching to live never inherits paper's simulated
+    # P&L). intraday_engine.py's run_live() reads whichever of these two
+    # matches the mode it's about to run, instead of a single hardcoded
+    # constant, so both are Admin-editable the same way. Each only takes
+    # effect the FIRST time that mode actually runs (intraday_db.ensure_
+    # capital_seeded() no-ops if that mode's row already exists) --
+    # editing either value after that mode has started trading does NOT
+    # reset its compounded current_capital, by design.
+    "intraday_live_capital": 1_000_000.0,
+    "intraday_paper_capital": 1_000_000.0,
 }
 
 # Keys the Backtest page's run_cfg-builder overrides from its own widgets

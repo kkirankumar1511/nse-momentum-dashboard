@@ -81,6 +81,17 @@ def fake_get_ltp(symbols: list[str]) -> dict[str, float]:
     return out
 
 
+def fake_get_quote_with_change(symbols: list[str]) -> dict[str, dict]:
+    out = {}
+    for s in symbols:
+        df = _generate_candles(s)
+        last_price = float(df["close"].iloc[-1])
+        prev_close = float(df["close"].iloc[-2])
+        out[s] = {"last_price": last_price, "prev_close": prev_close,
+                 "change_pct": (last_price - prev_close) / prev_close * 100}
+    return out
+
+
 def fake_instrument_map() -> dict:
     import config
     return {s: i + 1 for i, s in enumerate(config.UNIVERSE_RAW or [])}
@@ -261,6 +272,7 @@ def patch_kite_client() -> None:
     kite_client.fetch_index_candles = fake_fetch_index_candles
     kite_client.benchmark_candles = fake_benchmark_candles
     kite_client.get_ltp = fake_get_ltp
+    kite_client.get_quote_with_change = fake_get_quote_with_change
     kite_client.instrument_map = fake_instrument_map
     kite_client.index_instrument_map = fake_index_instrument_map
     kite_client.get_holdings = fake_get_holdings

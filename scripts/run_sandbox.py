@@ -26,6 +26,9 @@ os.environ.setdefault("KITE_ACCESS_TOKEN", "sandbox_access_token")
 import state_db
 state_db.DB_PATH = SANDBOX_DB
 
+import intraday_db
+intraday_db.DB_PATH = os.path.join("cache", "intraday_state_sandbox.db")
+
 import config  # noqa: E402  (seeds sandbox db with the fake creds above)
 
 from scripts import sandbox_mock_kite
@@ -51,6 +54,9 @@ os.makedirs(bt.CACHE_DIR, exist_ok=True)
 
 import scripts.seed_sandbox_data as seed_sandbox_data  # noqa: E402
 seed_sandbox_data.seed_if_empty()
+
+import scripts.seed_sandbox_intraday_data as seed_intraday_data  # noqa: E402
+seed_intraday_data.seed_if_empty()
 
 with open("dashboard.py", encoding="utf-8") as f:
     _dashboard_src = f.read()

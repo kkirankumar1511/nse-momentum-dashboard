@@ -193,6 +193,61 @@ def fetch_daily_candles(symbol: str, days: int = 400) -> pd.DataFrame:
     return _fetch_chunked(token, days)
 
 
+# Kite's historical API max span per intraday interval -- confirmed
+# empirically (2026-09-13, real account): a 101-day 5minute request
+# fails with "interval exceeds max limit: 100 days"; a 100-day request
+# succeeds. Only 5minute is used by the intraday strategy today; the
+# other intervals are Kite's own documented limits, included so this
+# dict is a complete reference if another interval is ever needed --
+# re-verify empirically before relying on any of the un-exercised ones.
+_MAX_INTRADAY_INTERVAL_SPAN = {
+    "minute": 60, "3minute": 100, "5minute": 100, "10minute": 100,
+    "15minute": 200, "30minute": 200, "60minute": 400,
+}
+
+
+def _fetch_chunked_intraday(token: int, days: int, interval: str) -> pd.DataFrame:
+    """Same chunking idea as _fetch_chunked(), for an intraday interval
+    whose max span is far smaller than "day"'s 2000 -- the intraday
+    strategy's continuous EMA21/ATR14 warmup (Spec.md §1: "a minimum of
+    several weeks... before these indicators are trustworthy") routinely
+    needs more history than one request covers."""
+    max_span = _MAX_INTRADAY_INTERVAL_SPAN.get(interval, 100)
+    kite = get_kite()
+    to_date = dt.date.today()
+    from_date = to_date - dt.timedelta(days=days)
+
+    if days <= max_span:
+        candles = kite.historical_data(token, from_date, to_date, interval)
+    else:
+        candles = []
+        chunk_start = from_date
+        while chunk_start < to_date:
+            chunk_end = min(chunk_start + dt.timedelta(days=max_span), to_date)
+            candles += kite.historical_data(token, chunk_start, chunk_end, interval)
+            chunk_start = chunk_end + dt.timedelta(days=1)
+            if chunk_start < to_date:
+                time.sleep(0.35)  # stay under the historical API rate limit
+
+    df = pd.DataFrame(candles)
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+    df = df.drop_duplicates(subset="date").sort_values("date")
+    return df.set_index("date")
+
+
+def fetch_intraday_candles(symbol: str, days: int = 120, interval: str = "5minute") -> pd.DataFrame:
+    """Intraday OHLCV for `symbol` covering the last `days` calendar
+    days -- used by the intraday strategy's continuous EMA21/ATR14
+    (computed once over this whole series, never re-cold-started per
+    day, per Spec.md §1)."""
+    token = instrument_map().get(symbol)
+    if token is None:
+        raise ValueError(f"Unknown NSE symbol: {symbol}")
+    return _fetch_chunked_intraday(token, days, interval)
+
+
 def fetch_universe_candles(symbols: list[str], days: int = 400,
                            pause: float = 0.35) -> dict[str, pd.DataFrame]:
     """Fetch candles for many symbols, respecting Kite's ~3 req/s historical
@@ -264,17 +319,41 @@ def get_ltp(symbols: list[str]) -> dict[str, float]:
     return {k.split(":")[1]: v["last_price"] for k, v in data.items()}
 
 
+def get_quote_with_change(symbols: list[str]) -> dict[str, dict]:
+    """symbol -> {"last_price", "prev_close", "change_pct"} -- prev_close
+    is Kite's own ohlc.close (previous trading day's close), the same
+    convention Kite's own app uses for day-change%. Heavier than
+    get_ltp() (kite.quote()'s full payload vs LTP-only), so only used
+    where a day-change % is actually shown, not every plain price."""
+    kite = get_kite()
+    keys = [f"NSE:{s}" for s in symbols]
+    data = kite.quote(keys)
+    out = {}
+    for k, v in data.items():
+        sym = k.split(":")[1]
+        last_price = v["last_price"]
+        prev_close = (v.get("ohlc") or {}).get("close")
+        change_pct = ((last_price - prev_close) / prev_close * 100) if prev_close else None
+        out[sym] = {"last_price": last_price, "prev_close": prev_close, "change_pct": change_pct}
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Orders
 # ---------------------------------------------------------------------------
 
 def place_order(symbol: str, qty: int, side: str,
                 product: str = "CNC", order_type: str = "MARKET",
-                price: float | None = None) -> str:
+                price: float | None = None, trigger_price: float | None = None) -> str:
     """Place an NSE equity order. Returns order_id.
 
     side: "BUY" | "SELL"
     product: "CNC" (delivery, right for 3-6 month holds) or "MIS" (intraday)
+    trigger_price: required for order_type "SL" (stop-loss limit -- needs
+    both trigger_price and price) or "SL-M" (stop-loss market -- trigger_
+    price only) -- the intraday strategy's exchange-side conditional
+    entry/exit orders (Spec.md §6.3) use these, CNC orders elsewhere in
+    this app don't.
 
     Some stocks reject a plain MARKET order via the API outright (e.g.
     under a periodic call auction or specific surveillance measures) with
@@ -296,8 +375,10 @@ def place_order(symbol: str, qty: int, side: str,
         product=product,
         order_type=order_type,
     )
-    if order_type == "LIMIT" and price:
+    if order_type in ("LIMIT", "SL") and price:
         kwargs["price"] = price
+    if order_type in ("SL", "SL-M") and trigger_price:
+        kwargs["trigger_price"] = trigger_price
     try:
         return kite.place_order(**kwargs)
     except Exception as e:

@@ -39,6 +39,10 @@ import backtest_report
 import config
 import fundamentals_agent as fa
 import indicators
+import intraday_db as idb
+import intraday_market as imkt
+import intraday_strategy as istrat
+import live_ticker
 import kite_client
 import live_rebalance as lr
 import notify
@@ -1353,7 +1357,7 @@ def _live_kpi_row():
     _refresh_note = ("🟢 live" if _is_market_hours() else "⚪ market closed")
     st.markdown(
         '<div class="ov-header" style="margin-bottom:14px;">'
-        '<div><span class="ov-h1">Overview</span> '
+        '<div><span class="ov-h1">Positional Dashboard</span> '
         '<span class="ov-sub">· everything at a glance</span></div>'
         f'<span class="ov-card-meta">{_refresh_note} · '
         f'last updated {dt.datetime.now():%H:%M:%S}</span>'
@@ -2631,6 +2635,75 @@ def page_admin():
             state_db.update_strategy_config(updates)
             config.STRATEGY.update(updates)  # live for this process -- no restart needed
             st.success("Strategy settings saved — in effect immediately.")
+
+    st.markdown(
+        '<p class="ov-card-title" style="margin-top:14px;"><span class="ov-dot" '
+        'style="background:var(--ov-red);"></span>⚡ Intraday strategy (DaysLowVolumnBreakout)</p>',
+        unsafe_allow_html=True)
+    with st.container(border=True, key="ov-card-admin-intraday"):
+        st.caption(
+            "Completely separate from the swing/momentum settings above -- "
+            "its own capital tracks, its own live/paper switch. Paper mode "
+            "(the default) simulates every fill with zero real orders. "
+            "This checkbox is the ONLY thing intraday_engine.py's plain "
+            "`python intraday_engine.py` (no flags) checks to decide which "
+            "mode to trade in -- so a scheduled daily launch auto-trades "
+            "live starting the very next run after you save this on, with "
+            "no per-day manual step. A paper-mode engine process already "
+            "running does not hot-swap -- it must be restarted to pick up "
+            "a change here.")
+        _live_cap_row = idb.get_capital("live")
+        _paper_cap_row = idb.get_capital("paper")
+        with st.form("intraday_strategy_form"):
+            ic1, ic2, ic3 = st.columns(3)
+            intraday_live_enabled = ic1.checkbox(
+                "Enable live intraday trading", value=bool(config.STRATEGY.get("intraday_live_enabled", False)),
+                help="OFF by default. Places real MIS (5x leveraged) intraday "
+                     "orders starting the next time the engine is (re)started -- "
+                     "a materially different risk profile from the CNC swing "
+                     "book already running live. Only flip this on once "
+                     "you've watched paper mode work correctly for real "
+                     "trading days.")
+            intraday_live_capital = ic2.number_input(
+                "Live capital allocation (₹)", min_value=0.0, step=10_000.0,
+                value=float(_live_cap_row["starting_capital"]) if _live_cap_row
+                     else float(config.STRATEGY.get("intraday_live_capital", 1_000_000.0)),
+                disabled=_live_cap_row is not None,
+                help=("Already seeded at ₹{:,.0f} the first time live mode ran -- "
+                     "editing this field no longer has any effect, so a save "
+                     "here can never silently reset an already-compounding "
+                     "live account.".format(_live_cap_row["starting_capital"])
+                     if _live_cap_row else
+                     "Seeded as the live track's starting capital the FIRST "
+                     "time live mode actually runs (intraday_capital_state, "
+                     "mode='live') -- separate from the paper track's "
+                     "capital and from the swing book's cash. Change this "
+                     "before going live for the first time; it has no "
+                     "effect afterward."))
+            intraday_paper_capital = ic3.number_input(
+                "Paper capital allocation (₹)", min_value=0.0, step=10_000.0,
+                value=float(_paper_cap_row["starting_capital"]) if _paper_cap_row
+                     else float(config.STRATEGY.get("intraday_paper_capital", 1_000_000.0)),
+                disabled=_paper_cap_row is not None,
+                help=("Already seeded at ₹{:,.0f} the first time paper mode ran -- "
+                     "editing this field no longer has any effect."
+                     .format(_paper_cap_row["starting_capital"])
+                     if _paper_cap_row else
+                     "Same idea as the live field, for the paper track "
+                     "(intraday_capital_state, mode='paper') -- only takes "
+                     "effect before paper mode has ever run."))
+            intraday_submitted = st.form_submit_button("Save intraday settings", type="primary")
+        if intraday_submitted:
+            idb.ensure_capital_seeded("live", float(intraday_live_capital))
+            idb.ensure_capital_seeded("paper", float(intraday_paper_capital))
+            intraday_updates = {
+                "intraday_live_enabled": bool(intraday_live_enabled),
+                "intraday_live_capital": float(intraday_live_capital),
+                "intraday_paper_capital": float(intraday_paper_capital),
+            }
+            state_db.update_strategy_config(intraday_updates)
+            config.STRATEGY.update(intraday_updates)
+            st.success("Intraday settings saved — in effect immediately.")
 
     st.markdown(
         '<p class="ov-card-title" style="margin-top:14px;"><span class="ov-dot" '
@@ -5853,6 +5926,361 @@ _EXIT_TYPE_BADGES = {
 
 
 # ---------------------------------------------------------------------------
+# Page: Intraday Dashboard ("DaysLowVolumnBreakout" strategy)
+# ---------------------------------------------------------------------------
+
+_INTRADAY_EVENT_BADGES = {
+    "signal_formed": "ov-badge-amber", "expired": "ov-badge-gray",
+    "invalidated": "ov-badge-gray", "triggered": "ov-badge-green",
+    "target": "ov-badge-green", "stop": "ov-badge-red",
+    "squareoff": "ov-badge-blue",
+}
+
+LIVE_TICK_STALE_SECONDS = 20  # fall back to a REST quote if the feed goes quiet this long
+
+
+@st.cache_resource(show_spinner=False)
+def _get_dashboard_ticker() -> live_ticker.LiveTicker:
+    """One persistent WebSocket ticker for the whole Streamlit server
+    process, NOT recreated on every rerun -- st.cache_resource is the
+    idiom for exactly this (a resource that should survive Streamlit's
+    own rerun-on-every-interaction model). mode="quote" so each tick
+    carries ohlc.close, needed for the day-change % shown alongside
+    every live price here (plain mode="ltp", what the intraday engine
+    itself uses, has no ohlc). Starts with no tokens subscribed --
+    _ensure_subscribed() below adds them lazily as symbols become
+    relevant (NIFTY 50 up front; candidates/sectors once known)."""
+    return live_ticker.LiveTicker({}, mode="quote")
+
+
+def _ensure_subscribed(ticker: live_ticker.LiveTicker, symbols: list[str]) -> None:
+    """Adds any of `symbols` not already subscribed (resolved via
+    kite_client's equity or index instrument map, whichever has it) and
+    connects the ticker on first real use -- st.cache_resource means
+    this only actually does anything the first time a given symbol is
+    requested across the whole process's lifetime, not on every rerun."""
+    new_tokens = {}
+    for sym in symbols:
+        if sym in ticker.token_by_symbol:
+            continue
+        try:
+            tok = kite_client.instrument_map().get(sym) or kite_client.index_instrument_map().get(sym)
+        except Exception:
+            tok = None
+        if tok is not None:
+            new_tokens[tok] = sym
+    if new_tokens:
+        ticker.add_tokens(new_tokens)
+    if not ticker.started and ticker.tokens:
+        ticker.start(timeout=8.0)
+
+
+def _live_price_and_change(ticker: live_ticker.LiveTicker, symbol: str) -> tuple[float | None, float | None]:
+    """Prefers a fresh live tick; falls back to a one-off REST quote if
+    the feed hasn't produced a tick for this symbol yet (e.g. right
+    after subscribing, or a stale/reconnecting feed) -- so a quiet patch
+    in the feed can't leave the dashboard showing nothing."""
+    token = ticker.token_by_symbol.get(symbol)
+    if token is not None:
+        age = ticker.last_tick_age(token)
+        if age is not None and age <= LIVE_TICK_STALE_SECONDS:
+            return ticker.get_ltp_and_change(token)
+    try:
+        q = kite_client.get_quote_with_change([symbol]).get(symbol)
+    except Exception:
+        q = None
+    return (q["last_price"], q["change_pct"]) if q else (None, None)
+
+
+def page_intraday_dashboard():
+    _mode = "live" if config.STRATEGY.get("intraday_live_enabled", False) else "paper"
+    _tip = html_lib.escape(
+        "The DaysLowVolumnBreakout intraday strategy -- day-bias from NIFTY "
+        "50 breadth, top-2 F&O momentum candidates, a low-volume pullback "
+        "signal, ATR-buffered breakout entry, half-target/half-15:10 exit. "
+        "Paper mode simulates every fill with zero real orders; switching "
+        "to live is a separate, deliberate step (Admin).")
+    _mode_badge = ('<span class="ov-badge ov-badge-red">🔴 LIVE</span>' if _mode == "live"
+                  else '<span class="ov-badge ov-badge-blue">📝 PAPER</span>')
+    st.markdown(
+        f'<div class="ov-header"><div><span class="ov-h1">⚡ Intraday Dashboard</span>'
+        f'<span class="ov-info-icon" title="{_tip}">ℹ️</span></div>'
+        f'<div class="ov-chips">{_mode_badge}'
+        f'<span class="ov-chip ov-chip-muted">{dt.date.today():%d %b %Y}</span></div></div>',
+        unsafe_allow_html=True)
+
+    today = dt.date.today().isoformat()
+    day = idb.get_day(today)
+    cap = idb.get_capital(_mode)
+
+    # --- Capital / P&L strip -------------------------------------------------
+    legs_today = idb.get_legs(date=today, mode=_mode)
+    today_pnl = float(legs_today["net_pnl"].sum()) if not legs_today.empty else 0.0
+    current_capital = cap["current_capital"] if cap else None
+    cum_pnl = (current_capital - cap["starting_capital"]) if cap else None
+    metrics = [
+        _ov_metric_html("Capital (compounding)",
+                       f"₹{current_capital:,.0f}" if current_capital is not None else "—",
+                       f"started at ₹{cap['starting_capital']:,.0f}" if cap else "not seeded yet"),
+        _ov_metric_html("Today's P&L", f"₹{today_pnl:+,.2f}" if legs_today is not None else "—",
+                       f"{len(legs_today)} leg(s) closed today" if not legs_today.empty else "nothing closed yet",
+                       value_cls=("ov-pos" if today_pnl >= 0 else "ov-neg")),
+        _ov_metric_html("Cumulative P&L", f"₹{cum_pnl:+,.2f}" if cum_pnl is not None else "—",
+                       "since inception", value_cls=("ov-pos" if (cum_pnl or 0) >= 0 else "ov-neg")),
+    ]
+    st.markdown(f'<div class="ov-grid-metrics">{"".join(metrics)}</div>', unsafe_allow_html=True)
+
+    st.divider()
+
+    # Persistent WebSocket ticker for this whole server process (see
+    # _get_dashboard_ticker()) -- NIFTY 50 is always wanted; candidates/
+    # sectors get subscribed below once known, each only actually
+    # triggering a new subscription the first time it's seen.
+    ticker = _get_dashboard_ticker()
+    _ensure_subscribed(ticker, ["NIFTY 50"])
+
+    # --- NIFTY 50: price + both breadth numbers -----------------------------
+    col_nifty, col_bias = st.columns(2)
+    with col_nifty:
+      with st.container(border=True, key="ov-card-intraday-nifty"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-blue);">'
+            '</span>NIFTY 50</p>', unsafe_allow_html=True)
+        nifty_price, nifty_chg = _live_price_and_change(ticker, "NIFTY 50")
+        try:
+            live_ad = imkt.fetch_advance_decline("NIFTY 50")
+        except Exception:
+            live_ad = None
+        c1, c2 = st.columns(2)
+        if nifty_price is not None:
+            c1.metric("Current price", f"₹{nifty_price:,.2f}",
+                     f"{nifty_chg:+.2f}%" if nifty_chg is not None else None)
+        else:
+            c1.metric("Current price", "—")
+        if live_ad:
+            c2.metric("Live A/D (whole day)",
+                     f"{live_ad['advances']} / {live_ad['declines']}",
+                     help="NSE's live, continuously-updating breadth -- informational only, "
+                          "NOT what today's day-bias was computed from (that's locked in at "
+                          "09:30 from first-15-min returns, see the card on the right).")
+        else:
+            c2.metric("Live A/D (whole day)", "—")
+
+    with col_bias:
+      with st.container(border=True, key="ov-card-intraday-bias"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-purple);">'
+            '</span>Today\'s day-bias (locked at 09:30)</p>', unsafe_allow_html=True)
+        if day is None:
+            st.info("No selection recorded yet today -- the engine runs this once, at 09:30.")
+        elif day["day_bias"] is None:
+            st.warning(f"⚠️ No trade today -- NIFTY 50 first-15-min ratio was "
+                      f"{day['nifty_ratio']:.2f} (needs >2.0 for LONG or <0.5 for SHORT).")
+        else:
+            bias_tone = "green" if day["day_bias"] == "LONG" else "red"
+            bias_cls = "ov-pos" if day["day_bias"] == "LONG" else "ov-neg"
+            _bias_box = _ov_metric_html("Day bias", day["day_bias"], tone=bias_tone, value_cls=bias_cls)
+            _ratio_box = _ov_metric_html("Ratio", f"{day['nifty_ratio']:.2f}")
+            st.markdown(f'<div class="ov-grid-metrics">{_bias_box}{_ratio_box}</div>',
+                       unsafe_allow_html=True)
+
+    # --- Today's 2 candidates ------------------------------------------------
+    st.markdown(
+        '<p class="ov-card-title" style="margin-top:16px;"><span class="ov-dot" '
+        'style="background:var(--ov-teal);"></span>Today\'s candidates</p>', unsafe_allow_html=True)
+    candidates = idb.get_candidates(today)
+    if candidates.empty:
+        st.info("No candidates selected yet today.")
+    else:
+        _ensure_subscribed(ticker, list(candidates["symbol"]))
+        cand_cols = st.columns(len(candidates))
+        for col, (_, c) in zip(cand_cols, candidates.iterrows()):
+            with col:
+              with st.container(border=True, key=f"ov-card-cand-{c['symbol']}"):
+                cand_price, cand_chg = _live_price_and_change(ticker, c["symbol"])
+                try:
+                    _profile = su.resolve_sector_profiles([c["symbol"]], verbose=False).get(c["symbol"], {})
+                    sector = _profile.get("primary_sector")
+                except Exception:
+                    sector = None
+                st.markdown(f"**#{int(c['rank'])} {c['symbol']}**"
+                           + (f"  ·  _{sector}_" if sector else ""))
+                _ret_val = c["ret_first15_pct"]
+                _ret_cls = "ov-pos" if _ret_val >= 0 else "ov-neg"
+                _ret_box = _ov_metric_html("First-15m return", f"{_ret_val:+.2f}%", value_cls=_ret_cls)
+                if cand_price is not None:
+                    _chg_note = f"{cand_chg:+.2f}% today" if cand_chg is not None else None
+                    _chg_cls = "ov-pos" if (cand_chg or 0) >= 0 else "ov-neg"
+                    _ltp_box = _ov_metric_html("Current LTP", f"₹{cand_price:,.2f}",
+                                              _chg_note, note_cls=_chg_cls)
+                else:
+                    _ltp_box = _ov_metric_html("Current LTP", "—")
+                st.markdown(f'<div class="ov-grid-metrics">{_ret_box}{_ltp_box}</div>',
+                           unsafe_allow_html=True)
+
+                # Sector snapshot -- same current-price + A/D breadth pair
+                # as the NIFTY 50 card above, just for this candidate's own
+                # sector index (e.g. NIFTY BANK), so its sector strength is
+                # visible right alongside the stock itself.
+                if sector:
+                    _ensure_subscribed(ticker, [sector])
+                    sector_price, sector_chg = _live_price_and_change(ticker, sector)
+                    try:
+                        sector_ad = imkt.fetch_advance_decline(sector)
+                    except Exception:
+                        sector_ad = None
+                    st.markdown(
+                        f'<p class="ov-card-title" style="margin-top:10px;font-size:12px;">'
+                        f'<span class="ov-dot" style="background:var(--ov-blue);"></span>'
+                        f'Sector · {html_lib.escape(sector)}</p>', unsafe_allow_html=True)
+                    if sector_price is not None:
+                        _s_chg_note = f"{sector_chg:+.2f}% today" if sector_chg is not None else None
+                        _s_chg_cls = "ov-pos" if (sector_chg or 0) >= 0 else "ov-neg"
+                        _sec_price_box = _ov_metric_html(
+                            "Sector price", f"₹{sector_price:,.2f}",
+                            _s_chg_note, note_cls=_s_chg_cls)
+                    else:
+                        _sec_price_box = _ov_metric_html("Sector price", "—")
+                    _sec_ad_box = _ov_metric_html(
+                        "Sector A/D",
+                        f"{sector_ad['advances']} / {sector_ad['declines']}" if sector_ad else "—")
+                    st.markdown(f'<div class="ov-grid-metrics">{_sec_price_box}{_sec_ad_box}</div>',
+                               unsafe_allow_html=True)
+
+                # signal / position state machine, most-recent first
+                sig = idb.get_active_signal(today, c["symbol"])
+                open_pos = idb.get_open_positions(date=today, mode=_mode)
+                open_pos = open_pos[open_pos["symbol"] == c["symbol"]]
+                if not open_pos.empty:
+                    p = open_pos.iloc[0]
+                    st.markdown('<span class="ov-badge ov-badge-green">Position open</span>',
+                               unsafe_allow_html=True)
+                    _entry_box = _ov_metric_html("Entry", f"₹{p['entry_price']:.2f}")
+                    _stop_box = _ov_metric_html("Stop", f"₹{p['stop_price']:.2f}",
+                                               tone="red", value_cls="ov-neg")
+                    _target_box = _ov_metric_html("Target", f"₹{p['target_price']:.2f}",
+                                                 tone="green", value_cls="ov-pos")
+                    _qty_box = _ov_metric_html("Qty remaining",
+                                              f"{int(p['qty_remaining'])}/{int(p['qty'])}")
+                    st.markdown(
+                        f'<div class="ov-grid-metrics">{_entry_box}{_stop_box}'
+                        f'{_target_box}{_qty_box}</div>', unsafe_allow_html=True)
+                elif sig is not None:
+                    _buf = sig["signal_atr"] * istrat.ATR_PCT_BUFFER
+                    _proj_entry = (sig["signal_high"] + _buf if day and day["day_bias"] == istrat.LONG
+                                  else sig["signal_low"] - _buf)
+                    st.markdown('<span class="ov-badge ov-badge-amber">Signal active</span>',
+                               unsafe_allow_html=True)
+                    _hl_box = _ov_metric_html("Signal high / low",
+                                             f"₹{sig['signal_high']:.2f} / ₹{sig['signal_low']:.2f}")
+                    _entry_box = _ov_metric_html("Entry (on breakout)", f"₹{_proj_entry:.2f}")
+                    st.markdown(f'<div class="ov-grid-metrics">{_hl_box}{_entry_box}</div>',
+                               unsafe_allow_html=True)
+                    st.caption(f"formed {sig['signal_time']} · watching for breakout")
+                else:
+                    all_positions_today = idb.get_positions(date=today, mode=_mode)
+                    sym_positions = all_positions_today[all_positions_today["symbol"] == c["symbol"]] \
+                        if not all_positions_today.empty else all_positions_today
+                    if not sym_positions.empty and (sym_positions["status"] == "closed").all():
+                        st.markdown('<span class="ov-badge ov-badge-gray">Day closed</span>',
+                                   unsafe_allow_html=True)
+                    else:
+                        st.markdown('<span class="ov-badge ov-badge-gray">No signal yet</span>',
+                                   unsafe_allow_html=True)
+
+    # --- Event timeline -------------------------------------------------------
+    st.markdown(
+        '<p class="ov-card-title" style="margin-top:16px;"><span class="ov-dot" '
+        'style="background:var(--ov-amber);"></span>Today\'s events</p>', unsafe_allow_html=True)
+    sigs = idb.get_signals(today)
+    legs = idb.get_legs(date=today, mode=_mode)
+    events = []
+    for _, s in sigs.iterrows():
+        events.append({"time": s["signal_time"], "symbol": s["symbol"],
+                      "event": "signal_formed" if s["status"] != "expired" else "expired",
+                      "detail": f"high ₹{s['signal_high']:.2f} / low ₹{s['signal_low']:.2f}"})
+    for _, l in legs.iterrows():
+        events.append({"time": l["exit_time"], "symbol": l["symbol"], "event": l["leg_type"],
+                      "detail": f"qty {int(l['qty'])} @ ₹{l['exit_price']:.2f} "
+                                f"(₹{l['net_pnl']:+,.2f})"})
+    if events:
+        ev_df = pd.DataFrame(events).sort_values("time")
+        st.markdown(
+            _ov_table_html(ev_df, columns=["time", "symbol", "event", "detail"],
+                          sym_cols=["symbol"], badges={"event": _INTRADAY_EVENT_BADGES}),
+            unsafe_allow_html=True)
+    else:
+        st.caption("Nothing has happened yet today.")
+
+
+# ---------------------------------------------------------------------------
+# Page: Intraday Tradebook
+# ---------------------------------------------------------------------------
+
+def page_intraday_tradebook():
+    _tip = html_lib.escape(
+        "Every intraday position this strategy has opened, split into its "
+        "exit legs (target half + 15:10 runner half, or a single stop leg) "
+        "-- separate from the momentum strategy's own Tradebook.")
+    st.markdown(
+        '<div class="ov-header"><div><span class="ov-h1">📒 Intraday Tradebook</span>'
+        f'<span class="ov-info-icon" title="{_tip}">ℹ️</span></div></div>',
+        unsafe_allow_html=True)
+
+    f1, f2 = st.columns(2)
+    with f1:
+        mode_filter = st.selectbox("Mode", ["paper", "live"], key="intraday_tb_mode")
+    with f2:
+        since = st.date_input("Since", value=dt.date.today() - dt.timedelta(days=30),
+                              key="intraday_tb_since")
+
+    positions = idb.get_positions(mode=mode_filter)
+    if not positions.empty:
+        positions = positions[positions["date"] >= since.isoformat()]
+    if positions.empty:
+        st.info(f"No {mode_filter} positions recorded yet.")
+        return
+
+    closed = positions[positions["status"] == "closed"]
+    legs_all = idb.get_legs(mode=mode_filter)
+    legs_all = legs_all[legs_all["date"] >= since.isoformat()] if not legs_all.empty else legs_all
+    total_pnl = float(legs_all["net_pnl"].sum()) if not legs_all.empty else 0.0
+    win_rate = (100 * (legs_all["net_pnl"] > 0).mean()) if not legs_all.empty else float("nan")
+
+    metrics = [
+        _ov_metric_html("Positions", str(len(positions)), f"{len(closed)} closed"),
+        _ov_metric_html("Legs", str(len(legs_all)), "target + stop/squareoff exits"),
+        _ov_metric_html("Net P&L", f"₹{total_pnl:+,.2f}", None,
+                       value_cls=("ov-pos" if total_pnl >= 0 else "ov-neg")),
+        _ov_metric_html("Win rate (legs)",
+                       f"{win_rate:.0f}%" if pd.notna(win_rate) else "—", None),
+    ]
+    st.markdown(f'<div class="ov-grid-metrics">{"".join(metrics)}</div>', unsafe_allow_html=True)
+    st.divider()
+
+    display = legs_all.merge(
+        positions[["id", "signal_time"]].rename(columns={"id": "position_id"}),
+        on="position_id", how="left") if not legs_all.empty else legs_all
+    if display.empty:
+        st.info("No legs recorded in this window.")
+        return
+    display = display.sort_values("exit_time", ascending=False)
+    show_cols = ["date", "symbol", "direction", "entry_time", "entry_price",
+                "leg_type", "qty", "exit_time", "exit_price", "gross_pnl", "costs", "net_pnl"]
+    show_cols = [c for c in show_cols if c in display.columns]
+    page = _ov_page_slice(display, key="intraday_tb", page_size=20)
+    st.markdown(
+        _ov_table_html(page, columns=show_cols, sym_cols=["symbol"],
+                      pnl_cols=["gross_pnl", "net_pnl"], num_fmt={
+                          "entry_price": "₹{:,.2f}", "exit_price": "₹{:,.2f}",
+                          "gross_pnl": "₹{:+,.2f}", "costs": "₹{:,.2f}", "qty": "{:.0f}"},
+                      badges={"leg_type": _INTRADAY_EVENT_BADGES,
+                             "direction": {"LONG": "ov-badge-green", "SHORT": "ov-badge-red"}}),
+        unsafe_allow_html=True)
+    _ov_pagination_controls(display, key="intraday_tb", page_size=20)
+
+
+# ---------------------------------------------------------------------------
 # Page: Tradebook
 # ---------------------------------------------------------------------------
 
@@ -5863,7 +6291,7 @@ def page_tradebook():
         "from the Positions & Trade page's live view, meant for "
         "historical/analytics use.")
     st.markdown(
-        '<div class="ov-header"><div><span class="ov-h1">📒 Tradebook</span>'
+        '<div class="ov-header"><div><span class="ov-h1">📒 Positional Tradebook</span>'
         f'<span class="ov-info-icon" title="{_tb_tip}">ℹ️</span></div></div>',
         unsafe_allow_html=True)
 
@@ -6526,14 +6954,16 @@ def page_guide():
                                subtitle="What each tab in the sidebar actually shows you."),
                unsafe_allow_html=True)
     _pages_tour = [
-        ("🏠", "Overview", "Your portfolio at a glance — equity curve, today's snapshot, live holdings summary."),
+        ("🏠", "Positional Dashboard", "Your portfolio at a glance — equity curve, today's snapshot, live holdings summary."),
+        ("⚡", "Intraday Dashboard", "The DaysLowVolumnBreakout intraday strategy — NIFTY breadth, today's candidates, live signal/position state."),
         ("📡", "Live Rebalance", "Today's proposed sells/buys/top-ups/stop-updates — review and execute, or watch auto-execute run."),
         ("💼", "Positions & Trade", "Your real, live broker holdings and intraday positions, plus manual order entry."),
         ("🔍", "Screener", "The full ranked universe — every gate, every score, browsable and chartable on demand."),
         ("📊", "Fundamentals", "The XBRL-based value-score scan across the universe, with the rubric behind every number."),
         ("⚙️", "Admin", "Every strategy setting in one form — stop mechanism, sizing, gates, automation toggles."),
         ("💰", "Ledger", "Deposits/withdrawals for accurate XIRR, plus DP charges and recurring costs."),
-        ("📒", "Tradebook", "Every trade this app has ever opened, with its entry snapshot, real exit type, and live P&L."),
+        ("📒", "Positional Tradebook", "Every trade this app has ever opened, with its entry snapshot, real exit type, and live P&L."),
+        ("📒", "Intraday Tradebook", "Every intraday position's target/stop/squareoff legs, with realized P&L and cost breakdown."),
         ("🗂️", "Job Log", "Status and history of every scheduled and manual job — did today's scan actually run?"),
         ("📜", "Rebalance History", "The full audit trail of every sell/buy/top-up/stop-update ever proposed."),
         ("🧪", "Backtest", "Run the exact same engine against history to test a change before trusting it live."),
@@ -6555,18 +6985,20 @@ def page_guide():
 # Navigation
 # ---------------------------------------------------------------------------
 
-page_cockpit_p = st.Page(page_cockpit, title="Overview", icon="🏠", default=True)
+page_cockpit_p = st.Page(page_cockpit, title="Positional Dashboard", icon="🏠")
 page_screener_p = st.Page(page_screener, title="Screener", icon="🔍")
 page_live_rebalance_p = st.Page(page_live_rebalance, title="Live Rebalance", icon="📡")
 page_positions_trade_p = st.Page(page_positions_trade, title="Positions & Trade", icon="💼")
 page_backtest_p = st.Page(page_backtest, title="Backtest", icon="🧪")
 page_fundamentals_p = st.Page(page_fundamentals, title="Fundamentals", icon="📊")
-page_tradebook_p = st.Page(page_tradebook, title="Tradebook", icon="📒")
+page_tradebook_p = st.Page(page_tradebook, title="Positional Tradebook", icon="📒")
 page_job_log_p = st.Page(page_job_log, title="Job Log", icon="🗂️")
 page_rebalance_history_p = st.Page(page_rebalance_history, title="Rebalance History", icon="📜")
 page_ledger_p = st.Page(page_ledger, title="Ledger", icon="💰")
 page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
 page_guide_p = st.Page(page_guide, title="Guide", icon="📘")
+page_intraday_dashboard_p = st.Page(page_intraday_dashboard, title="Intraday Dashboard", icon="⚡", default=True)
+page_intraday_tradebook_p = st.Page(page_intraday_tradebook, title="Intraday Tradebook", icon="📒")
 
 # Injected before the sidebar (not per-page) so every page -- not just
 # Overview, where this design system started -- gets the same compact
@@ -6586,6 +7018,7 @@ with st.sidebar:
     st.page_link(page_guide_p)
 
     st.markdown('<p class="ov-side-label">Trading</p>', unsafe_allow_html=True)
+    st.page_link(page_intraday_dashboard_p)
     st.page_link(page_cockpit_p)
     st.page_link(page_live_rebalance_p)
     st.page_link(page_positions_trade_p)
@@ -6596,6 +7029,7 @@ with st.sidebar:
 
     st.markdown('<p class="ov-side-label">Audit Trail</p>', unsafe_allow_html=True)
     st.page_link(page_tradebook_p)
+    st.page_link(page_intraday_tradebook_p)
     st.page_link(page_job_log_p)
     st.page_link(page_rebalance_history_p)
 
@@ -6720,5 +7154,6 @@ with st.container(key="ov-topbar"):
 nav = st.navigation([page_cockpit_p, page_live_rebalance_p, page_positions_trade_p,
                     page_screener_p, page_fundamentals_p, page_tradebook_p,
                     page_job_log_p, page_rebalance_history_p, page_backtest_p,
-                    page_admin_p, page_ledger_p, page_guide_p], position="hidden")
+                    page_admin_p, page_ledger_p, page_guide_p,
+                    page_intraday_dashboard_p, page_intraday_tradebook_p], position="hidden")
 nav.run()
