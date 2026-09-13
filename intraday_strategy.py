@@ -277,6 +277,44 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     return state, None
 
 
+def check_tick_trigger(state: dict, direction: str, ltp: float, ts) -> dict | None:
+    """Continuous (tick-driven) breakout-trigger check for use BETWEEN
+    candle closes -- Spec.md §6.2 calls for trigger detection to be
+    tick-driven rather than waiting for a candle to fully close (up to
+    5 minutes of delay). Mirrors step_candle()'s own trigger check
+    exactly (same trigger_level/stop_price formulas), just evaluated
+    against a single live price instead of a closed candle's high/low.
+
+    Does NOT mutate `state` and does not itself clear active_signal --
+    the caller (which owns the tracker's state) does that, the same way
+    it already does for step_candle()'s own "triggered" event, so both
+    paths update state identically. Returns None if there's no active
+    signal (or the tick hasn't reached the trigger level yet).
+
+    Because a real intraday candle's high/low is simply the extreme of
+    every tick within it, this can only trigger a candidate on the SAME
+    candle step_candle() would have -- it just detects the crossing the
+    moment a tick reaches it, instead of waiting for that candle to
+    close, so it never changes which candle is the trigger candle."""
+    if state.get("invalidated"):
+        return None
+    active = state.get("active_signal")
+    if active is None:
+        return None
+    buf = active["atr"] * ATR_PCT_BUFFER
+    if direction == LONG:
+        trigger_level = active["hi"] + buf
+        triggered = ltp >= trigger_level
+    else:
+        trigger_level = active["lo"] - buf
+        triggered = ltp <= trigger_level
+    if not triggered:
+        return None
+    stop_price = (active["lo"] - buf) if direction == LONG else (active["hi"] + buf)
+    return {"type": "triggered", "signal_time": active["time"], "entry_time": ts,
+           "entry_price": trigger_level, "stop_price": stop_price}
+
+
 def target_price(entry: float, stop: float, direction: str,
                  reward_risk: float = REWARD_RISK) -> float:
     """Spec.md §5 -- flat reward:risk target."""

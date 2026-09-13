@@ -27,12 +27,19 @@ import config
 import intraday_db as idb
 import intraday_market as mkt
 import intraday_strategy as strat
+import intraday_ticker
 import kite_client
 import nse_holidays
 
 EMA_WARMUP_DAYS = 120  # >> "several weeks" Spec.md §1 asks for, comfortably covers EMA21/ATR14 warmup
 DEFAULT_PAPER_CAPITAL = 1_000_000.0
-POLL_SECONDS = 7  # LTP poll cadence for trigger/stop/target between candle closes (Spec.md §6.2)
+# How often the loop wakes up to check the ticker's in-memory cache and
+# wall-clock conditions (candle boundary, 15:10 squareoff) -- NOT a network
+# poll cadence any more (see intraday_ticker.py): trigger/stop/target prices
+# themselves come from live WebSocket ticks the instant they arrive, this
+# just bounds how quickly the loop notices them.
+CHECK_INTERVAL_SECONDS = 1
+TICK_STALE_SECONDS = 20  # fall back to a REST get_ltp() if the feed goes quiet this long
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +111,14 @@ def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series,
     volume (running min, inclusive) BEFORE calling this -- see
     step_candle()'s docstring for why (the running min starts at 09:15,
     three candles before the signal window itself opens at 09:35)."""
-    if tracker.done:
+    if tracker.done or tracker.position_id is not None:
+        # A position is already open (triggered by this same candle's
+        # close just above, or by a live tick before this candle even
+        # closed -- see check_tick_entry()) -- step_candle() would
+        # otherwise keep hunting for a brand-new signal candle on every
+        # subsequent close and could trigger a SECOND, unmanaged entry
+        # for a candidate that already has one open (each candidate
+        # gets at most one position per day, Spec.md §4).
         return None
     e21 = tracker.ema21_series.get(ts)
     sig_atr = tracker.atr14_series.get(ts)
@@ -135,26 +149,57 @@ def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series,
     if event["type"] == "triggered":
         if tracker.signal_db_id is not None:
             idb.update_signal_status(tracker.signal_db_id, "triggered")
-        entry_price, stop_price = event["entry_price"], event["stop_price"]
-        qty = strat.position_size(capital_alloc, risk_budget, entry_price, stop_price)
-        if qty <= 0:
-            tracker.done = True
-            return {"type": "entry_skipped_zero_qty"}
-        target = strat.target_price(entry_price, stop_price, tracker.direction)
-        order_id = None
-        if mode == "live":
-            side = "BUY" if tracker.direction == strat.LONG else "SELL"
-            order_id = kite_client.place_order(
-                tracker.symbol, qty, side, product="MIS", order_type="SL",
-                price=entry_price, trigger_price=entry_price)
-        tracker.position_id = idb.record_new_position(
-            tracker.date, tracker.symbol, tracker.direction, str(event["entry_time"]),
-            entry_price, stop_price, target, qty, mode,
-            signal_time=str(event["signal_time"]), order_id=order_id)
-        return {"type": "position_opened", "position_id": tracker.position_id,
-               "qty": qty, "entry_price": entry_price, "stop_price": stop_price, "target": target}
+        return _open_position_from_trigger(tracker, event, capital_alloc, risk_budget, mode)
 
     return event
+
+
+def _open_position_from_trigger(tracker: CandidateTracker, event: dict,
+                                capital_alloc: float, risk_budget: float, mode: str) -> dict:
+    """Shared by both trigger paths -- process_candle()'s candle-close
+    "triggered" event (step_candle()) and check_tick_trigger()'s live-
+    tick equivalent -- so a breakout is sized/recorded identically no
+    matter which one detected it first."""
+    entry_price, stop_price = event["entry_price"], event["stop_price"]
+    qty = strat.position_size(capital_alloc, risk_budget, entry_price, stop_price)
+    if qty <= 0:
+        tracker.done = True
+        return {"type": "entry_skipped_zero_qty"}
+    target = strat.target_price(entry_price, stop_price, tracker.direction)
+    order_id = None
+    if mode == "live":
+        side = "BUY" if tracker.direction == strat.LONG else "SELL"
+        order_id = kite_client.place_order(
+            tracker.symbol, qty, side, product="MIS", order_type="SL",
+            price=entry_price, trigger_price=entry_price)
+    tracker.position_id = idb.record_new_position(
+        tracker.date, tracker.symbol, tracker.direction, str(event["entry_time"]),
+        entry_price, stop_price, target, qty, mode,
+        signal_time=str(event["signal_time"]), order_id=order_id)
+    return {"type": "position_opened", "position_id": tracker.position_id,
+           "qty": qty, "entry_price": entry_price, "stop_price": stop_price, "target": target}
+
+
+def check_tick_entry(tracker: CandidateTracker, ltp: float, now: dt.datetime,
+                     capital_alloc: float, risk_budget: float, mode: str) -> dict | None:
+    """Tick-driven counterpart to process_candle()'s candle-close trigger
+    check (Spec.md §6.2) -- called on every live tick for a candidate
+    that has an active signal but no position yet, so a breakout is
+    caught the instant price crosses the trigger level rather than
+    waiting up to 5 minutes for the candle to close. No-ops once
+    tracker.done or a position already exists."""
+    if tracker.done or tracker.position_id is not None:
+        return None
+    event = strat.check_tick_trigger(tracker.signal_state, tracker.direction, ltp, now)
+    if event is None:
+        return None
+    # Mirror step_candle()'s own state mutation on trigger (clears
+    # active_signal) so the candle-close path, if it still runs for this
+    # boundary, doesn't see a stale active signal and re-trigger it.
+    tracker.signal_state = dict(tracker.signal_state, active_signal=None, breakout_counter=0)
+    if tracker.signal_db_id is not None:
+        idb.update_signal_status(tracker.signal_db_id, "triggered")
+    return _open_position_from_trigger(tracker, event, capital_alloc, risk_budget, mode)
 
 
 def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.datetime,
@@ -256,6 +301,21 @@ def _last_closed_candle_label(now: dt.datetime) -> dt.datetime:
     return floor - dt.timedelta(minutes=5)
 
 
+def _get_live_ltp(ticker: intraday_ticker.LiveTicker, token: int, symbol: str) -> float | None:
+    """Prefers the live WebSocket tick; falls back to a one-off REST
+    get_ltp() call if the feed has gone stale (e.g. mid-reconnect) or
+    hasn't produced a tick for this token yet, so a quiet patch in the
+    feed can't silently freeze trigger/stop/target checks."""
+    age = ticker.last_tick_age(token)
+    if age is not None and age <= TICK_STALE_SECONDS:
+        return ticker.get_ltp(token)
+    try:
+        return kite_client.get_ltp([symbol])[symbol]
+    except Exception as e:
+        print(f"[intraday_engine] {symbol}: REST LTP fallback failed -- {e}")
+        return ticker.get_ltp(token)
+
+
 def run_live(mode: str = "paper") -> None:
     """Entry point: `python intraday_engine.py` (paper mode) during real
     market hours. Idles/exits immediately on a non-trading day."""
@@ -304,58 +364,77 @@ def run_live(mode: str = "paper") -> None:
         t.vol_min_so_far = float(pre_window["volume"].min()) if not pre_window.empty else None
         trackers.append(t)
 
-    last_candle_ts = None
-    print("Entering intraday loop (09:35-15:10)...")
-    while True:
-        now = dt.datetime.now()
-        if now.time() >= dt.time(15, 10):
-            break
+    # Live tick feed (WebSocket, not REST polling) -- both candidates'
+    # trigger/stop/target checks below react to real ticks as they
+    # arrive instead of a fixed poll cadence. See intraday_ticker.py.
+    inst_map = kite_client.instrument_map()
+    token_by_symbol = {t.symbol: inst_map[t.symbol] for t in trackers if t.symbol in inst_map}
+    ticker = intraday_ticker.LiveTicker({tok: sym for sym, tok in token_by_symbol.items()})
+    ticker.start()
 
-        boundary = _last_closed_candle_label(now)
-        if boundary.time() >= dt.time(9, 35) and (last_candle_ts is None or boundary > last_candle_ts):
+    try:
+        last_candle_ts = None
+        print("Entering intraday loop (09:35-15:10)...")
+        while True:
+            now = dt.datetime.now()
+            if now.time() >= dt.time(15, 10):
+                break
+
+            boundary = _last_closed_candle_label(now)
+            if boundary.time() >= dt.time(9, 35) and (last_candle_ts is None or boundary > last_candle_ts):
+                for t in trackers:
+                    if t.done:
+                        continue
+                    fresh = kite_client.fetch_intraday_candles(t.symbol, days=2, interval="5minute")
+                    row_df = fresh[fresh.index == boundary]
+                    if row_df.empty:
+                        continue
+                    row = row_df.iloc[0]
+                    t.vol_min_so_far = (row["volume"] if t.vol_min_so_far is None
+                                       else min(t.vol_min_so_far, row["volume"]))
+                    event = process_candle(t, boundary, row, capital_alloc, risk_budget, mode)
+                    if event:
+                        print(f"{boundary} {t.symbol}: {event}")
+                last_candle_ts = boundary
+
             for t in trackers:
                 if t.done:
                     continue
-                fresh = kite_client.fetch_intraday_candles(t.symbol, days=2, interval="5minute")
-                row_df = fresh[fresh.index == boundary]
-                if row_df.empty:
+                token = token_by_symbol.get(t.symbol)
+                if token is None:
                     continue
-                row = row_df.iloc[0]
-                t.vol_min_so_far = (row["volume"] if t.vol_min_so_far is None
-                                   else min(t.vol_min_so_far, row["volume"]))
-                event = process_candle(t, boundary, row, capital_alloc, risk_budget, mode)
+                ltp = _get_live_ltp(ticker, token, t.symbol)
+                if ltp is None:
+                    continue
+                now2 = dt.datetime.now()
+                if t.position_id is None:
+                    event = check_tick_entry(t, ltp, now2, capital_alloc, risk_budget, mode)
+                else:
+                    event = check_intracandle_exit(t, ltp, now2, mode)
                 if event:
-                    print(f"{boundary} {t.symbol}: {event}")
-            last_candle_ts = boundary
+                    print(f"{now2:%H:%M:%S} {t.symbol}: {event}")
 
+            time.sleep(CHECK_INTERVAL_SECONDS)
+
+        print("15:10 -- squaring off any remaining open positions...")
         for t in trackers:
-            if t.done or t.position_id is None:
+            if t.position_id is None:
                 continue
-            try:
-                ltp = kite_client.get_ltp([t.symbol])[t.symbol]
-            except Exception as e:
-                print(f"[intraday_engine] {t.symbol}: LTP poll failed -- {e}")
+            token = token_by_symbol.get(t.symbol)
+            ltp = _get_live_ltp(ticker, token, t.symbol) if token is not None else None
+            if ltp is None:
+                try:
+                    ltp = kite_client.get_ltp([t.symbol])[t.symbol]
+                except Exception:
+                    pos = idb.get_position(t.position_id)
+                    ltp = pos["entry_price"] if pos else None
+            if ltp is None:
                 continue
-            event = check_intracandle_exit(t, ltp, dt.datetime.now(), mode)
+            event = force_squareoff(t, ltp, dt.datetime.now(), mode)
             if event:
-                print(f"{dt.datetime.now():%H:%M:%S} {t.symbol}: {event}")
-
-        time.sleep(POLL_SECONDS)
-
-    print("15:10 -- squaring off any remaining open positions...")
-    for t in trackers:
-        if t.position_id is None:
-            continue
-        try:
-            ltp = kite_client.get_ltp([t.symbol])[t.symbol]
-        except Exception:
-            pos = idb.get_position(t.position_id)
-            ltp = pos["entry_price"] if pos else None
-        if ltp is None:
-            continue
-        event = force_squareoff(t, ltp, dt.datetime.now(), mode)
-        if event:
-            print(f"squareoff {t.symbol}: {event}")
+                print(f"squareoff {t.symbol}: {event}")
+    finally:
+        ticker.stop()
 
     # Sum every leg closed today (target/stop legs closed earlier in the
     # loop, plus the squareoff legs just above) straight from the DB --
