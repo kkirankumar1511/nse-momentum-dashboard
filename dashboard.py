@@ -2643,27 +2643,31 @@ def page_admin():
     with st.container(border=True, key="ov-card-admin-intraday"):
         st.caption(
             "Completely separate from the swing/momentum settings above -- "
-            "its own capital track, its own live/paper switch. Paper mode "
-            "simulates every fill with zero real orders; enabling live mode "
-            "makes the next `python intraday_engine.py --live` run place "
-            "real MIS orders with real capital. A paper-mode engine "
-            "process already running does not hot-swap -- it must be "
-            "restarted with --live after enabling this.")
+            "its own capital tracks, its own live/paper switch. Paper mode "
+            "(the default) simulates every fill with zero real orders. "
+            "This checkbox is the ONLY thing intraday_engine.py's plain "
+            "`python intraday_engine.py` (no flags) checks to decide which "
+            "mode to trade in -- so a scheduled daily launch auto-trades "
+            "live starting the very next run after you save this on, with "
+            "no per-day manual step. A paper-mode engine process already "
+            "running does not hot-swap -- it must be restarted to pick up "
+            "a change here.")
         _live_cap_row = idb.get_capital("live")
+        _paper_cap_row = idb.get_capital("paper")
         with st.form("intraday_strategy_form"):
-            ic1, ic2 = st.columns(2)
+            ic1, ic2, ic3 = st.columns(3)
             intraday_live_enabled = ic1.checkbox(
                 "Enable live intraday trading", value=bool(config.STRATEGY.get("intraday_live_enabled", False)),
                 help="OFF by default. Places real MIS (5x leveraged) intraday "
-                     "orders once the engine is restarted with --live -- a "
-                     "materially different risk profile from the CNC swing "
+                     "orders starting the next time the engine is (re)started -- "
+                     "a materially different risk profile from the CNC swing "
                      "book already running live. Only flip this on once "
                      "you've watched paper mode work correctly for real "
                      "trading days.")
             intraday_live_capital = ic2.number_input(
                 "Live capital allocation (₹)", min_value=0.0, step=10_000.0,
                 value=float(_live_cap_row["starting_capital"]) if _live_cap_row
-                     else float(config.STRATEGY.get("intraday_live_capital", 500_000.0)),
+                     else float(config.STRATEGY.get("intraday_live_capital", 1_000_000.0)),
                 disabled=_live_cap_row is not None,
                 help=("Already seeded at ₹{:,.0f} the first time live mode ran -- "
                      "editing this field no longer has any effect, so a save "
@@ -2676,12 +2680,26 @@ def page_admin():
                      "capital and from the swing book's cash. Change this "
                      "before going live for the first time; it has no "
                      "effect afterward."))
+            intraday_paper_capital = ic3.number_input(
+                "Paper capital allocation (₹)", min_value=0.0, step=10_000.0,
+                value=float(_paper_cap_row["starting_capital"]) if _paper_cap_row
+                     else float(config.STRATEGY.get("intraday_paper_capital", 1_000_000.0)),
+                disabled=_paper_cap_row is not None,
+                help=("Already seeded at ₹{:,.0f} the first time paper mode ran -- "
+                     "editing this field no longer has any effect."
+                     .format(_paper_cap_row["starting_capital"])
+                     if _paper_cap_row else
+                     "Same idea as the live field, for the paper track "
+                     "(intraday_capital_state, mode='paper') -- only takes "
+                     "effect before paper mode has ever run."))
             intraday_submitted = st.form_submit_button("Save intraday settings", type="primary")
         if intraday_submitted:
             idb.ensure_capital_seeded("live", float(intraday_live_capital))
+            idb.ensure_capital_seeded("paper", float(intraday_paper_capital))
             intraday_updates = {
                 "intraday_live_enabled": bool(intraday_live_enabled),
                 "intraday_live_capital": float(intraday_live_capital),
+                "intraday_paper_capital": float(intraday_paper_capital),
             }
             state_db.update_strategy_config(intraday_updates)
             config.STRATEGY.update(intraday_updates)

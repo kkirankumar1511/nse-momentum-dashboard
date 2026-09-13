@@ -1,9 +1,16 @@
 """
 Live/paper orchestration for the "DaysLowVolumnBreakout" intraday
 strategy -- run as `python intraday_engine.py` during real market hours
-(09:15-15:15 IST). Paper mode (default) simulates every fill at the
-exact computed price, no Kite orders; live mode (gated off by default,
-see config.STRATEGY["intraday_live_enabled"]) places real MIS orders.
+(09:15-15:15 IST), no flags needed for normal/scheduled use: the mode
+is decided entirely by config.STRATEGY["intraday_live_enabled"] (the
+Admin page checkbox) at each invocation, so a scheduled daily launch
+runs the exact same command every day and automatically trades live
+the very next time it starts after that checkbox is saved on, with no
+per-day manual step. Paper mode (the default, while that flag is off)
+simulates every fill at the exact computed price, no Kite orders; live
+mode places real MIS orders. `--paper` on the command line forces
+paper regardless (a manual safety valve); `--live` is accepted for
+explicit intent but can never bypass the config gate if it's off.
 
 Structured so the DECISION logic (given data already fetched) is
 independently testable without wall-clock waits or a real Kite session
@@ -32,6 +39,10 @@ import kite_client
 import nse_holidays
 
 EMA_WARMUP_DAYS = 120  # >> "several weeks" Spec.md §1 asks for, comfortably covers EMA21/ATR14 warmup
+# Fallback only -- config.STRATEGY["intraday_paper_capital"]/["intraday_live_capital"]
+# (both Admin-editable) are what run_live() actually seeds each mode's
+# starting capital from; this constant is just the .get() default for a
+# fresh install where those keys haven't been written to the DB yet.
 DEFAULT_PAPER_CAPITAL = 1_000_000.0
 # How often the loop wakes up to check the ticker's in-memory cache and
 # wall-clock conditions (candle boundary, 15:10 squareoff) -- NOT a network
@@ -324,7 +335,10 @@ def run_live(mode: str = "paper") -> None:
         print(f"{dt.datetime.now():%d %b %Y %H:%M:%S} Not an NSE trading day -- exiting.")
         return
     date_str = today.isoformat()
-    idb.ensure_capital_seeded(mode, DEFAULT_PAPER_CAPITAL)
+    starting_capital = config.STRATEGY.get(
+        "intraday_live_capital" if mode == "live" else "intraday_paper_capital",
+        DEFAULT_PAPER_CAPITAL)
+    idb.ensure_capital_seeded(mode, starting_capital)
 
     print(f"Waiting for 09:30 ({dt.datetime.now():%H:%M:%S} now)...")
     _wait_until(dt.time(9, 30))
@@ -447,9 +461,25 @@ def run_live(mode: str = "paper") -> None:
 
 if __name__ == "__main__":
     import sys
-    _mode = "live" if "--live" in sys.argv else "paper"
-    if _mode == "live" and not config.STRATEGY.get("intraday_live_enabled", False):
-        print("intraday_live_enabled is off in config.STRATEGY -- refusing to run live mode. "
-             "Running paper mode instead.")
+    # config.STRATEGY["intraday_live_enabled"] (Admin page checkbox) is the
+    # single source of truth for which mode a plain, no-flags invocation
+    # runs in -- this is what makes "check the box, save" alone enough:
+    # a scheduled daily launch runs this exact same command every trading
+    # day with no flags, so whichever mode it trades in is decided
+    # entirely by whatever's saved in Admin, not by a human remembering to
+    # type --live that morning (or forgetting to remove it).
+    #
+    # --paper forces paper regardless (a deliberate manual safety valve,
+    # e.g. testing on a day live is otherwise enabled). --live is accepted
+    # for explicit intent/backward compatibility but can NOT bypass the
+    # config gate if it's off -- there is no command-line way to place a
+    # real order without first opting in from the Admin page.
+    live_enabled = config.STRATEGY.get("intraday_live_enabled", False)
+    if "--paper" in sys.argv:
         _mode = "paper"
+    else:
+        _mode = "live" if live_enabled else "paper"
+        if "--live" in sys.argv and not live_enabled:
+            print("intraday_live_enabled is off in config.STRATEGY -- refusing --live, "
+                 "running paper mode instead.")
     run_live(mode=_mode)
