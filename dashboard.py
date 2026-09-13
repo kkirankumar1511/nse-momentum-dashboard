@@ -793,21 +793,6 @@ section[data-testid="stSidebar"][aria-expanded="true"] {
     font-size:10.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
     color:var(--ov-text-muted); margin:0 4px !important;
 }
-/* Top-level sidebar section (Positional Trading / Intraday Trading) --
-   bolder and a touch larger than .ov-side-label's own sub-groups
-   (Trading/Audit Trail/etc, nested underneath each section), with a
-   hairline divider so the two-section split reads at a glance. */
-.ov-side-section {
-    font-size:12px; font-weight:800; letter-spacing:.03em;
-    color:var(--ov-text-primary); margin:0 4px !important;
-}
-[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(.ov-side-section) {
-    margin-top:16px !important; padding-top:12px !important; padding-bottom:2px !important;
-    border-top:1px solid var(--ov-border);
-}
-[data-testid="stSidebar"] [data-testid="stElementContainer"]:first-child:has(.ov-side-section) {
-    margin-top:4px !important; padding-top:0 !important; border-top:none;
-}
 /* Space around a section label lives on ITS OWN element-container (via
    margin-top/padding-bottom), not on the <p> itself -- a margin on the
    <p> sits inside a container whose margin-bottom is already forced to 0
@@ -1371,7 +1356,7 @@ def _live_kpi_row():
     _refresh_note = ("🟢 live" if _is_market_hours() else "⚪ market closed")
     st.markdown(
         '<div class="ov-header" style="margin-bottom:14px;">'
-        '<div><span class="ov-h1">Overview</span> '
+        '<div><span class="ov-h1">Positional Dashboard</span> '
         '<span class="ov-sub">· everything at a glance</span></div>'
         f'<span class="ov-card-meta">{_refresh_note} · '
         f'last updated {dt.datetime.now():%H:%M:%S}</span>'
@@ -5893,7 +5878,7 @@ def page_intraday_dashboard():
     _mode_badge = ('<span class="ov-badge ov-badge-red">🔴 LIVE</span>' if _mode == "live"
                   else '<span class="ov-badge ov-badge-blue">📝 PAPER</span>')
     st.markdown(
-        f'<div class="ov-header"><div><span class="ov-h1">⚡ Intraday Trading</span>'
+        f'<div class="ov-header"><div><span class="ov-h1">⚡ Intraday Dashboard</span>'
         f'<span class="ov-info-icon" title="{_tip}">ℹ️</span></div>'
         f'<div class="ov-chips">{_mode_badge}'
         f'<span class="ov-chip ov-chip-muted">{dt.date.today():%d %b %Y}</span></div></div>',
@@ -6122,7 +6107,7 @@ def page_tradebook():
         "from the Positions & Trade page's live view, meant for "
         "historical/analytics use.")
     st.markdown(
-        '<div class="ov-header"><div><span class="ov-h1">📒 Tradebook</span>'
+        '<div class="ov-header"><div><span class="ov-h1">📒 Positional Tradebook</span>'
         f'<span class="ov-info-icon" title="{_tb_tip}">ℹ️</span></div></div>',
         unsafe_allow_html=True)
 
@@ -6785,14 +6770,16 @@ def page_guide():
                                subtitle="What each tab in the sidebar actually shows you."),
                unsafe_allow_html=True)
     _pages_tour = [
-        ("🏠", "Overview", "Your portfolio at a glance — equity curve, today's snapshot, live holdings summary."),
+        ("🏠", "Positional Dashboard", "Your portfolio at a glance — equity curve, today's snapshot, live holdings summary."),
+        ("⚡", "Intraday Dashboard", "The DaysLowVolumnBreakout intraday strategy — NIFTY breadth, today's candidates, live signal/position state."),
         ("📡", "Live Rebalance", "Today's proposed sells/buys/top-ups/stop-updates — review and execute, or watch auto-execute run."),
         ("💼", "Positions & Trade", "Your real, live broker holdings and intraday positions, plus manual order entry."),
         ("🔍", "Screener", "The full ranked universe — every gate, every score, browsable and chartable on demand."),
         ("📊", "Fundamentals", "The XBRL-based value-score scan across the universe, with the rubric behind every number."),
         ("⚙️", "Admin", "Every strategy setting in one form — stop mechanism, sizing, gates, automation toggles."),
         ("💰", "Ledger", "Deposits/withdrawals for accurate XIRR, plus DP charges and recurring costs."),
-        ("📒", "Tradebook", "Every trade this app has ever opened, with its entry snapshot, real exit type, and live P&L."),
+        ("📒", "Positional Tradebook", "Every trade this app has ever opened, with its entry snapshot, real exit type, and live P&L."),
+        ("📒", "Intraday Tradebook", "Every intraday position's target/stop/squareoff legs, with realized P&L and cost breakdown."),
         ("🗂️", "Job Log", "Status and history of every scheduled and manual job — did today's scan actually run?"),
         ("📜", "Rebalance History", "The full audit trail of every sell/buy/top-up/stop-update ever proposed."),
         ("🧪", "Backtest", "Run the exact same engine against history to test a change before trusting it live."),
@@ -6814,20 +6801,20 @@ def page_guide():
 # Navigation
 # ---------------------------------------------------------------------------
 
-page_cockpit_p = st.Page(page_cockpit, title="Overview", icon="🏠", default=True)
+page_cockpit_p = st.Page(page_cockpit, title="Positional Dashboard", icon="🏠", default=True)
 page_screener_p = st.Page(page_screener, title="Screener", icon="🔍")
 page_live_rebalance_p = st.Page(page_live_rebalance, title="Live Rebalance", icon="📡")
 page_positions_trade_p = st.Page(page_positions_trade, title="Positions & Trade", icon="💼")
 page_backtest_p = st.Page(page_backtest, title="Backtest", icon="🧪")
 page_fundamentals_p = st.Page(page_fundamentals, title="Fundamentals", icon="📊")
-page_tradebook_p = st.Page(page_tradebook, title="Tradebook", icon="📒")
+page_tradebook_p = st.Page(page_tradebook, title="Positional Tradebook", icon="📒")
 page_job_log_p = st.Page(page_job_log, title="Job Log", icon="🗂️")
 page_rebalance_history_p = st.Page(page_rebalance_history, title="Rebalance History", icon="📜")
 page_ledger_p = st.Page(page_ledger, title="Ledger", icon="💰")
 page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
 page_guide_p = st.Page(page_guide, title="Guide", icon="📘")
-page_intraday_dashboard_p = st.Page(page_intraday_dashboard, title="Dashboard", icon="⚡")
-page_intraday_tradebook_p = st.Page(page_intraday_tradebook, title="Tradebook", icon="📒")
+page_intraday_dashboard_p = st.Page(page_intraday_dashboard, title="Intraday Dashboard", icon="⚡")
+page_intraday_tradebook_p = st.Page(page_intraday_tradebook, title="Intraday Tradebook", icon="📒")
 
 # Injected before the sidebar (not per-page) so every page -- not just
 # Overview, where this design system started -- gets the same compact
@@ -6843,13 +6830,12 @@ with st.sidebar:
     # with position="hidden" below so routing/query-params/current-page
     # tracking keep working exactly as before, just with no visible
     # built-in widget -- this whole block is just the visible menu.
-    st.markdown('<p class="ov-side-section">Positional trading</p>', unsafe_allow_html=True)
-
     st.markdown('<p class="ov-side-label">Learn</p>', unsafe_allow_html=True)
     st.page_link(page_guide_p)
 
     st.markdown('<p class="ov-side-label">Trading</p>', unsafe_allow_html=True)
     st.page_link(page_cockpit_p)
+    st.page_link(page_intraday_dashboard_p)
     st.page_link(page_live_rebalance_p)
     st.page_link(page_positions_trade_p)
     st.page_link(page_screener_p)
@@ -6859,15 +6845,12 @@ with st.sidebar:
 
     st.markdown('<p class="ov-side-label">Audit Trail</p>', unsafe_allow_html=True)
     st.page_link(page_tradebook_p)
+    st.page_link(page_intraday_tradebook_p)
     st.page_link(page_job_log_p)
     st.page_link(page_rebalance_history_p)
 
     st.markdown('<p class="ov-side-label">Testing</p>', unsafe_allow_html=True)
     st.page_link(page_backtest_p)
-
-    st.markdown('<p class="ov-side-section">Intraday trading</p>', unsafe_allow_html=True)
-    st.page_link(page_intraday_dashboard_p)
-    st.page_link(page_intraday_tradebook_p)
 
     # Streamlit gives the current page's link no stable DOM marker (just an
     # unstable emotion class with a faint default tint), so CSS alone can't
