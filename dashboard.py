@@ -5945,9 +5945,10 @@ def page_intraday_dashboard():
                       f"{day['nifty_ratio']:.2f} (needs >2.0 for LONG or <0.5 for SHORT).")
         else:
             bias_tone = "green" if day["day_bias"] == "LONG" else "red"
-            _bias_note = f"ratio {day['nifty_ratio']:.2f}"
-            _bias_metric = _ov_metric_html("Day bias", day["day_bias"], _bias_note, tone=bias_tone)
-            st.markdown(f'<div class="ov-grid-metrics">{_bias_metric}</div>', unsafe_allow_html=True)
+            _bias_box = _ov_metric_html("Day bias", day["day_bias"], tone=bias_tone)
+            _ratio_box = _ov_metric_html("Ratio", f"{day['nifty_ratio']:.2f}")
+            st.markdown(f'<div class="ov-grid-metrics">{_bias_box}{_ratio_box}</div>',
+                       unsafe_allow_html=True)
 
     # --- Today's 2 candidates ------------------------------------------------
     st.markdown(
