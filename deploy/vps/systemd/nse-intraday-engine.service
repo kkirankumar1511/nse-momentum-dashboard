@@ -1,0 +1,15 @@
+[Unit]
+Description=NSE intraday DaysLowVolumnBreakout engine (paper by default; places real MIS orders only if intraday_live_enabled is on in Admin -- Strategy configuration)
+
+[Service]
+Type=oneshot
+# oneshot's default TimeoutStartSec (DefaultTimeoutStartSec, typically 90s)
+# applies to the ENTIRE ExecStart duration -- without overriding it here,
+# systemd would kill this ~6-hour intraday run (09:15/09:30-15:10 IST) as
+# a "timed out" start well before market close. The other scheduled jobs
+# (rebalance, gap-check, etc.) are quick oneshot scripts that finish well
+# under that default, which is why none of them need this.
+TimeoutStartSec=infinity
+User=nseapp
+WorkingDirectory=/opt/nse-momentum-dashboard
+ExecStart=/opt/nse-momentum-dashboard/.venv/bin/python intraday_engine.py

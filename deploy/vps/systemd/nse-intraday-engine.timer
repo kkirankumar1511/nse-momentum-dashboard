@@ -1,0 +1,16 @@
+[Unit]
+Description=Start the intraday engine daily at 09:10 (weekdays) -- a few minutes before NSE's 09:15 open, giving it time to warm up (Kite session, instrument maps) before its own internal wait-until-09:30 candidate-selection step. intraday_engine.py itself no-ops immediately on a non-trading day (nse_holidays.is_trading_day()) and reads config.STRATEGY["intraday_live_enabled"] fresh at startup to decide paper vs live -- this timer's job is only to start it, never to decide what mode it runs in.
+
+[Timer]
+OnCalendar=Mon..Fri 09:10
+# Same rationale as nse-rebalance.timer/nse-gap-check.timer: a missed
+# 09:10 slot (e.g. a VPS reboot right at market open) is still worth
+# catching up on rather than silently sitting out the whole day -- the
+# script's own holiday/trading-day check and its internal wait-until-
+# 09:30 step make a late start safe (it just picks up from wherever
+# real time already is).
+Persistent=true
+Unit=nse-intraday-engine.service
+
+[Install]
+WantedBy=timers.target
