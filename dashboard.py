@@ -39,6 +39,9 @@ import backtest_report
 import config
 import fundamentals_agent as fa
 import indicators
+import intraday_db as idb
+import intraday_market as imkt
+import intraday_strategy as istrat
 import kite_client
 import live_rebalance as lr
 import notify
@@ -789,6 +792,21 @@ section[data-testid="stSidebar"][aria-expanded="true"] {
 .ov-side-label {
     font-size:10.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
     color:var(--ov-text-muted); margin:0 4px !important;
+}
+/* Top-level sidebar section (Positional Trading / Intraday Trading) --
+   bolder and a touch larger than .ov-side-label's own sub-groups
+   (Trading/Audit Trail/etc, nested underneath each section), with a
+   hairline divider so the two-section split reads at a glance. */
+.ov-side-section {
+    font-size:12px; font-weight:800; letter-spacing:.03em;
+    color:var(--ov-text-primary); margin:0 4px !important;
+}
+[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(.ov-side-section) {
+    margin-top:16px !important; padding-top:12px !important; padding-bottom:2px !important;
+    border-top:1px solid var(--ov-border);
+}
+[data-testid="stSidebar"] [data-testid="stElementContainer"]:first-child:has(.ov-side-section) {
+    margin-top:4px !important; padding-top:0 !important; border-top:none;
 }
 /* Space around a section label lives on ITS OWN element-container (via
    margin-top/padding-bottom), not on the <p> itself -- a margin on the
@@ -5853,6 +5871,247 @@ _EXIT_TYPE_BADGES = {
 
 
 # ---------------------------------------------------------------------------
+# Page: Intraday Dashboard ("DaysLowVolumnBreakout" strategy)
+# ---------------------------------------------------------------------------
+
+_INTRADAY_EVENT_BADGES = {
+    "signal_formed": "ov-badge-amber", "expired": "ov-badge-gray",
+    "invalidated": "ov-badge-gray", "triggered": "ov-badge-green",
+    "target": "ov-badge-green", "stop": "ov-badge-red",
+    "squareoff": "ov-badge-blue",
+}
+
+
+def page_intraday_dashboard():
+    _mode = "live" if config.STRATEGY.get("intraday_live_enabled", False) else "paper"
+    _tip = html_lib.escape(
+        "The DaysLowVolumnBreakout intraday strategy -- day-bias from NIFTY "
+        "50 breadth, top-2 F&O momentum candidates, a low-volume pullback "
+        "signal, ATR-buffered breakout entry, half-target/half-15:10 exit. "
+        "Paper mode simulates every fill with zero real orders; switching "
+        "to live is a separate, deliberate step (Admin).")
+    _mode_badge = ('<span class="ov-badge ov-badge-red">🔴 LIVE</span>' if _mode == "live"
+                  else '<span class="ov-badge ov-badge-blue">📝 PAPER</span>')
+    st.markdown(
+        f'<div class="ov-header"><div><span class="ov-h1">⚡ Intraday Trading</span>'
+        f'<span class="ov-info-icon" title="{_tip}">ℹ️</span></div>'
+        f'<div class="ov-chips">{_mode_badge}'
+        f'<span class="ov-chip ov-chip-muted">{dt.date.today():%d %b %Y}</span></div></div>',
+        unsafe_allow_html=True)
+
+    today = dt.date.today().isoformat()
+    day = idb.get_day(today)
+    cap = idb.get_capital(_mode)
+
+    # --- Capital / P&L strip -------------------------------------------------
+    legs_today = idb.get_legs(date=today, mode=_mode)
+    today_pnl = float(legs_today["net_pnl"].sum()) if not legs_today.empty else 0.0
+    current_capital = cap["current_capital"] if cap else None
+    cum_pnl = (current_capital - cap["starting_capital"]) if cap else None
+    metrics = [
+        _ov_metric_html("Capital (compounding)",
+                       f"₹{current_capital:,.0f}" if current_capital is not None else "—",
+                       f"started at ₹{cap['starting_capital']:,.0f}" if cap else "not seeded yet"),
+        _ov_metric_html("Today's P&L", f"₹{today_pnl:+,.2f}" if legs_today is not None else "—",
+                       f"{len(legs_today)} leg(s) closed today" if not legs_today.empty else "nothing closed yet",
+                       value_cls=("ov-pos" if today_pnl >= 0 else "ov-neg")),
+        _ov_metric_html("Cumulative P&L", f"₹{cum_pnl:+,.2f}" if cum_pnl is not None else "—",
+                       "since inception", value_cls=("ov-pos" if (cum_pnl or 0) >= 0 else "ov-neg")),
+    ]
+    st.markdown(f'<div class="ov-grid-metrics">{"".join(metrics)}</div>', unsafe_allow_html=True)
+
+    st.divider()
+
+    # --- NIFTY 50: price + both breadth numbers -----------------------------
+    col_nifty, col_bias = st.columns(2)
+    with col_nifty:
+      with st.container(border=True, key="ov-card-intraday-nifty"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-blue);">'
+            '</span>NIFTY 50</p>', unsafe_allow_html=True)
+        try:
+            nifty_ltp = kite_client.get_ltp(["NIFTY 50"]).get("NIFTY 50")
+        except Exception:
+            nifty_ltp = None
+        try:
+            live_ad = imkt.fetch_advance_decline("NIFTY 50")
+        except Exception:
+            live_ad = None
+        c1, c2 = st.columns(2)
+        c1.metric("Current price", f"₹{nifty_ltp:,.2f}" if nifty_ltp else "—")
+        if live_ad:
+            c2.metric("Live A/D (whole day)",
+                     f"{live_ad['advances']} / {live_ad['declines']}",
+                     help="NSE's live, continuously-updating breadth -- informational only, "
+                          "NOT what today's day-bias was computed from (that's locked in at "
+                          "09:30 from first-15-min returns, see the card on the right).")
+        else:
+            c2.metric("Live A/D (whole day)", "—")
+
+    with col_bias:
+      with st.container(border=True, key="ov-card-intraday-bias"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-purple);">'
+            '</span>Today\'s day-bias (locked at 09:30)</p>', unsafe_allow_html=True)
+        if day is None:
+            st.info("No selection recorded yet today -- the engine runs this once, at 09:30.")
+        elif day["day_bias"] is None:
+            st.warning(f"⚠️ No trade today -- NIFTY 50 first-15-min ratio was "
+                      f"{day['nifty_ratio']:.2f} (needs >2.0 for LONG or <0.5 for SHORT).")
+        else:
+            bias_tone = "green" if day["day_bias"] == "LONG" else "red"
+            _bias_note = f"ratio {day['nifty_ratio']:.2f}"
+            _bias_metric = _ov_metric_html("Day bias", day["day_bias"], _bias_note, tone=bias_tone)
+            st.markdown(f'<div class="ov-grid-metrics">{_bias_metric}</div>', unsafe_allow_html=True)
+
+    # --- Today's 2 candidates ------------------------------------------------
+    st.markdown(
+        '<p class="ov-card-title" style="margin-top:16px;"><span class="ov-dot" '
+        'style="background:var(--ov-teal);"></span>Today\'s candidates</p>', unsafe_allow_html=True)
+    candidates = idb.get_candidates(today)
+    if candidates.empty:
+        st.info("No candidates selected yet today.")
+    else:
+        cand_cols = st.columns(len(candidates))
+        for col, (_, c) in zip(cand_cols, candidates.iterrows()):
+            with col:
+              with st.container(border=True, key=f"ov-card-cand-{c['symbol']}"):
+                try:
+                    ltp = kite_client.get_ltp([c["symbol"]]).get(c["symbol"])
+                except Exception:
+                    ltp = None
+                try:
+                    sector = su.stock_top_sector(c["symbol"], su.resolve_sector_profiles(
+                        [c["symbol"]], verbose=False))
+                except Exception:
+                    sector = None
+                st.markdown(f"**#{int(c['rank'])} {c['symbol']}**"
+                           + (f"  ·  _{sector}_" if sector else ""))
+                mc1, mc2 = st.columns(2)
+                mc1.metric("First-15m return", f"{c['ret_first15_pct']:+.2f}%")
+                mc2.metric("Current LTP", f"₹{ltp:,.2f}" if ltp else "—")
+
+                # signal / position state machine, most-recent first
+                sig = idb.get_active_signal(today, c["symbol"])
+                open_pos = idb.get_open_positions(date=today, mode=_mode)
+                open_pos = open_pos[open_pos["symbol"] == c["symbol"]]
+                if not open_pos.empty:
+                    p = open_pos.iloc[0]
+                    st.markdown(
+                        f'<span class="ov-badge ov-badge-green">Position open</span> '
+                        f'entry ₹{p["entry_price"]:.2f} · stop ₹{p["stop_price"]:.2f} · '
+                        f'target ₹{p["target_price"]:.2f} · qty {int(p["qty_remaining"])}/{int(p["qty"])}',
+                        unsafe_allow_html=True)
+                elif sig is not None:
+                    st.markdown(
+                        f'<span class="ov-badge ov-badge-amber">Signal active</span> '
+                        f'formed {sig["signal_time"]} -- high ₹{sig["signal_high"]:.2f} / '
+                        f'low ₹{sig["signal_low"]:.2f} -- watching for breakout',
+                        unsafe_allow_html=True)
+                else:
+                    all_positions_today = idb.get_positions(date=today, mode=_mode)
+                    sym_positions = all_positions_today[all_positions_today["symbol"] == c["symbol"]] \
+                        if not all_positions_today.empty else all_positions_today
+                    if not sym_positions.empty and (sym_positions["status"] == "closed").all():
+                        st.markdown('<span class="ov-badge ov-badge-gray">Day closed</span>',
+                                   unsafe_allow_html=True)
+                    else:
+                        st.markdown('<span class="ov-badge ov-badge-gray">No signal yet</span>',
+                                   unsafe_allow_html=True)
+
+    # --- Event timeline -------------------------------------------------------
+    st.markdown(
+        '<p class="ov-card-title" style="margin-top:16px;"><span class="ov-dot" '
+        'style="background:var(--ov-amber);"></span>Today\'s events</p>', unsafe_allow_html=True)
+    sigs = idb.get_signals(today)
+    legs = idb.get_legs(date=today, mode=_mode)
+    events = []
+    for _, s in sigs.iterrows():
+        events.append({"time": s["signal_time"], "symbol": s["symbol"],
+                      "event": "signal_formed" if s["status"] != "expired" else "expired",
+                      "detail": f"high ₹{s['signal_high']:.2f} / low ₹{s['signal_low']:.2f}"})
+    for _, l in legs.iterrows():
+        events.append({"time": l["exit_time"], "symbol": l["symbol"], "event": l["leg_type"],
+                      "detail": f"qty {int(l['qty'])} @ ₹{l['exit_price']:.2f} "
+                                f"(₹{l['net_pnl']:+,.2f})"})
+    if events:
+        ev_df = pd.DataFrame(events).sort_values("time")
+        st.markdown(
+            _ov_table_html(ev_df, columns=["time", "symbol", "event", "detail"],
+                          sym_cols=["symbol"], badges={"event": _INTRADAY_EVENT_BADGES}),
+            unsafe_allow_html=True)
+    else:
+        st.caption("Nothing has happened yet today.")
+
+
+# ---------------------------------------------------------------------------
+# Page: Intraday Tradebook
+# ---------------------------------------------------------------------------
+
+def page_intraday_tradebook():
+    _tip = html_lib.escape(
+        "Every intraday position this strategy has opened, split into its "
+        "exit legs (target half + 15:10 runner half, or a single stop leg) "
+        "-- separate from the momentum strategy's own Tradebook.")
+    st.markdown(
+        '<div class="ov-header"><div><span class="ov-h1">📒 Intraday Tradebook</span>'
+        f'<span class="ov-info-icon" title="{_tip}">ℹ️</span></div></div>',
+        unsafe_allow_html=True)
+
+    f1, f2 = st.columns(2)
+    with f1:
+        mode_filter = st.selectbox("Mode", ["paper", "live"], key="intraday_tb_mode")
+    with f2:
+        since = st.date_input("Since", value=dt.date.today() - dt.timedelta(days=30),
+                              key="intraday_tb_since")
+
+    positions = idb.get_positions(mode=mode_filter)
+    if not positions.empty:
+        positions = positions[positions["date"] >= since.isoformat()]
+    if positions.empty:
+        st.info(f"No {mode_filter} positions recorded yet.")
+        return
+
+    closed = positions[positions["status"] == "closed"]
+    legs_all = idb.get_legs(mode=mode_filter)
+    legs_all = legs_all[legs_all["date"] >= since.isoformat()] if not legs_all.empty else legs_all
+    total_pnl = float(legs_all["net_pnl"].sum()) if not legs_all.empty else 0.0
+    win_rate = (100 * (legs_all["net_pnl"] > 0).mean()) if not legs_all.empty else float("nan")
+
+    metrics = [
+        _ov_metric_html("Positions", str(len(positions)), f"{len(closed)} closed"),
+        _ov_metric_html("Legs", str(len(legs_all)), "target + stop/squareoff exits"),
+        _ov_metric_html("Net P&L", f"₹{total_pnl:+,.2f}", None,
+                       value_cls=("ov-pos" if total_pnl >= 0 else "ov-neg")),
+        _ov_metric_html("Win rate (legs)",
+                       f"{win_rate:.0f}%" if pd.notna(win_rate) else "—", None),
+    ]
+    st.markdown(f'<div class="ov-grid-metrics">{"".join(metrics)}</div>', unsafe_allow_html=True)
+    st.divider()
+
+    display = legs_all.merge(
+        positions[["id", "signal_time"]].rename(columns={"id": "position_id"}),
+        on="position_id", how="left") if not legs_all.empty else legs_all
+    if display.empty:
+        st.info("No legs recorded in this window.")
+        return
+    display = display.sort_values("exit_time", ascending=False)
+    show_cols = ["date", "symbol", "direction", "entry_time", "entry_price",
+                "leg_type", "qty", "exit_time", "exit_price", "gross_pnl", "costs", "net_pnl"]
+    show_cols = [c for c in show_cols if c in display.columns]
+    page = _ov_page_slice(display, key="intraday_tb", page_size=20)
+    st.markdown(
+        _ov_table_html(page, columns=show_cols, sym_cols=["symbol"],
+                      pnl_cols=["net_pnl"], num_fmt={
+                          "entry_price": "₹{:,.2f}", "exit_price": "₹{:,.2f}",
+                          "gross_pnl": "₹{:+,.2f}", "costs": "₹{:,.2f}", "qty": "{:.0f}"},
+                      badges={"leg_type": _INTRADAY_EVENT_BADGES,
+                             "direction": {"LONG": "ov-badge-green", "SHORT": "ov-badge-red"}}),
+        unsafe_allow_html=True)
+    _ov_pagination_controls(display, key="intraday_tb", page_size=20)
+
+
+# ---------------------------------------------------------------------------
 # Page: Tradebook
 # ---------------------------------------------------------------------------
 
@@ -6567,6 +6826,8 @@ page_rebalance_history_p = st.Page(page_rebalance_history, title="Rebalance Hist
 page_ledger_p = st.Page(page_ledger, title="Ledger", icon="💰")
 page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
 page_guide_p = st.Page(page_guide, title="Guide", icon="📘")
+page_intraday_dashboard_p = st.Page(page_intraday_dashboard, title="Dashboard", icon="⚡")
+page_intraday_tradebook_p = st.Page(page_intraday_tradebook, title="Tradebook", icon="📒")
 
 # Injected before the sidebar (not per-page) so every page -- not just
 # Overview, where this design system started -- gets the same compact
@@ -6582,6 +6843,8 @@ with st.sidebar:
     # with position="hidden" below so routing/query-params/current-page
     # tracking keep working exactly as before, just with no visible
     # built-in widget -- this whole block is just the visible menu.
+    st.markdown('<p class="ov-side-section">Positional trading</p>', unsafe_allow_html=True)
+
     st.markdown('<p class="ov-side-label">Learn</p>', unsafe_allow_html=True)
     st.page_link(page_guide_p)
 
@@ -6601,6 +6864,10 @@ with st.sidebar:
 
     st.markdown('<p class="ov-side-label">Testing</p>', unsafe_allow_html=True)
     st.page_link(page_backtest_p)
+
+    st.markdown('<p class="ov-side-section">Intraday trading</p>', unsafe_allow_html=True)
+    st.page_link(page_intraday_dashboard_p)
+    st.page_link(page_intraday_tradebook_p)
 
     # Streamlit gives the current page's link no stable DOM marker (just an
     # unstable emotion class with a faint default tint), so CSS alone can't
@@ -6720,5 +6987,6 @@ with st.container(key="ov-topbar"):
 nav = st.navigation([page_cockpit_p, page_live_rebalance_p, page_positions_trade_p,
                     page_screener_p, page_fundamentals_p, page_tradebook_p,
                     page_job_log_p, page_rebalance_history_p, page_backtest_p,
-                    page_admin_p, page_ledger_p, page_guide_p], position="hidden")
+                    page_admin_p, page_ledger_p, page_guide_p,
+                    page_intraday_dashboard_p, page_intraday_tradebook_p], position="hidden")
 nav.run()
