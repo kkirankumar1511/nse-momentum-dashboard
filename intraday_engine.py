@@ -27,7 +27,7 @@ import config
 import intraday_db as idb
 import intraday_market as mkt
 import intraday_strategy as strat
-import intraday_ticker
+import live_ticker
 import kite_client
 import nse_holidays
 
@@ -35,7 +35,7 @@ EMA_WARMUP_DAYS = 120  # >> "several weeks" Spec.md §1 asks for, comfortably co
 DEFAULT_PAPER_CAPITAL = 1_000_000.0
 # How often the loop wakes up to check the ticker's in-memory cache and
 # wall-clock conditions (candle boundary, 15:10 squareoff) -- NOT a network
-# poll cadence any more (see intraday_ticker.py): trigger/stop/target prices
+# poll cadence any more (see live_ticker.py): trigger/stop/target prices
 # themselves come from live WebSocket ticks the instant they arrive, this
 # just bounds how quickly the loop notices them.
 CHECK_INTERVAL_SECONDS = 1
@@ -301,7 +301,7 @@ def _last_closed_candle_label(now: dt.datetime) -> dt.datetime:
     return floor - dt.timedelta(minutes=5)
 
 
-def _get_live_ltp(ticker: intraday_ticker.LiveTicker, token: int, symbol: str) -> float | None:
+def _get_live_ltp(ticker: live_ticker.LiveTicker, token: int, symbol: str) -> float | None:
     """Prefers the live WebSocket tick; falls back to a one-off REST
     get_ltp() call if the feed has gone stale (e.g. mid-reconnect) or
     hasn't produced a tick for this token yet, so a quiet patch in the
@@ -366,10 +366,10 @@ def run_live(mode: str = "paper") -> None:
 
     # Live tick feed (WebSocket, not REST polling) -- both candidates'
     # trigger/stop/target checks below react to real ticks as they
-    # arrive instead of a fixed poll cadence. See intraday_ticker.py.
+    # arrive instead of a fixed poll cadence. See live_ticker.py.
     inst_map = kite_client.instrument_map()
     token_by_symbol = {t.symbol: inst_map[t.symbol] for t in trackers if t.symbol in inst_map}
-    ticker = intraday_ticker.LiveTicker({tok: sym for sym, tok in token_by_symbol.items()})
+    ticker = live_ticker.LiveTicker({tok: sym for sym, tok in token_by_symbol.items()})
     ticker.start()
 
     try:

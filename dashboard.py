@@ -42,6 +42,7 @@ import indicators
 import intraday_db as idb
 import intraday_market as imkt
 import intraday_strategy as istrat
+import live_ticker
 import kite_client
 import live_rebalance as lr
 import notify
@@ -5866,6 +5867,61 @@ _INTRADAY_EVENT_BADGES = {
     "squareoff": "ov-badge-blue",
 }
 
+LIVE_TICK_STALE_SECONDS = 20  # fall back to a REST quote if the feed goes quiet this long
+
+
+@st.cache_resource(show_spinner=False)
+def _get_dashboard_ticker() -> live_ticker.LiveTicker:
+    """One persistent WebSocket ticker for the whole Streamlit server
+    process, NOT recreated on every rerun -- st.cache_resource is the
+    idiom for exactly this (a resource that should survive Streamlit's
+    own rerun-on-every-interaction model). mode="quote" so each tick
+    carries ohlc.close, needed for the day-change % shown alongside
+    every live price here (plain mode="ltp", what the intraday engine
+    itself uses, has no ohlc). Starts with no tokens subscribed --
+    _ensure_subscribed() below adds them lazily as symbols become
+    relevant (NIFTY 50 up front; candidates/sectors once known)."""
+    return live_ticker.LiveTicker({}, mode="quote")
+
+
+def _ensure_subscribed(ticker: live_ticker.LiveTicker, symbols: list[str]) -> None:
+    """Adds any of `symbols` not already subscribed (resolved via
+    kite_client's equity or index instrument map, whichever has it) and
+    connects the ticker on first real use -- st.cache_resource means
+    this only actually does anything the first time a given symbol is
+    requested across the whole process's lifetime, not on every rerun."""
+    new_tokens = {}
+    for sym in symbols:
+        if sym in ticker.token_by_symbol:
+            continue
+        try:
+            tok = kite_client.instrument_map().get(sym) or kite_client.index_instrument_map().get(sym)
+        except Exception:
+            tok = None
+        if tok is not None:
+            new_tokens[tok] = sym
+    if new_tokens:
+        ticker.add_tokens(new_tokens)
+    if not ticker.started and ticker.tokens:
+        ticker.start(timeout=8.0)
+
+
+def _live_price_and_change(ticker: live_ticker.LiveTicker, symbol: str) -> tuple[float | None, float | None]:
+    """Prefers a fresh live tick; falls back to a one-off REST quote if
+    the feed hasn't produced a tick for this symbol yet (e.g. right
+    after subscribing, or a stale/reconnecting feed) -- so a quiet patch
+    in the feed can't leave the dashboard showing nothing."""
+    token = ticker.token_by_symbol.get(symbol)
+    if token is not None:
+        age = ticker.last_tick_age(token)
+        if age is not None and age <= LIVE_TICK_STALE_SECONDS:
+            return ticker.get_ltp_and_change(token)
+    try:
+        q = kite_client.get_quote_with_change([symbol]).get(symbol)
+    except Exception:
+        q = None
+    return (q["last_price"], q["change_pct"]) if q else (None, None)
+
 
 def page_intraday_dashboard():
     _mode = "live" if config.STRATEGY.get("intraday_live_enabled", False) else "paper"
@@ -5907,6 +5963,13 @@ def page_intraday_dashboard():
 
     st.divider()
 
+    # Persistent WebSocket ticker for this whole server process (see
+    # _get_dashboard_ticker()) -- NIFTY 50 is always wanted; candidates/
+    # sectors get subscribed below once known, each only actually
+    # triggering a new subscription the first time it's seen.
+    ticker = _get_dashboard_ticker()
+    _ensure_subscribed(ticker, ["NIFTY 50"])
+
     # --- NIFTY 50: price + both breadth numbers -----------------------------
     col_nifty, col_bias = st.columns(2)
     with col_nifty:
@@ -5914,19 +5977,15 @@ def page_intraday_dashboard():
         st.markdown(
             '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-blue);">'
             '</span>NIFTY 50</p>', unsafe_allow_html=True)
-        try:
-            nifty_q = kite_client.get_quote_with_change(["NIFTY 50"]).get("NIFTY 50")
-        except Exception:
-            nifty_q = None
+        nifty_price, nifty_chg = _live_price_and_change(ticker, "NIFTY 50")
         try:
             live_ad = imkt.fetch_advance_decline("NIFTY 50")
         except Exception:
             live_ad = None
         c1, c2 = st.columns(2)
-        if nifty_q:
-            _chg = nifty_q["change_pct"]
-            c1.metric("Current price", f"₹{nifty_q['last_price']:,.2f}",
-                     f"{_chg:+.2f}%" if _chg is not None else None)
+        if nifty_price is not None:
+            c1.metric("Current price", f"₹{nifty_price:,.2f}",
+                     f"{nifty_chg:+.2f}%" if nifty_chg is not None else None)
         else:
             c1.metric("Current price", "—")
         if live_ad:
@@ -5964,14 +6023,12 @@ def page_intraday_dashboard():
     if candidates.empty:
         st.info("No candidates selected yet today.")
     else:
+        _ensure_subscribed(ticker, list(candidates["symbol"]))
         cand_cols = st.columns(len(candidates))
         for col, (_, c) in zip(cand_cols, candidates.iterrows()):
             with col:
               with st.container(border=True, key=f"ov-card-cand-{c['symbol']}"):
-                try:
-                    cand_q = kite_client.get_quote_with_change([c["symbol"]]).get(c["symbol"])
-                except Exception:
-                    cand_q = None
+                cand_price, cand_chg = _live_price_and_change(ticker, c["symbol"])
                 try:
                     _profile = su.resolve_sector_profiles([c["symbol"]], verbose=False).get(c["symbol"], {})
                     sector = _profile.get("primary_sector")
@@ -5982,11 +6039,10 @@ def page_intraday_dashboard():
                 _ret_val = c["ret_first15_pct"]
                 _ret_cls = "ov-pos" if _ret_val >= 0 else "ov-neg"
                 _ret_box = _ov_metric_html("First-15m return", f"{_ret_val:+.2f}%", value_cls=_ret_cls)
-                if cand_q:
-                    _chg = cand_q["change_pct"]
-                    _chg_note = f"{_chg:+.2f}% today" if _chg is not None else None
-                    _chg_cls = "ov-pos" if (_chg or 0) >= 0 else "ov-neg"
-                    _ltp_box = _ov_metric_html("Current LTP", f"₹{cand_q['last_price']:,.2f}",
+                if cand_price is not None:
+                    _chg_note = f"{cand_chg:+.2f}% today" if cand_chg is not None else None
+                    _chg_cls = "ov-pos" if (cand_chg or 0) >= 0 else "ov-neg"
+                    _ltp_box = _ov_metric_html("Current LTP", f"₹{cand_price:,.2f}",
                                               _chg_note, note_cls=_chg_cls)
                 else:
                     _ltp_box = _ov_metric_html("Current LTP", "—")
@@ -5998,10 +6054,8 @@ def page_intraday_dashboard():
                 # sector index (e.g. NIFTY BANK), so its sector strength is
                 # visible right alongside the stock itself.
                 if sector:
-                    try:
-                        sector_q = kite_client.get_quote_with_change([sector]).get(sector)
-                    except Exception:
-                        sector_q = None
+                    _ensure_subscribed(ticker, [sector])
+                    sector_price, sector_chg = _live_price_and_change(ticker, sector)
                     try:
                         sector_ad = imkt.fetch_advance_decline(sector)
                     except Exception:
@@ -6010,12 +6064,11 @@ def page_intraday_dashboard():
                         f'<p class="ov-card-title" style="margin-top:10px;font-size:12px;">'
                         f'<span class="ov-dot" style="background:var(--ov-blue);"></span>'
                         f'Sector · {html_lib.escape(sector)}</p>', unsafe_allow_html=True)
-                    if sector_q:
-                        _s_chg = sector_q["change_pct"]
-                        _s_chg_note = f"{_s_chg:+.2f}% today" if _s_chg is not None else None
-                        _s_chg_cls = "ov-pos" if (_s_chg or 0) >= 0 else "ov-neg"
+                    if sector_price is not None:
+                        _s_chg_note = f"{sector_chg:+.2f}% today" if sector_chg is not None else None
+                        _s_chg_cls = "ov-pos" if (sector_chg or 0) >= 0 else "ov-neg"
                         _sec_price_box = _ov_metric_html(
-                            "Sector price", f"₹{sector_q['last_price']:,.2f}",
+                            "Sector price", f"₹{sector_price:,.2f}",
                             _s_chg_note, note_cls=_s_chg_cls)
                     else:
                         _sec_price_box = _ov_metric_html("Sector price", "—")
