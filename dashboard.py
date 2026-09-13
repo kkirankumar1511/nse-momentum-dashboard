@@ -5968,8 +5968,8 @@ def page_intraday_dashboard():
                 except Exception:
                     ltp = None
                 try:
-                    sector = su.stock_top_sector(c["symbol"], su.resolve_sector_profiles(
-                        [c["symbol"]], verbose=False))
+                    _profile = su.resolve_sector_profiles([c["symbol"]], verbose=False).get(c["symbol"], {})
+                    sector = _profile.get("primary_sector")
                 except Exception:
                     sector = None
                 st.markdown(f"**#{int(c['rank'])} {c['symbol']}**"
@@ -5980,6 +5980,31 @@ def page_intraday_dashboard():
                 _ltp_box = _ov_metric_html("Current LTP", f"₹{ltp:,.2f}" if ltp else "—")
                 st.markdown(f'<div class="ov-grid-metrics">{_ret_box}{_ltp_box}</div>',
                            unsafe_allow_html=True)
+
+                # Sector snapshot -- same current-price + A/D breadth pair
+                # as the NIFTY 50 card above, just for this candidate's own
+                # sector index (e.g. NIFTY BANK), so its sector strength is
+                # visible right alongside the stock itself.
+                if sector:
+                    try:
+                        sector_ltp = kite_client.get_ltp([sector]).get(sector)
+                    except Exception:
+                        sector_ltp = None
+                    try:
+                        sector_ad = imkt.fetch_advance_decline(sector)
+                    except Exception:
+                        sector_ad = None
+                    st.markdown(
+                        f'<p class="ov-card-title" style="margin-top:10px;font-size:12px;">'
+                        f'<span class="ov-dot" style="background:var(--ov-blue);"></span>'
+                        f'Sector · {html_lib.escape(sector)}</p>', unsafe_allow_html=True)
+                    _sec_price_box = _ov_metric_html(
+                        "Sector price", f"₹{sector_ltp:,.2f}" if sector_ltp else "—")
+                    _sec_ad_box = _ov_metric_html(
+                        "Sector A/D",
+                        f"{sector_ad['advances']} / {sector_ad['declines']}" if sector_ad else "—")
+                    st.markdown(f'<div class="ov-grid-metrics">{_sec_price_box}{_sec_ad_box}</div>',
+                               unsafe_allow_html=True)
 
                 # signal / position state machine, most-recent first
                 sig = idb.get_active_signal(today, c["symbol"])
