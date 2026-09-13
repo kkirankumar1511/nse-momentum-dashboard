@@ -425,6 +425,28 @@ _STRATEGY_DEFAULTS = {
     # re-checking against your own risk tolerance rather than assuming
     # it's forever the right choice.
     "rebalance_cadence": "daily",
+
+    # Intraday "DaysLowVolumnBreakout" strategy (separate from everything
+    # above, which is all the CNC swing/momentum strategy) -- gates
+    # intraday_engine.py's --live CLI switch (dashboard.py's page_intraday_
+    # dashboard() and intraday_engine.py's run_live() both check this via
+    # config.STRATEGY.get(..., False), so it safely defaults to paper even
+    # before this key existed at all). False by default -- flipping it on
+    # makes the next `python intraday_engine.py --live` run place real MIS
+    # orders with real capital; a currently-running paper engine process
+    # does NOT hot-swap, it needs restarting with --live to pick this up.
+    "intraday_live_enabled": False,
+
+    # Starting capital for the intraday strategy's OWN live capital track
+    # (intraday_capital_state, mode='live' -- kept fully separate from the
+    # CNC swing book's cash and from the intraday strategy's own paper-mode
+    # capital, so switching to live never inherits paper's simulated P&L
+    # and never touches the swing book's real cash). Only takes effect the
+    # FIRST time live mode actually runs (intraday_db.ensure_capital_
+    # seeded() no-ops if a live capital row already exists) -- editing this
+    # value after live trading has started does NOT reset the compounded
+    # current_capital, by design.
+    "intraday_live_capital": 500_000.0,
 }
 
 # Keys the Backtest page's run_cfg-builder overrides from its own widgets

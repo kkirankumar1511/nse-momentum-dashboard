@@ -2638,6 +2638,57 @@ def page_admin():
 
     st.markdown(
         '<p class="ov-card-title" style="margin-top:14px;"><span class="ov-dot" '
+        'style="background:var(--ov-red);"></span>⚡ Intraday strategy (DaysLowVolumnBreakout)</p>',
+        unsafe_allow_html=True)
+    with st.container(border=True, key="ov-card-admin-intraday"):
+        st.caption(
+            "Completely separate from the swing/momentum settings above -- "
+            "its own capital track, its own live/paper switch. Paper mode "
+            "simulates every fill with zero real orders; enabling live mode "
+            "makes the next `python intraday_engine.py --live` run place "
+            "real MIS orders with real capital. A paper-mode engine "
+            "process already running does not hot-swap -- it must be "
+            "restarted with --live after enabling this.")
+        _live_cap_row = idb.get_capital("live")
+        with st.form("intraday_strategy_form"):
+            ic1, ic2 = st.columns(2)
+            intraday_live_enabled = ic1.checkbox(
+                "Enable live intraday trading", value=bool(config.STRATEGY.get("intraday_live_enabled", False)),
+                help="OFF by default. Places real MIS (5x leveraged) intraday "
+                     "orders once the engine is restarted with --live -- a "
+                     "materially different risk profile from the CNC swing "
+                     "book already running live. Only flip this on once "
+                     "you've watched paper mode work correctly for real "
+                     "trading days.")
+            intraday_live_capital = ic2.number_input(
+                "Live capital allocation (₹)", min_value=0.0, step=10_000.0,
+                value=float(_live_cap_row["starting_capital"]) if _live_cap_row
+                     else float(config.STRATEGY.get("intraday_live_capital", 500_000.0)),
+                disabled=_live_cap_row is not None,
+                help=("Already seeded at ₹{:,.0f} the first time live mode ran -- "
+                     "editing this field no longer has any effect, so a save "
+                     "here can never silently reset an already-compounding "
+                     "live account.".format(_live_cap_row["starting_capital"])
+                     if _live_cap_row else
+                     "Seeded as the live track's starting capital the FIRST "
+                     "time live mode actually runs (intraday_capital_state, "
+                     "mode='live') -- separate from the paper track's "
+                     "capital and from the swing book's cash. Change this "
+                     "before going live for the first time; it has no "
+                     "effect afterward."))
+            intraday_submitted = st.form_submit_button("Save intraday settings", type="primary")
+        if intraday_submitted:
+            idb.ensure_capital_seeded("live", float(intraday_live_capital))
+            intraday_updates = {
+                "intraday_live_enabled": bool(intraday_live_enabled),
+                "intraday_live_capital": float(intraday_live_capital),
+            }
+            state_db.update_strategy_config(intraday_updates)
+            config.STRATEGY.update(intraday_updates)
+            st.success("Intraday settings saved — in effect immediately.")
+
+    st.markdown(
+        '<p class="ov-card-title" style="margin-top:14px;"><span class="ov-dot" '
         'style="background:var(--ov-blue);"></span>🔔 Push notifications</p>',
         unsafe_allow_html=True)
     with st.container(border=True, key="ov-card-admin-push"):
