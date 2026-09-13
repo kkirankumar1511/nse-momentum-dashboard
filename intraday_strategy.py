@@ -193,6 +193,90 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
     return None
 
 
+# ---------------------------------------------------------------------------
+# Incremental (candle-by-candle) version of find_entry()'s walk-forward
+# loop -- for live/paper use, where candles arrive one at a time rather
+# than as a whole day at once. find_entry() itself stays untouched and
+# is still what backtests/verification use; this is an additive,
+# separately-verified equivalent (see verify_step_candle.py: replayed
+# candle-by-candle, this produces IDENTICAL trigger decisions to
+# find_entry() over the same 5-year ground truth).
+# ---------------------------------------------------------------------------
+
+def new_signal_state() -> dict:
+    """A fresh per-candidate-per-day state for step_candle()."""
+    return {"invalidated": False, "active_signal": None, "breakout_counter": 0}
+
+
+def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | None,
+                sig_atr: float | None, vol_min_so_far: float) -> tuple[dict, dict | None]:
+    """One incremental step of the §3.2 walk-forward loop. Does NOT
+    mutate `state` -- returns a new state dict (caller keeps its own
+    running copy, e.g. one per candidate per day).
+
+    `e21`/`sig_atr`: this candle's own EMA21/ATR14 values (the caller
+    looks these up from its continuous series, same as find_entry()).
+    `vol_min_so_far`: the running minimum volume from 09:15 through and
+    INCLUDING this candle -- the caller must update its own running min
+    with this candle's volume BEFORE calling step_candle (find_entry()'s
+    vol_so_far_full.loc[:ts].min() is inclusive of ts).
+
+    Returns (new_state, event) -- event is None (nothing happened this
+    candle) or one of:
+      {"type": "invalidated"}
+      {"type": "signal_formed", "time", "high", "low", "atr"}
+      {"type": "signal_expired"}
+      {"type": "triggered", "signal_time", "entry_time", "entry_price", "stop_price"}
+    """
+    if state["invalidated"]:
+        return state, None
+    state = dict(state)
+
+    if pd.notna(e21):
+        if direction == LONG and row["close"] < e21:
+            state["invalidated"] = True
+        elif direction == SHORT and row["close"] > e21:
+            state["invalidated"] = True
+    if state["invalidated"]:
+        state["active_signal"] = None
+        return state, {"type": "invalidated"}
+
+    active = state["active_signal"]
+    if active is not None:
+        state["breakout_counter"] += 1
+        buf = active["atr"] * ATR_PCT_BUFFER
+        if direction == LONG:
+            trigger_level = active["hi"] + buf
+            triggered = row["high"] >= trigger_level
+        else:
+            trigger_level = active["lo"] - buf
+            triggered = row["low"] <= trigger_level
+        if triggered:
+            stop_price = (active["lo"] - buf) if direction == LONG else (active["hi"] + buf)
+            event = {"type": "triggered", "signal_time": active["time"], "entry_time": ts,
+                    "entry_price": trigger_level, "stop_price": stop_price}
+            state["active_signal"] = None
+            return state, event
+        if state["breakout_counter"] >= BREAKOUT_WINDOW:
+            state["active_signal"] = None
+            state["breakout_counter"] = 0
+            return state, {"type": "signal_expired"}
+        return state, None
+
+    if ts.time() > NEW_SIGNAL_CUTOFF:
+        return state, None
+    is_red = row["close"] < row["open"]
+    is_green = row["close"] > row["open"]
+    wants_color = is_red if direction == LONG else is_green
+    is_lowest_volume = row["volume"] <= vol_min_so_far * (1 + VOL_THRESHOLD_PCT)
+    if wants_color and is_lowest_volume and pd.notna(sig_atr) and sig_atr > 0:
+        state["active_signal"] = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr}
+        state["breakout_counter"] = 0
+        return state, {"type": "signal_formed", "time": ts, "high": row["high"],
+                       "low": row["low"], "atr": sig_atr}
+    return state, None
+
+
 def target_price(entry: float, stop: float, direction: str,
                  reward_risk: float = REWARD_RISK) -> float:
     """Spec.md §5 -- flat reward:risk target."""
