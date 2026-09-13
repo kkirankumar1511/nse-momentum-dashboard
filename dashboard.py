@@ -5945,7 +5945,8 @@ def page_intraday_dashboard():
                       f"{day['nifty_ratio']:.2f} (needs >2.0 for LONG or <0.5 for SHORT).")
         else:
             bias_tone = "green" if day["day_bias"] == "LONG" else "red"
-            _bias_box = _ov_metric_html("Day bias", day["day_bias"], tone=bias_tone)
+            bias_cls = "ov-pos" if day["day_bias"] == "LONG" else "ov-neg"
+            _bias_box = _ov_metric_html("Day bias", day["day_bias"], tone=bias_tone, value_cls=bias_cls)
             _ratio_box = _ov_metric_html("Ratio", f"{day['nifty_ratio']:.2f}")
             st.markdown(f'<div class="ov-grid-metrics">{_bias_box}{_ratio_box}</div>',
                        unsafe_allow_html=True)
@@ -5973,9 +5974,12 @@ def page_intraday_dashboard():
                     sector = None
                 st.markdown(f"**#{int(c['rank'])} {c['symbol']}**"
                            + (f"  ·  _{sector}_" if sector else ""))
-                mc1, mc2 = st.columns(2)
-                mc1.metric("First-15m return", f"{c['ret_first15_pct']:+.2f}%")
-                mc2.metric("Current LTP", f"₹{ltp:,.2f}" if ltp else "—")
+                _ret_val = c["ret_first15_pct"]
+                _ret_cls = "ov-pos" if _ret_val >= 0 else "ov-neg"
+                _ret_box = _ov_metric_html("First-15m return", f"{_ret_val:+.2f}%", value_cls=_ret_cls)
+                _ltp_box = _ov_metric_html("Current LTP", f"₹{ltp:,.2f}" if ltp else "—")
+                st.markdown(f'<div class="ov-grid-metrics">{_ret_box}{_ltp_box}</div>',
+                           unsafe_allow_html=True)
 
                 # signal / position state machine, most-recent first
                 sig = idb.get_active_signal(today, c["symbol"])
@@ -5983,17 +5987,30 @@ def page_intraday_dashboard():
                 open_pos = open_pos[open_pos["symbol"] == c["symbol"]]
                 if not open_pos.empty:
                     p = open_pos.iloc[0]
+                    st.markdown('<span class="ov-badge ov-badge-green">Position open</span>',
+                               unsafe_allow_html=True)
+                    _entry_box = _ov_metric_html("Entry", f"₹{p['entry_price']:.2f}")
+                    _stop_box = _ov_metric_html("Stop", f"₹{p['stop_price']:.2f}",
+                                               tone="red", value_cls="ov-neg")
+                    _target_box = _ov_metric_html("Target", f"₹{p['target_price']:.2f}",
+                                                 tone="green", value_cls="ov-pos")
+                    _qty_box = _ov_metric_html("Qty remaining",
+                                              f"{int(p['qty_remaining'])}/{int(p['qty'])}")
                     st.markdown(
-                        f'<span class="ov-badge ov-badge-green">Position open</span> '
-                        f'entry ₹{p["entry_price"]:.2f} · stop ₹{p["stop_price"]:.2f} · '
-                        f'target ₹{p["target_price"]:.2f} · qty {int(p["qty_remaining"])}/{int(p["qty"])}',
-                        unsafe_allow_html=True)
+                        f'<div class="ov-grid-metrics">{_entry_box}{_stop_box}'
+                        f'{_target_box}{_qty_box}</div>', unsafe_allow_html=True)
                 elif sig is not None:
-                    st.markdown(
-                        f'<span class="ov-badge ov-badge-amber">Signal active</span> '
-                        f'formed {sig["signal_time"]} -- high ₹{sig["signal_high"]:.2f} / '
-                        f'low ₹{sig["signal_low"]:.2f} -- watching for breakout',
-                        unsafe_allow_html=True)
+                    _buf = sig["signal_atr"] * istrat.ATR_PCT_BUFFER
+                    _proj_entry = (sig["signal_high"] + _buf if day and day["day_bias"] == istrat.LONG
+                                  else sig["signal_low"] - _buf)
+                    st.markdown('<span class="ov-badge ov-badge-amber">Signal active</span>',
+                               unsafe_allow_html=True)
+                    _hl_box = _ov_metric_html("Signal high / low",
+                                             f"₹{sig['signal_high']:.2f} / ₹{sig['signal_low']:.2f}")
+                    _entry_box = _ov_metric_html("Entry (on breakout)", f"₹{_proj_entry:.2f}")
+                    st.markdown(f'<div class="ov-grid-metrics">{_hl_box}{_entry_box}</div>',
+                               unsafe_allow_html=True)
+                    st.caption(f"formed {sig['signal_time']} · watching for breakout")
                 else:
                     all_positions_today = idb.get_positions(date=today, mode=_mode)
                     sym_positions = all_positions_today[all_positions_today["symbol"] == c["symbol"]] \
@@ -6088,7 +6105,7 @@ def page_intraday_tradebook():
     page = _ov_page_slice(display, key="intraday_tb", page_size=20)
     st.markdown(
         _ov_table_html(page, columns=show_cols, sym_cols=["symbol"],
-                      pnl_cols=["net_pnl"], num_fmt={
+                      pnl_cols=["gross_pnl", "net_pnl"], num_fmt={
                           "entry_price": "₹{:,.2f}", "exit_price": "₹{:,.2f}",
                           "gross_pnl": "₹{:+,.2f}", "costs": "₹{:,.2f}", "qty": "{:.0f}"},
                       badges={"leg_type": _INTRADAY_EVENT_BADGES,
