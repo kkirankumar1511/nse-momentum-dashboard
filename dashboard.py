@@ -6844,7 +6844,7 @@ def page_guide():
 # Navigation
 # ---------------------------------------------------------------------------
 
-page_cockpit_p = st.Page(page_cockpit, title="Positional Dashboard", icon="🏠", default=True)
+page_cockpit_p = st.Page(page_cockpit, title="Positional Dashboard", icon="🏠")
 page_screener_p = st.Page(page_screener, title="Screener", icon="🔍")
 page_live_rebalance_p = st.Page(page_live_rebalance, title="Live Rebalance", icon="📡")
 page_positions_trade_p = st.Page(page_positions_trade, title="Positions & Trade", icon="💼")
@@ -6856,7 +6856,7 @@ page_rebalance_history_p = st.Page(page_rebalance_history, title="Rebalance Hist
 page_ledger_p = st.Page(page_ledger, title="Ledger", icon="💰")
 page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
 page_guide_p = st.Page(page_guide, title="Guide", icon="📘")
-page_intraday_dashboard_p = st.Page(page_intraday_dashboard, title="Intraday Dashboard", icon="⚡")
+page_intraday_dashboard_p = st.Page(page_intraday_dashboard, title="Intraday Dashboard", icon="⚡", default=True)
 page_intraday_tradebook_p = st.Page(page_intraday_tradebook, title="Intraday Tradebook", icon="📒")
 
 # Injected before the sidebar (not per-page) so every page -- not just
@@ -6877,8 +6877,8 @@ with st.sidebar:
     st.page_link(page_guide_p)
 
     st.markdown('<p class="ov-side-label">Trading</p>', unsafe_allow_html=True)
-    st.page_link(page_cockpit_p)
     st.page_link(page_intraday_dashboard_p)
+    st.page_link(page_cockpit_p)
     st.page_link(page_live_rebalance_p)
     st.page_link(page_positions_trade_p)
     st.page_link(page_screener_p)
