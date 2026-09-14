@@ -108,7 +108,14 @@ def select_candidates(fno_ret_first15: pd.Series, bias: str, n: int = 2) -> pd.S
     """Spec.md §2.3-2.4 -- rank the F&O universe (NOT NIFTY50 -- that's
     only used for the breadth ratio above) by first15_return, best-first
     for LONG / worst-first for SHORT, and take the top `n`. No sector or
-    trend filter (Spec.md §9.1 -- explicitly tested and rejected)."""
+    trend filter (Spec.md §9.1 -- explicitly tested and rejected).
+
+    An RVOL (relative volume) pre-filter was tried and backtested here
+    (5yr replay, 2021-2026): it cut net P&L by 62% (Rs.15.7L -> Rs.6.0L)
+    by swapping out the day's strongest first15m movers for weaker ones
+    that merely had higher relative volume -- diluting exactly the
+    signal this strategy depends on. Removed; do not re-add without a
+    backtest showing it actually helps."""
     ranked = fno_ret_first15.sort_values(ascending=(bias == SHORT))
     return ranked.head(n)
 
