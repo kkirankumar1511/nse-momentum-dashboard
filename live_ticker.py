@@ -57,6 +57,7 @@ class LiveTicker:
         self._last_tick_at: dict[int, dt.datetime] = {}
         self._connected = threading.Event()
         self.started = False  # True once start() has been called (even if the handshake is still pending)
+        self._consecutive_403s = 0  # reset on any successful connect -- see _give_up_if_auth_failure()
         self.kws = KiteTicker(config.KITE_API_KEY, config.KITE_ACCESS_TOKEN)
         self.kws.on_ticks = self._on_ticks
         self.kws.on_connect = self._on_connect
@@ -109,6 +110,7 @@ class LiveTicker:
             self.kws.set_mode(self._kite_mode(self.kws), new_tokens)
 
     def _on_connect(self, ws, response) -> None:
+        self._consecutive_403s = 0  # a real connect proves the credential itself is fine
         ws.subscribe(self.tokens)
         ws.set_mode(self._kite_mode(ws), self.tokens)
         self._connected.set()
@@ -117,28 +119,48 @@ class LiveTicker:
 
     def _on_close(self, ws, code, reason) -> None:
         print(f"[live_ticker] closed: {code} {reason}")
-        self._give_up_if_auth_failure(ws, reason)
 
     def _on_error(self, ws, code, reason) -> None:
         print(f"[live_ticker] error: {code} {reason}")
         self._give_up_if_auth_failure(ws, reason)
 
+    # A single real 403 fires BOTH on_error and on_close for the same
+    # event -- only counted here (on_error), so this threshold means
+    # roughly this many distinct rejected handshakes, not callback calls.
+    _MAX_CONSECUTIVE_403S = 3
+
     def _give_up_if_auth_failure(self, ws, reason) -> None:
-        """A bad/expired access token gets rejected with a 403 on every
-        single handshake attempt -- left to KiteTicker's own default
+        """A genuinely bad/expired access token gets rejected with a 403
+        on EVERY handshake attempt -- left to KiteTicker's own default
         retry behavior, that's an unthrottled reconnect loop (observed:
         dozens of attempts per second, indefinitely), which does nothing
         useful and burns CPU/network for as long as the process runs.
-        Retrying makes sense for a transient network blip; it can never
-        succeed for a rejected credential, so stop immediately instead
-        of waiting for reconnect_max_tries to (eventually) exhaust."""
-        if reason and "403" in str(reason):
-            print("[live_ticker] 403 Forbidden on connect -- credentials invalid/expired, "
-                 "giving up (not retrying). Live prices will fall back to REST for this run.")
-            try:
-                ws.stop_retry()
-            except Exception:
-                pass
+
+        But a single 403 can also happen with a perfectly good token --
+        confirmed live 2026-09-15: the dashboard's own ticker got one
+        immediately after a successful connect (likely a brief
+        connection-slot contention on Kite's side), while a fresh
+        LiveTicker with the SAME credentials connected cleanly moments
+        later. Giving up permanently after just one 403 would have
+        stopped this ticker for the rest of the process's life over a
+        transient blip. Only gives up after _MAX_CONSECUTIVE_403S in a
+        row with no successful connect between them (_on_connect resets
+        the counter) -- a real dead credential still 403s every time and
+        trips this quickly; a one-off blip lets KiteTicker's own
+        reconnect (which has its own backoff) recover normally."""
+        if not (reason and "403" in str(reason)):
+            return
+        self._consecutive_403s += 1
+        if self._consecutive_403s < self._MAX_CONSECUTIVE_403S:
+            print(f"[live_ticker] 403 Forbidden on connect ({self._consecutive_403s}/"
+                 f"{self._MAX_CONSECUTIVE_403S}) -- letting KiteTicker's own reconnect retry.")
+            return
+        print(f"[live_ticker] {self._consecutive_403s} consecutive 403s -- credentials "
+             "invalid/expired, giving up (not retrying). Live prices will fall back to REST.")
+        try:
+            ws.stop_retry()
+        except Exception:
+            pass
 
     def _on_reconnect(self, ws, attempts_count) -> None:
         print(f"[live_ticker] reconnecting (attempt {attempts_count})...")
