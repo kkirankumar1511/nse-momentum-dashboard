@@ -296,10 +296,44 @@ def _prev_close_and_0925(symbols: list[str], today: dt.date) -> tuple[dict[str, 
     today's 09:25-candle close (= price at 09:30 real time). A symbol
     missing either is silently excluded (matches the validated scratch
     script's own dropna behavior, see intraday_strategy.day_bias's
-    caller in run_selection())."""
+    caller in run_selection()).
+
+    Fast path: ONE batched kite.quote() call (kite_client.get_quote_
+    with_change()) for every symbol at once -- measured 2026-09-15:
+    0.15s for 204 symbols, vs ~72s for the old one-symbol-at-a-time
+    historical-candle loop (Kite's historical API has no batch mode;
+    quote() does). quote()'s own last_price becomes the "09:25 candle
+    close" value -- Spec.md's own definition of that value IS "price at
+    09:30 real time", so this is a direct read of the same thing, not
+    an approximation of a different one. Relies on this function only
+    ever being called right at/after 09:30 (true today: run_live()'s
+    only call site is immediately after _wait_until(09:30)) -- calling
+    it much later in the day would make last_price stale for this
+    purpose, since it's no longer close to 09:30.
+
+    Falls back to the old slow-but-robust per-symbol historical-candle
+    fetch ONLY for symbols the batched call didn't return usable data
+    for (rare -- e.g. a newly-listed stock quote() doesn't recognize
+    yet), so a handful of stragglers can't silently degrade the whole
+    run back to 72s."""
     close_0925, prev_close = {}, {}
+    try:
+        quotes = kite_client.get_quote_with_change(symbols)
+        for sym, q in quotes.items():
+            if q.get("last_price"):
+                close_0925[sym] = float(q["last_price"])
+            if q.get("prev_close"):
+                prev_close[sym] = float(q["prev_close"])
+    except Exception as e:
+        print(f"[intraday_engine] batched quote() fetch failed, falling back to "
+             f"per-symbol fetch for all {len(symbols)} symbols -- {e}")
+
+    missing = [s for s in symbols if s not in close_0925 or s not in prev_close]
+    if missing:
+        print(f"[intraday_engine] {len(missing)} symbol(s) missing from the batched "
+             f"quote() -- falling back to per-symbol fetch for those")
     today_ts = pd.Timestamp(today)
-    for sym in symbols:
+    for sym in missing:
         try:
             daily = kite_client.fetch_daily_candles(sym, days=10)
             prior = daily[daily.index.normalize() < today_ts]
@@ -310,7 +344,7 @@ def _prev_close_and_0925(symbols: list[str], today: dt.date) -> tuple[dict[str, 
             if not row.empty:
                 close_0925[sym] = float(row["close"].iloc[0])
         except Exception as e:
-            print(f"[intraday_engine] {sym}: prev_close/0925 fetch failed -- {e}")
+            print(f"[intraday_engine] {sym}: fallback prev_close/0925 fetch failed -- {e}")
         time.sleep(0.1)
     return close_0925, prev_close
 
