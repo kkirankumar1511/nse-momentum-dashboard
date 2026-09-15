@@ -180,7 +180,16 @@ def _fetch_chunked(token: int, days: int) -> pd.DataFrame:
     df = pd.DataFrame(candles)
     if df.empty:
         return df
-    df["date"] = pd.to_datetime(df["date"])
+    # Kite's raw response is tz-aware (IST) -- stripped here so this
+    # matches _fetch_chunked_intraday()'s own tz_localize(None) below and
+    # every caller gets naive timestamps without having to remember to
+    # normalize themselves (backtest.py's own _tz_naive() wrapping every
+    # call site was a workaround for this NOT being done here; confirmed
+    # 2026-09-15 as a real bug when intraday_engine.py's first live run
+    # called fetch_daily_candles() directly and hit "Invalid comparison
+    # between dtype=datetime64[us, tzoffset...] and Timestamp" comparing
+    # this tz-aware index against a naive pd.Timestamp).
+    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
     df = df.drop_duplicates(subset="date").sort_values("date")
     return df.set_index("date")
 
