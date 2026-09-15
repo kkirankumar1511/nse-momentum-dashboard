@@ -6032,161 +6032,171 @@ def page_intraday_dashboard():
 
     st.divider()
 
-    # Persistent WebSocket ticker for this whole server process (see
-    # _get_dashboard_ticker()) -- NIFTY 50 is always wanted; candidates/
-    # sectors get subscribed below once known, each only actually
-    # triggering a new subscription the first time it's seen.
-    ticker = _get_dashboard_ticker()
-    _ensure_subscribed(ticker, ["NIFTY 50"])
+    @st.fragment(run_every="1s" if _is_market_hours() else None)
+    def _render_live_section():
+        # Persistent WebSocket ticker for this whole server process (see
+        # _get_dashboard_ticker()) -- NIFTY 50 is always wanted; candidates/
+        # sectors get subscribed below once known, each only actually
+        # triggering a new subscription the first time it's seen. Without
+        # this whole section living inside a fragment, ticks would update
+        # the ticker's in-memory cache correctly but the PAGE itself would
+        # never re-render to show it -- Streamlit only reruns on user
+        # interaction otherwise, so the price would look frozen even
+        # though the underlying feed was live the whole time (confirmed
+        # live 2026-09-15).
+        ticker = _get_dashboard_ticker()
+        _ensure_subscribed(ticker, ["NIFTY 50"])
 
-    # --- NIFTY 50: price + both breadth numbers -----------------------------
-    col_nifty, col_bias = st.columns(2)
-    with col_nifty:
-      with st.container(border=True, key="ov-card-intraday-nifty"):
-        st.markdown(
-            '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-blue);">'
-            '</span>NIFTY 50</p>', unsafe_allow_html=True)
-        nifty_price, nifty_chg = _live_price_and_change(ticker, "NIFTY 50")
-        try:
-            live_ad = imkt.fetch_advance_decline("NIFTY 50")
-        except Exception:
-            live_ad = None
-        c1, c2 = st.columns(2)
-        if nifty_price is not None:
-            c1.metric("Current price", f"₹{nifty_price:,.2f}",
-                     f"{nifty_chg:+.2f}%" if nifty_chg is not None else None)
-        else:
-            c1.metric("Current price", "—")
-        if live_ad:
-            c2.metric("Live A/D (whole day)",
-                     f"{live_ad['advances']} / {live_ad['declines']}",
-                     help="NSE's live, continuously-updating breadth -- informational only, "
-                          "NOT what today's day-bias was computed from (that's locked in at "
-                          "09:30 from first-15-min returns, see the card on the right).")
-        else:
-            c2.metric("Live A/D (whole day)", "—")
-
-    with col_bias:
-      with st.container(border=True, key="ov-card-intraday-bias"):
-        st.markdown(
-            '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-purple);">'
-            '</span>Today\'s day-bias (locked at 09:30)</p>', unsafe_allow_html=True)
-        if day is None:
-            st.info("No selection recorded yet today -- the engine runs this once, at 09:30.")
-        elif day["day_bias"] is None:
-            st.warning(f"⚠️ No trade today -- NIFTY 50 first-15-min ratio was "
-                      f"{day['nifty_ratio']:.2f} (needs >2.0 for LONG or <0.5 for SHORT).")
-        else:
-            bias_tone = "green" if day["day_bias"] == "LONG" else "red"
-            bias_cls = "ov-pos" if day["day_bias"] == "LONG" else "ov-neg"
-            _bias_box = _ov_metric_html("Day bias", day["day_bias"], tone=bias_tone, value_cls=bias_cls)
-            _ratio_box = _ov_metric_html("Ratio", f"{day['nifty_ratio']:.2f}")
-            st.markdown(f'<div class="ov-grid-metrics">{_bias_box}{_ratio_box}</div>',
-                       unsafe_allow_html=True)
-
-    # --- Today's 2 candidates ------------------------------------------------
-    st.markdown(
-        '<p class="ov-card-title" style="margin-top:16px;"><span class="ov-dot" '
-        'style="background:var(--ov-teal);"></span>Today\'s candidates</p>', unsafe_allow_html=True)
-    candidates = idb.get_candidates(today)
-    if candidates.empty:
-        st.info("No candidates selected yet today.")
-    else:
-        _ensure_subscribed(ticker, list(candidates["symbol"]))
-        cand_cols = st.columns(len(candidates))
-        for col, (_, c) in zip(cand_cols, candidates.iterrows()):
-            with col:
-              with st.container(border=True, key=f"ov-card-cand-{c['symbol']}"):
-                cand_price, cand_chg = _live_price_and_change(ticker, c["symbol"])
-                try:
-                    _profile = su.resolve_sector_profiles([c["symbol"]], verbose=False).get(c["symbol"], {})
-                    sector = _profile.get("primary_sector")
-                except Exception:
-                    sector = None
-                st.markdown(f"**#{int(c['rank'])} {c['symbol']}**"
-                           + (f"  ·  _{sector}_" if sector else ""))
-                _ret_val = c["ret_first15_pct"]
-                _ret_cls = "ov-pos" if _ret_val >= 0 else "ov-neg"
-                _ret_box = _ov_metric_html("First-15m return", f"{_ret_val:+.2f}%", value_cls=_ret_cls)
-                if cand_price is not None:
-                    _chg_note = f"{cand_chg:+.2f}% today" if cand_chg is not None else None
-                    _chg_cls = "ov-pos" if (cand_chg or 0) >= 0 else "ov-neg"
-                    _ltp_box = _ov_metric_html("Current LTP", f"₹{cand_price:,.2f}",
-                                              _chg_note, note_cls=_chg_cls)
-                else:
-                    _ltp_box = _ov_metric_html("Current LTP", "—")
-                st.markdown(f'<div class="ov-grid-metrics">{_ret_box}{_ltp_box}</div>',
+        # --- NIFTY 50: price + both breadth numbers -----------------------------
+        col_nifty, col_bias = st.columns(2)
+        with col_nifty:
+          with st.container(border=True, key="ov-card-intraday-nifty"):
+            st.markdown(
+                '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-blue);">'
+                '</span>NIFTY 50</p>', unsafe_allow_html=True)
+            nifty_price, nifty_chg = _live_price_and_change(ticker, "NIFTY 50")
+            try:
+                live_ad = imkt.fetch_advance_decline("NIFTY 50")
+            except Exception:
+                live_ad = None
+            c1, c2 = st.columns(2)
+            if nifty_price is not None:
+                c1.metric("Current price", f"₹{nifty_price:,.2f}",
+                         f"{nifty_chg:+.2f}%" if nifty_chg is not None else None)
+            else:
+                c1.metric("Current price", "—")
+            if live_ad:
+                c2.metric("Live A/D (whole day)",
+                         f"{live_ad['advances']} / {live_ad['declines']}",
+                         help="NSE's live, continuously-updating breadth -- informational only, "
+                              "NOT what today's day-bias was computed from (that's locked in at "
+                              "09:30 from first-15-min returns, see the card on the right).")
+            else:
+                c2.metric("Live A/D (whole day)", "—")
+    
+        with col_bias:
+          with st.container(border=True, key="ov-card-intraday-bias"):
+            st.markdown(
+                '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-purple);">'
+                '</span>Today\'s day-bias (locked at 09:30)</p>', unsafe_allow_html=True)
+            if day is None:
+                st.info("No selection recorded yet today -- the engine runs this once, at 09:30.")
+            elif day["day_bias"] is None:
+                st.warning(f"⚠️ No trade today -- NIFTY 50 first-15-min ratio was "
+                          f"{day['nifty_ratio']:.2f} (needs >2.0 for LONG or <0.5 for SHORT).")
+            else:
+                bias_tone = "green" if day["day_bias"] == "LONG" else "red"
+                bias_cls = "ov-pos" if day["day_bias"] == "LONG" else "ov-neg"
+                _bias_box = _ov_metric_html("Day bias", day["day_bias"], tone=bias_tone, value_cls=bias_cls)
+                _ratio_box = _ov_metric_html("Ratio", f"{day['nifty_ratio']:.2f}")
+                st.markdown(f'<div class="ov-grid-metrics">{_bias_box}{_ratio_box}</div>',
                            unsafe_allow_html=True)
-
-                # Sector snapshot -- same current-price + A/D breadth pair
-                # as the NIFTY 50 card above, just for this candidate's own
-                # sector index (e.g. NIFTY BANK), so its sector strength is
-                # visible right alongside the stock itself.
-                if sector:
-                    _ensure_subscribed(ticker, [sector])
-                    sector_price, sector_chg = _live_price_and_change(ticker, sector)
+    
+        # --- Today's 2 candidates ------------------------------------------------
+        st.markdown(
+            '<p class="ov-card-title" style="margin-top:16px;"><span class="ov-dot" '
+            'style="background:var(--ov-teal);"></span>Today\'s candidates</p>', unsafe_allow_html=True)
+        candidates = idb.get_candidates(today)
+        if candidates.empty:
+            st.info("No candidates selected yet today.")
+        else:
+            _ensure_subscribed(ticker, list(candidates["symbol"]))
+            cand_cols = st.columns(len(candidates))
+            for col, (_, c) in zip(cand_cols, candidates.iterrows()):
+                with col:
+                  with st.container(border=True, key=f"ov-card-cand-{c['symbol']}"):
+                    cand_price, cand_chg = _live_price_and_change(ticker, c["symbol"])
                     try:
-                        sector_ad = imkt.fetch_advance_decline(sector)
+                        _profile = su.resolve_sector_profiles([c["symbol"]], verbose=False).get(c["symbol"], {})
+                        sector = _profile.get("primary_sector")
                     except Exception:
-                        sector_ad = None
-                    st.markdown(
-                        f'<p class="ov-card-title" style="margin-top:10px;font-size:12px;">'
-                        f'<span class="ov-dot" style="background:var(--ov-blue);"></span>'
-                        f'Sector · {html_lib.escape(sector)}</p>', unsafe_allow_html=True)
-                    if sector_price is not None:
-                        _s_chg_note = f"{sector_chg:+.2f}% today" if sector_chg is not None else None
-                        _s_chg_cls = "ov-pos" if (sector_chg or 0) >= 0 else "ov-neg"
-                        _sec_price_box = _ov_metric_html(
-                            "Sector price", f"₹{sector_price:,.2f}",
-                            _s_chg_note, note_cls=_s_chg_cls)
+                        sector = None
+                    st.markdown(f"**#{int(c['rank'])} {c['symbol']}**"
+                               + (f"  ·  _{sector}_" if sector else ""))
+                    _ret_val = c["ret_first15_pct"]
+                    _ret_cls = "ov-pos" if _ret_val >= 0 else "ov-neg"
+                    _ret_box = _ov_metric_html("First-15m return", f"{_ret_val:+.2f}%", value_cls=_ret_cls)
+                    if cand_price is not None:
+                        _chg_note = f"{cand_chg:+.2f}% today" if cand_chg is not None else None
+                        _chg_cls = "ov-pos" if (cand_chg or 0) >= 0 else "ov-neg"
+                        _ltp_box = _ov_metric_html("Current LTP", f"₹{cand_price:,.2f}",
+                                                  _chg_note, note_cls=_chg_cls)
                     else:
-                        _sec_price_box = _ov_metric_html("Sector price", "—")
-                    _sec_ad_box = _ov_metric_html(
-                        "Sector A/D",
-                        f"{sector_ad['advances']} / {sector_ad['declines']}" if sector_ad else "—")
-                    st.markdown(f'<div class="ov-grid-metrics">{_sec_price_box}{_sec_ad_box}</div>',
+                        _ltp_box = _ov_metric_html("Current LTP", "—")
+                    st.markdown(f'<div class="ov-grid-metrics">{_ret_box}{_ltp_box}</div>',
                                unsafe_allow_html=True)
+    
+                    # Sector snapshot -- same current-price + A/D breadth pair
+                    # as the NIFTY 50 card above, just for this candidate's own
+                    # sector index (e.g. NIFTY BANK), so its sector strength is
+                    # visible right alongside the stock itself.
+                    if sector:
+                        _ensure_subscribed(ticker, [sector])
+                        sector_price, sector_chg = _live_price_and_change(ticker, sector)
+                        try:
+                            sector_ad = imkt.fetch_advance_decline(sector)
+                        except Exception:
+                            sector_ad = None
+                        st.markdown(
+                            f'<p class="ov-card-title" style="margin-top:10px;font-size:12px;">'
+                            f'<span class="ov-dot" style="background:var(--ov-blue);"></span>'
+                            f'Sector · {html_lib.escape(sector)}</p>', unsafe_allow_html=True)
+                        if sector_price is not None:
+                            _s_chg_note = f"{sector_chg:+.2f}% today" if sector_chg is not None else None
+                            _s_chg_cls = "ov-pos" if (sector_chg or 0) >= 0 else "ov-neg"
+                            _sec_price_box = _ov_metric_html(
+                                "Sector price", f"₹{sector_price:,.2f}",
+                                _s_chg_note, note_cls=_s_chg_cls)
+                        else:
+                            _sec_price_box = _ov_metric_html("Sector price", "—")
+                        _sec_ad_box = _ov_metric_html(
+                            "Sector A/D",
+                            f"{sector_ad['advances']} / {sector_ad['declines']}" if sector_ad else "—")
+                        st.markdown(f'<div class="ov-grid-metrics">{_sec_price_box}{_sec_ad_box}</div>',
+                                   unsafe_allow_html=True)
+    
+                    # signal / position state machine, most-recent first
+                    sig = idb.get_active_signal(today, c["symbol"])
+                    open_pos = idb.get_open_positions(date=today, mode=_mode)
+                    open_pos = open_pos[open_pos["symbol"] == c["symbol"]]
+                    if not open_pos.empty:
+                        p = open_pos.iloc[0]
+                        st.markdown('<span class="ov-badge ov-badge-green">Position open</span>',
+                                   unsafe_allow_html=True)
+                        _entry_box = _ov_metric_html("Entry", f"₹{p['entry_price']:.2f}")
+                        _stop_box = _ov_metric_html("Stop", f"₹{p['stop_price']:.2f}",
+                                                   tone="red", value_cls="ov-neg")
+                        _target_box = _ov_metric_html("Target", f"₹{p['target_price']:.2f}",
+                                                     tone="green", value_cls="ov-pos")
+                        _qty_box = _ov_metric_html("Qty remaining",
+                                                  f"{int(p['qty_remaining'])}/{int(p['qty'])}")
+                        st.markdown(
+                            f'<div class="ov-grid-metrics">{_entry_box}{_stop_box}'
+                            f'{_target_box}{_qty_box}</div>', unsafe_allow_html=True)
+                    elif sig is not None:
+                        _buf = sig["signal_atr"] * istrat.ATR_PCT_BUFFER
+                        _proj_entry = (sig["signal_high"] + _buf if day and day["day_bias"] == istrat.LONG
+                                      else sig["signal_low"] - _buf)
+                        st.markdown('<span class="ov-badge ov-badge-amber">Signal active</span>',
+                                   unsafe_allow_html=True)
+                        _hl_box = _ov_metric_html("Signal high / low",
+                                                 f"₹{sig['signal_high']:.2f} / ₹{sig['signal_low']:.2f}")
+                        _entry_box = _ov_metric_html("Entry (on breakout)", f"₹{_proj_entry:.2f}")
+                        st.markdown(f'<div class="ov-grid-metrics">{_hl_box}{_entry_box}</div>',
+                                   unsafe_allow_html=True)
+                        st.caption(f"formed {sig['signal_time']} · watching for breakout")
+                    else:
+                        all_positions_today = idb.get_positions(date=today, mode=_mode)
+                        sym_positions = all_positions_today[all_positions_today["symbol"] == c["symbol"]] \
+                            if not all_positions_today.empty else all_positions_today
+                        if not sym_positions.empty and (sym_positions["status"] == "closed").all():
+                            st.markdown('<span class="ov-badge ov-badge-gray">Day closed</span>',
+                                       unsafe_allow_html=True)
+                        else:
+                            st.markdown('<span class="ov-badge ov-badge-gray">No signal yet</span>',
+                                       unsafe_allow_html=True)
 
-                # signal / position state machine, most-recent first
-                sig = idb.get_active_signal(today, c["symbol"])
-                open_pos = idb.get_open_positions(date=today, mode=_mode)
-                open_pos = open_pos[open_pos["symbol"] == c["symbol"]]
-                if not open_pos.empty:
-                    p = open_pos.iloc[0]
-                    st.markdown('<span class="ov-badge ov-badge-green">Position open</span>',
-                               unsafe_allow_html=True)
-                    _entry_box = _ov_metric_html("Entry", f"₹{p['entry_price']:.2f}")
-                    _stop_box = _ov_metric_html("Stop", f"₹{p['stop_price']:.2f}",
-                                               tone="red", value_cls="ov-neg")
-                    _target_box = _ov_metric_html("Target", f"₹{p['target_price']:.2f}",
-                                                 tone="green", value_cls="ov-pos")
-                    _qty_box = _ov_metric_html("Qty remaining",
-                                              f"{int(p['qty_remaining'])}/{int(p['qty'])}")
-                    st.markdown(
-                        f'<div class="ov-grid-metrics">{_entry_box}{_stop_box}'
-                        f'{_target_box}{_qty_box}</div>', unsafe_allow_html=True)
-                elif sig is not None:
-                    _buf = sig["signal_atr"] * istrat.ATR_PCT_BUFFER
-                    _proj_entry = (sig["signal_high"] + _buf if day and day["day_bias"] == istrat.LONG
-                                  else sig["signal_low"] - _buf)
-                    st.markdown('<span class="ov-badge ov-badge-amber">Signal active</span>',
-                               unsafe_allow_html=True)
-                    _hl_box = _ov_metric_html("Signal high / low",
-                                             f"₹{sig['signal_high']:.2f} / ₹{sig['signal_low']:.2f}")
-                    _entry_box = _ov_metric_html("Entry (on breakout)", f"₹{_proj_entry:.2f}")
-                    st.markdown(f'<div class="ov-grid-metrics">{_hl_box}{_entry_box}</div>',
-                               unsafe_allow_html=True)
-                    st.caption(f"formed {sig['signal_time']} · watching for breakout")
-                else:
-                    all_positions_today = idb.get_positions(date=today, mode=_mode)
-                    sym_positions = all_positions_today[all_positions_today["symbol"] == c["symbol"]] \
-                        if not all_positions_today.empty else all_positions_today
-                    if not sym_positions.empty and (sym_positions["status"] == "closed").all():
-                        st.markdown('<span class="ov-badge ov-badge-gray">Day closed</span>',
-                                   unsafe_allow_html=True)
-                    else:
-                        st.markdown('<span class="ov-badge ov-badge-gray">No signal yet</span>',
-                                   unsafe_allow_html=True)
+    _render_live_section()
 
     # --- Event timeline -------------------------------------------------------
     st.markdown(
