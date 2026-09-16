@@ -120,7 +120,26 @@ def get_conn(db_path: str | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
     conn.commit()
+    _migrate_daily_selection_schema(conn)
     return conn
+
+
+def _migrate_daily_selection_schema(conn: sqlite3.Connection) -> None:
+    """Adds per-candidate day-state tracking to intraday_daily_selection,
+    independent of intraday_signals -- a candidate invalidated (EMA21
+    gate) BEFORE ever forming a signal candle (e.g. HEROMOTOCO on
+    2026-09-16, invalidated on its very first eligible candle) has no
+    intraday_signals row at all to update, so without this the Dashboard
+    has no way to distinguish "still watching" from "permanently done
+    for the day" -- it silently showed the same generic 'No signal yet'
+    badge for both."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(intraday_daily_selection)")}
+    if "status" not in cols:
+        conn.execute(
+            "ALTER TABLE intraday_daily_selection ADD COLUMN status TEXT NOT NULL DEFAULT 'watching'")
+    if "status_updated_at" not in cols:
+        conn.execute("ALTER TABLE intraday_daily_selection ADD COLUMN status_updated_at TEXT")
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -164,10 +183,24 @@ def record_candidates(date: str, candidates: list[dict]) -> None:
 def get_candidates(date: str) -> pd.DataFrame:
     conn = get_conn()
     df = pd.read_sql(
-        "SELECT rank, symbol, ret_first15_pct FROM intraday_daily_selection "
+        "SELECT rank, symbol, ret_first15_pct, status FROM intraday_daily_selection "
         "WHERE date = ? ORDER BY rank", conn, params=(date,))
     conn.close()
     return df
+
+
+def mark_candidate_status(date: str, symbol: str, status: str) -> None:
+    """status: 'watching' (default) | 'invalidated' | 'traded'. Called
+    the moment a candidate's day is decided one way or the other, so the
+    Dashboard can show a definitive state instead of inferring it from
+    intraday_signals (which has no row at all for a candidate invalidated
+    before ever forming a signal candle)."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE intraday_daily_selection SET status = ?, status_updated_at = datetime('now') "
+        "WHERE date = ? AND symbol = ?", (status, date, symbol))
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------

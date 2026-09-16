@@ -159,6 +159,12 @@ def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series,
     if event["type"] == "invalidated":
         if tracker.signal_db_id is not None:
             idb.update_signal_status(tracker.signal_db_id, "invalidated")
+        # Always recorded here too (not just when a signal happened to be
+        # active) -- a candidate invalidated on its very first eligible
+        # candle never has a signal_db_id at all, and would otherwise
+        # leave the Dashboard with no way to tell "invalidated" apart
+        # from "still watching" for the rest of the day.
+        idb.mark_candidate_status(tracker.date, tracker.symbol, "invalidated")
         tracker.done = True
         return event
 

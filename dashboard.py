@@ -6192,6 +6192,16 @@ def page_intraday_dashboard():
                         if not sym_positions.empty and (sym_positions["status"] == "closed").all():
                             st.markdown('<span class="ov-badge ov-badge-gray">Day closed</span>',
                                        unsafe_allow_html=True)
+                        elif c.get("status") == "invalidated":
+                            st.markdown('<span class="ov-badge ov-badge-red">Day invalidated (EMA21)</span>',
+                                       unsafe_allow_html=True)
+                            st.caption("Close crossed to the wrong side of EMA21 -- "
+                                      "no trade for this stock for the rest of today.")
+                        elif dt.datetime.now().time() > istrat.NEW_SIGNAL_CUTOFF:
+                            st.markdown('<span class="ov-badge ov-badge-gray">No signal formed</span>',
+                                       unsafe_allow_html=True)
+                            st.caption(f"New-signal search closed at {istrat.NEW_SIGNAL_CUTOFF:%H:%M} "
+                                      "with none found.")
                         else:
                             st.markdown('<span class="ov-badge ov-badge-gray">No signal yet</span>',
                                        unsafe_allow_html=True)
