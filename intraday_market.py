@@ -65,21 +65,37 @@ def fetch_nifty50_constituents(force_refresh: bool = False) -> list[str]:
     return symbols
 
 
+AD_CACHE_TTL_SECONDS = 15  # breadth doesn't move meaningfully sub-15s; the
+# Dashboard's Intraday page calls this from a 1s-refresh st.fragment for
+# NIFTY 50 + up to 2 candidate sectors -- without this, that's up to 3
+# live NSE requests every single second, which is both pointless (this
+# is a "how's the market doing" pulse, not a tick feed) and the likely
+# cause of the sector card's periodic multi-second stalls (NSE's own
+# host intermittently slow-responds/throttles under that hammering).
+_ad_cache: dict[str, tuple[float, dict]] = {}
+
+
 def fetch_advance_decline(index: str = "NIFTY 50") -> dict:
     """LIVE, informational-only market-breadth snapshot -- NOT what the
     strategy's own day_bias is computed from (see module docstring).
-    Returns {"advances", "declines", "unchanged", "total"}."""
+    Returns {"advances", "declines", "unchanged", "total"}. Cached in
+    memory for AD_CACHE_TTL_SECONDS per index."""
+    cached = _ad_cache.get(index)
+    if cached is not None and time.time() - cached[0] < AD_CACHE_TTL_SECONDS:
+        return cached[1]
     s = nse_api.session()
     r = s.get(INDEX_TRACKER_URL, params={
         "functionName": "getAdvanceDecline", "index": index}, timeout=15)
     r.raise_for_status()
     row = r.json()["data"][0]
-    return {
+    result = {
         "advances": int(row["advance_symbol"]),
         "declines": int(row["decline_symbol"]),
         "unchanged": int(row["unchanged_symbol"]),
         "total": int(row["total_symbol"]),
     }
+    _ad_cache[index] = (time.time(), result)
+    return result
 
 
 def compute_first15_breadth(nifty50_symbols: list[str],
