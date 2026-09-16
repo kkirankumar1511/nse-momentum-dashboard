@@ -467,7 +467,12 @@ def run_live(mode: str = "paper") -> None:
             boundary = _last_closed_candle_label(now)
             if boundary.time() >= dt.time(9, 35) and (last_candle_ts is None or boundary > last_candle_ts):
                 for t in trackers:
-                    if t.done:
+                    if t.done or t.position_id is not None:
+                        # Once a position is open, EMA21/ATR14/vol tracking
+                        # no longer matters (process_candle() would no-op
+                        # anyway, see its own guard) -- skip the refetch
+                        # below entirely rather than pay for it uselessly
+                        # every 5 minutes until the position closes.
                         continue
                     # Re-fetch the full continuous history (not just the new
                     # candle) and recompute ema21_series/atr14_series from
