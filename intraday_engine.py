@@ -469,10 +469,24 @@ def run_live(mode: str = "paper") -> None:
                 for t in trackers:
                     if t.done:
                         continue
-                    fresh = kite_client.fetch_intraday_candles(t.symbol, days=2, interval="5minute")
+                    # Re-fetch the full continuous history (not just the new
+                    # candle) and recompute ema21_series/atr14_series from
+                    # it every boundary -- the trackers' series were only
+                    # ever set ONCE at setup time (before market open even
+                    # finished its first 15 minutes), so t.ema21_series.get(ts)/
+                    # t.atr14_series.get(ts) came back None for every candle
+                    # closing after that snapshot, silently disabling both
+                    # invalidation and signal formation for the whole day
+                    # (confirmed live 2026-09-16: YESBANK's real 09:35 candle
+                    # satisfied every signal condition when replayed offline
+                    # with fresh series, but produced nothing live because
+                    # sig_atr came back None from the frozen snapshot).
+                    fresh = kite_client.fetch_intraday_candles(t.symbol, days=EMA_WARMUP_DAYS, interval="5minute")
                     row_df = fresh[fresh.index == boundary]
                     if row_df.empty:
                         continue
+                    t.ema21_series = strat.ema21(fresh["close"])
+                    t.atr14_series = strat.atr14(fresh)
                     row = row_df.iloc[0]
                     t.vol_min_so_far = (row["volume"] if t.vol_min_so_far is None
                                        else min(t.vol_min_so_far, row["volume"]))
