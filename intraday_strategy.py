@@ -46,7 +46,7 @@ SHORT = "SHORT"
 # Spec v3 §2/§5/§6 constants
 SIGNAL_WINDOW_START = "09:30"
 SIGNAL_WINDOW_END = "15:05"
-NEW_SIGNAL_CUTOFF = dt.time(11, 0)
+NEW_SIGNAL_CUTOFF = dt.time(10, 30)
 VOL_THRESHOLD_PCT = 0.10  # v3: CHANGED from v2's 0.05
 ATR_PCT_BUFFER = 0.05
 BREAKOUT_WINDOW = 2  # v3: CHANGED from v2's 1 -- see the confirm-color
