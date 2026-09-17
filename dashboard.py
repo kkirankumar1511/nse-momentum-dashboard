@@ -6297,6 +6297,13 @@ def page_intraday_dashboard():
     # work, candles only change every 5 minutes) -----------------------------
     @st.fragment(run_every="15s" if _is_market_hours() else None)
     def _render_chart_and_tradebook_section():
+        # Fetched fresh here, not read from the sibling _render_live_
+        # section()'s own `day` -- that's a local variable scoped to
+        # THAT function's own closure, not visible to this one, even
+        # though both are nested inside page_intraday_dashboard() (confirmed
+        # live: "name 'day' is not defined"). Same freshness rationale as
+        # that function's own fetch: don't let this go stale across reruns.
+        day = idb.get_day(today)
         _cands_now = idb.get_candidates(today)
         if _cands_now.empty:
             return
