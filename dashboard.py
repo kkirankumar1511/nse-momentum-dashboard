@@ -6499,12 +6499,17 @@ def page_intraday_dashboard():
         '<p class="ov-card-title" style="margin-top:16px;"><span class="ov-dot" '
         'style="background:var(--ov-amber);"></span>Today\'s events</p>', unsafe_allow_html=True)
     sigs = idb.get_signals(today)
+    poss = idb.get_positions(date=today, mode=_mode)
     legs = idb.get_legs(date=today, mode=_mode)
     events = []
     for _, s in sigs.iterrows():
         events.append({"time": s["signal_time"], "symbol": s["symbol"],
                       "event": "signal_formed" if s["status"] != "expired" else "expired",
                       "detail": f"high ₹{s['signal_high']:.2f} / low ₹{s['signal_low']:.2f}"})
+    for _, p in poss.iterrows():
+        events.append({"time": p["entry_time"], "symbol": p["symbol"], "event": "triggered",
+                      "detail": f"{p['direction']} qty {int(p['qty'])} @ ₹{p['entry_price']:.2f} "
+                                f"-- stop ₹{p['stop_price']:.2f}, target ₹{p['target_price']:.2f}"})
     for _, l in legs.iterrows():
         events.append({"time": l["exit_time"], "symbol": l["symbol"], "event": l["leg_type"],
                       "detail": f"qty {int(l['qty'])} @ ₹{l['exit_price']:.2f} "
