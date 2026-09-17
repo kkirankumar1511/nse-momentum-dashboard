@@ -6102,7 +6102,12 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
     fig.update_layout(
         height=460, margin=dict(l=10, r=70, t=20, b=10),
         showlegend=False, plot_bgcolor="white", paper_bgcolor="white",
-        bargap=0.15)
+        bargap=0.15,
+        # Without this, every 15s auto-refresh hands Plotly a brand-new
+        # figure and it forgets any zoom/pan the user just did. Keying
+        # it on the symbol (not a constant) means switching the chart
+        # dropdown still resets to a fresh full-day view.
+        uirevision=symbol)
     fig.update_xaxes(rangeslider_visible=False, showgrid=True, gridcolor="#eeeeee", row=1, col=1)
     fig.update_xaxes(showgrid=False, row=2, col=1)
     fig.update_yaxes(title_text="Price (₹)", showgrid=True, gridcolor="#eeeeee", row=1, col=1)
@@ -6412,7 +6417,8 @@ def page_intraday_dashboard():
                 _sel_sym, _direction, today, first_low=None, first_high=None,
                 sig=_sel_sig, pos=_sel_pos, live_candle=_live_candle)
             if fig is not None:
-                st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+                st.plotly_chart(fig, width="stretch",
+                                config={"displayModeBar": True, "scrollZoom": True})
             else:
                 st.info("No candle data yet for this symbol today.")
 
