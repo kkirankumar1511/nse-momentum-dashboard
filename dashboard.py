@@ -1047,6 +1047,8 @@ COLUMN_LABELS = {
     "run_id": "Run ID", "run_time": "Run time", "action_type": "Action",
     "detail": "Reason/Detail", "resolved_at": "Resolved at",
     "current_qty": "Current qty", "rank": "Momentum rank", "rank_fmt": "Rank",
+    "cand_rank": "Rank", "cand_sector": "Sector", "ret_first15_pct": "1st-15m %",
+    "chg_pct": "Chg %", "gate": "Sector gate", "state": "State",
 
     # Screener / momentum
     "score": "Score", "price": "Price", "rs_3m": "RS 3M", "rs_6m": "RS 6M",
@@ -6139,127 +6141,90 @@ def page_intraday_dashboard():
                 unsafe_allow_html=True)
 
             _ensure_subscribed(ticker, list(candidates["symbol"]))
-            # Wrap into rows of up to 3 cards -- st.columns() called once per
-            # chunk renders each call as its own row; collecting the returned
-            # column objects into one flat list lets the existing per-card
-            # body below (unchanged) just zip against it as if it were one
-            # single row, same as the old 2-candidate st.columns(len(...)).
-            _CHUNK = 3
-            _cand_rows = list(candidates.iterrows())
-            cand_cols = []
-            for _i in range(0, len(_cand_rows), _CHUNK):
-                cand_cols.extend(st.columns(min(_CHUNK, len(_cand_rows) - _i)))
-            for col, (_, c) in zip(cand_cols, candidates.iterrows()):
-                with col:
-                  with st.container(border=True, key=f"ov-card-cand-{c['symbol']}"):
-                    cand_price, cand_chg = _live_price_and_change(ticker, c["symbol"])
-                    sector = c.get("sector")
-                    if pd.isna(sector):
-                        sector = None
+            # A compact data table (one row per candidate, fixed columns) --
+            # a card grid can't help but vary in height/content per card
+            # (a "Position open" state has 4x the numbers a plain "No
+            # signal yet" one does), which read as inconsistent no matter
+            # how the cards themselves were tightened. A table's rows are
+            # structurally uniform regardless of content, matching a
+            # standard broker "Market Watch" panel.
+            _table_rows = []
+            for _, c in candidates.iterrows():
+                cand_price, cand_chg = _live_price_and_change(ticker, c["symbol"])
+                sector = c.get("sector")
+                if pd.isna(sector):
+                    sector = None
 
-                    # --- Decide state FIRST (badge + one-line detail),
-                    # so it can render in the header, immediately visible
-                    # without scrolling the card -- was previously buried
-                    # at the bottom under 3 other sections.
-                    sig = idb.get_active_signal(today, c["symbol"])
-                    open_pos = idb.get_open_positions(date=today, mode=_mode)
-                    open_pos = open_pos[open_pos["symbol"] == c["symbol"]]
-                    _p = open_pos.iloc[0] if not open_pos.empty else None
-                    _state_line = None  # one compact line of state-specific numbers, or None
-                    if _p is not None:
-                        _badge_cls, _badge_txt = "ov-badge-green", "Position open"
-                        _state_line = (f"Entry ₹{_p['entry_price']:.2f} → Stop "
-                                      f"<span class='ov-neg'>₹{_p['stop_price']:.2f}</span> / Target "
-                                      f"<span class='ov-pos'>₹{_p['target_price']:.2f}</span> · Qty "
-                                      f"{int(_p['qty_remaining'])}/{int(_p['qty'])}")
-                    elif sig is not None:
-                        _badge_cls, _badge_txt = "ov-badge-amber", "Signal active"
-                        _buf = sig["signal_atr"] * istrat.ATR_PCT_BUFFER
-                        _proj_entry = (sig["signal_high"] + _buf if day and day["day_bias"] == istrat.LONG
-                                      else sig["signal_low"] - _buf)
-                        _state_line = (f"Signal ₹{sig['signal_high']:.2f}/₹{sig['signal_low']:.2f} → "
-                                      f"entry ₹{_proj_entry:.2f} on breakout · formed "
-                                      f"{pd.Timestamp(sig['signal_time']):%H:%M}")
-                    else:
-                        all_positions_today = idb.get_positions(date=today, mode=_mode)
-                        sym_positions = all_positions_today[all_positions_today["symbol"] == c["symbol"]] \
-                            if not all_positions_today.empty else all_positions_today
-                        if not sym_positions.empty and (sym_positions["status"] == "closed").all():
-                            _badge_cls, _badge_txt = "ov-badge-gray", "Day closed"
-                        elif c.get("status") == "invalidated":
-                            _badge_cls, _badge_txt = "ov-badge-red", "Invalidated"
-                            _state_line = "EMA21 / first-candle gate fired -- no trade today."
-                        elif c.get("status") == "sector_gate_failed":
-                            _sr = c.get("sector_ratio")
-                            _sr_text = f"{_sr:.2f}" if pd.notna(_sr) else "no data"
-                            _badge_cls, _badge_txt = "ov-badge-red", "Sector gate failed"
-                            _state_line = f"Triggered, but sector ratio ({_sr_text}) didn't confirm."
-                        elif c.get("status") == "day_slots_filled":
-                            _badge_cls, _badge_txt = "ov-badge-gray", "Slots filled"
-                            _state_line = f"Both {istrat.MAX_TRADES_PER_DAY} slots taken by others first."
-                        elif dt.datetime.now().time() > istrat.NEW_SIGNAL_CUTOFF:
-                            _badge_cls, _badge_txt = "ov-badge-gray", "No signal formed"
-                            _state_line = f"Search closed {istrat.NEW_SIGNAL_CUTOFF:%H:%M} -- none found."
-                        else:
-                            _badge_cls, _badge_txt = "ov-badge-gray", "No signal yet"
-
-                    # --- Header: rank/symbol/sector (left) + state badge
-                    # (right), one line, flexbox -- the single most
-                    # important fact about this card, visible immediately.
-                    st.markdown(
-                        f'<div style="display:flex;justify-content:space-between;'
-                        f'align-items:baseline;gap:8px;flex-wrap:wrap;">'
-                        f'<span><b>#{int(c["rank"])} {c["symbol"]}</b>'
-                        f'{f"  ·  <i>{html_lib.escape(sector)}</i>" if sector else ""}</span>'
-                        f'<span class="ov-badge {_badge_cls}" style="white-space:nowrap;">{_badge_txt}</span>'
-                        f'</div>', unsafe_allow_html=True)
-
-                    # --- One compact metrics line (was 2 separate boxed
-                    # grids) -- first-15m return, live LTP, sector gate.
-                    _ret_val = c["ret_first15_pct"]
-                    _ret_cls = "ov-pos" if _ret_val >= 0 else "ov-neg"
-                    _ltp_html = (f"₹{cand_price:,.2f} <span class='{'ov-pos' if (cand_chg or 0) >= 0 else 'ov-neg'}'>"
-                                f"({cand_chg:+.2f}%)</span>" if cand_price is not None and cand_chg is not None
-                                else (f"₹{cand_price:,.2f}" if cand_price is not None else "—"))
-                    _sgp = c.get("sector_gate_pass")
-                    if pd.notna(_sgp) and day is not None:
+                sig = idb.get_active_signal(today, c["symbol"])
+                open_pos = idb.get_open_positions(date=today, mode=_mode)
+                open_pos = open_pos[open_pos["symbol"] == c["symbol"]]
+                _p = open_pos.iloc[0] if not open_pos.empty else None
+                state, detail = "No signal yet", ""
+                if _p is not None:
+                    state = "Position open"
+                    detail = (f"Entry ₹{_p['entry_price']:.2f} / Stop ₹{_p['stop_price']:.2f} / "
+                             f"Target ₹{_p['target_price']:.2f} / Qty "
+                             f"{int(_p['qty_remaining'])}/{int(_p['qty'])}")
+                elif sig is not None:
+                    state = "Signal active"
+                    _buf = sig["signal_atr"] * istrat.ATR_PCT_BUFFER
+                    _proj_entry = (sig["signal_high"] + _buf if day and day["day_bias"] == istrat.LONG
+                                  else sig["signal_low"] - _buf)
+                    detail = (f"H/L ₹{sig['signal_high']:.2f}/₹{sig['signal_low']:.2f} → entry "
+                             f"₹{_proj_entry:.2f} · formed {pd.Timestamp(sig['signal_time']):%H:%M}")
+                else:
+                    all_positions_today = idb.get_positions(date=today, mode=_mode)
+                    sym_positions = all_positions_today[all_positions_today["symbol"] == c["symbol"]] \
+                        if not all_positions_today.empty else all_positions_today
+                    if not sym_positions.empty and (sym_positions["status"] == "closed").all():
+                        state = "Day closed"
+                    elif c.get("status") == "invalidated":
+                        state, detail = "Invalidated", "EMA21 / first-candle gate fired"
+                    elif c.get("status") == "sector_gate_failed":
                         _sr = c.get("sector_ratio")
-                        _gate_html = (f"<span class='{'ov-pos' if _sgp else 'ov-neg'}'>"
-                                     f"{'PASS' if _sgp else 'FAIL'}</span> "
-                                     f"{_sr:.2f}" if pd.notna(_sr) else
-                                     f"<span class='ov-neg'>FAIL</span> no data")
-                    else:
-                        _gate_html = "—"
-                    st.markdown(
-                        f'<p class="ov-card-meta" style="margin:6px 0;">'
-                        f'1st-15m <span class="{_ret_cls}">{_ret_val:+.2f}%</span>'
-                        f' &nbsp;·&nbsp; LTP {_ltp_html}'
-                        f' &nbsp;·&nbsp; Gate {_gate_html}</p>',
-                        unsafe_allow_html=True)
+                        _sr_text = f"{_sr:.2f}" if pd.notna(_sr) else "no data"
+                        state = "Sector gate failed"
+                        detail = f"Triggered, ratio {_sr_text} didn't confirm"
+                    elif c.get("status") == "day_slots_filled":
+                        state, detail = "Slots filled", "Other candidates confirmed first"
+                    elif dt.datetime.now().time() > istrat.NEW_SIGNAL_CUTOFF:
+                        state, detail = "No signal formed", f"Search closed {istrat.NEW_SIGNAL_CUTOFF:%H:%M}"
 
-                    if _state_line:
-                        st.markdown(f'<p class="ov-card-meta" style="margin:0 0 4px;">{_state_line}</p>',
-                                   unsafe_allow_html=True)
+                _sgp = c.get("sector_gate_pass")
+                _sr = c.get("sector_ratio")
+                if pd.notna(_sgp) and day is not None:
+                    gate = (f"{'PASS' if _sgp else 'FAIL'} {_sr:.2f}" if pd.notna(_sr)
+                           else f"{'PASS' if _sgp else 'FAIL'} —")
+                else:
+                    gate = "—"
 
-                    # Sector's own live price + NSE A/D -- informational
-                    # only (never drives any decision, see intraday_market.
-                    # py's module docstring), so tucked behind a collapsed
-                    # expander instead of always taking card space.
-                    if sector:
-                        with st.expander("Sector snapshot", expanded=False):
-                            _ensure_subscribed(ticker, [sector])
-                            sector_price, sector_chg = _live_price_and_change(ticker, sector)
-                            try:
-                                sector_ad = imkt.fetch_advance_decline(sector)
-                            except Exception:
-                                sector_ad = None
-                            _sp_txt = f"₹{sector_price:,.2f}" if sector_price is not None else "—"
-                            _sc_txt = (f" ({sector_chg:+.2f}%)" if sector_price is not None
-                                      and sector_chg is not None else "")
-                            _sad_txt = (f"{sector_ad['advances']} / {sector_ad['declines']}"
-                                       if sector_ad else "—")
-                            st.markdown(f'<p class="ov-card-meta">Price {_sp_txt}{_sc_txt} '
-                                       f'&nbsp;·&nbsp; A/D {_sad_txt}</p>', unsafe_allow_html=True)
+                _table_rows.append({
+                    "cand_rank": int(c["rank"]), "symbol": c["symbol"],
+                    "cand_sector": sector or "—", "ret_first15_pct": float(c["ret_first15_pct"]),
+                    "ltp": cand_price if cand_price is not None else float("nan"),
+                    "chg_pct": cand_chg if cand_chg is not None else float("nan"),
+                    "gate": gate, "state": state, "detail": detail or "—",
+                })
+
+            _tdf = pd.DataFrame(_table_rows)
+            st.markdown(_ov_table_html(
+                _tdf,
+                columns=["cand_rank", "symbol", "cand_sector", "ret_first15_pct",
+                        "ltp", "chg_pct", "gate", "state", "detail"],
+                sym_cols=["symbol"],
+                pnl_cols=["ret_first15_pct", "chg_pct"],
+                num_fmt={"ret_first15_pct": "{:+.2f}%", "ltp": "₹{:,.2f}",
+                        "chg_pct": "{:+.2f}%"},
+                badges={
+                    "gate": lambda v: ("ov-badge-green" if v.startswith("PASS")
+                                       else "ov-badge-red" if v.startswith("FAIL") else "ov-badge-gray"),
+                    "state": {
+                        "Position open": "ov-badge-green", "Signal active": "ov-badge-amber",
+                        "Invalidated": "ov-badge-red", "Sector gate failed": "ov-badge-red",
+                        "Day closed": "ov-badge-gray", "Slots filled": "ov-badge-gray",
+                        "No signal formed": "ov-badge-gray", "No signal yet": "ov-badge-gray",
+                    },
+                }), unsafe_allow_html=True)
 
     _render_live_section()
 
