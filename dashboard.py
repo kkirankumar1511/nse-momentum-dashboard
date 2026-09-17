@@ -6076,13 +6076,17 @@ def page_intraday_dashboard():
             else:
                 c1.metric("Current price", "—")
             if live_ad:
-                c2.metric("Live A/D (whole day)",
+                c2.metric("NSE live A/D (whole day)",
                          f"{live_ad['advances']} / {live_ad['declines']}",
-                         help="NSE's live, continuously-updating breadth -- informational only, "
-                              "NOT what today's day-bias was computed from (that's locked in at "
-                              "09:30 from first-15-min returns, see the card on the right).")
+                         help="NSE's own live, continuously-updating breadth (advancers/decliners "
+                              "vs previous close, as of right now) -- informational only, NOT what "
+                              "today's day-bias was computed from. Compare against \"Code A/D "
+                              "(first-15m)\" on the card to the right, same advancers/decliners "
+                              "format -- the two measure genuinely different windows (whole day so "
+                              "far vs. frozen at 09:30), so they're expected to differ, sometimes "
+                              "substantially, especially later in the day.")
             else:
-                c2.metric("Live A/D (whole day)", "—")
+                c2.metric("NSE live A/D (whole day)", "—")
     
         with col_bias:
           with st.container(border=True, key="ov-card-intraday-bias"):
@@ -6092,15 +6096,25 @@ def page_intraday_dashboard():
             if day is None:
                 st.info("No selection recorded yet today -- the engine runs this once, at 09:30.")
             elif day["day_bias"] is None:
+                _adv, _dec = day.get("advancers"), day.get("decliners")
+                _ad_text = f" ({int(_adv)} / {int(_dec)})" if pd.notna(_adv) and pd.notna(_dec) else ""
                 st.warning(f"⚠️ No trade today -- NIFTY 50 first-15-min ratio was "
-                          f"{day['nifty_ratio']:.2f} (needs >{istrat.BIAS_RATIO_LONG_MIN} for LONG "
-                          f"or <{istrat.BIAS_RATIO_SHORT_MAX} for SHORT).")
+                          f"{day['nifty_ratio']:.2f}{_ad_text} (needs >{istrat.BIAS_RATIO_LONG_MIN} "
+                          f"for LONG or <{istrat.BIAS_RATIO_SHORT_MAX} for SHORT).")
             else:
                 bias_tone = "green" if day["day_bias"] == "LONG" else "red"
                 bias_cls = "ov-pos" if day["day_bias"] == "LONG" else "ov-neg"
                 _bias_box = _ov_metric_html("Day bias", day["day_bias"], tone=bias_tone, value_cls=bias_cls)
                 _ratio_box = _ov_metric_html("Ratio", f"{day['nifty_ratio']:.2f}")
-                st.markdown(f'<div class="ov-grid-metrics">{_bias_box}{_ratio_box}</div>',
+                # Same advancers/decliners format as the NSE live A/D box
+                # on the NIFTY 50 card to the left, so the two can be
+                # diffed at a glance -- these measure different windows
+                # (frozen at 09:30 vs continuously updating), so they're
+                # expected to differ, not a sign either one is wrong.
+                _adv, _dec = day.get("advancers"), day.get("decliners")
+                _ad_val = f"{int(_adv)} / {int(_dec)}" if pd.notna(_adv) and pd.notna(_dec) else "—"
+                _code_ad_box = _ov_metric_html("Code A/D (first-15m, @09:30)", _ad_val)
+                st.markdown(f'<div class="ov-grid-metrics">{_bias_box}{_ratio_box}{_code_ad_box}</div>',
                            unsafe_allow_html=True)
     
         # --- Today's candidates (v3: top-5 pool, 2 trade slots) ------------------

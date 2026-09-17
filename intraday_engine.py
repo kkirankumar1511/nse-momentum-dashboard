@@ -98,9 +98,11 @@ def run_selection(date: str, nifty50_symbols: list[str], fno_symbols: list[str],
     intraday_days/intraday_daily_selection and returns
     {"nifty_ratio", "day_bias", "candidates": [{"symbol","direction"}]}
     -- candidates is empty when day_bias is None (skip day)."""
-    nifty_ratio, _ = mkt.compute_first15_breadth(nifty50_symbols, close_0925, prev_day_close)
+    nifty_ratio, nifty_rets = mkt.compute_first15_breadth(nifty50_symbols, close_0925, prev_day_close)
     bias = strat.day_bias(nifty_ratio)
-    idb.record_day(date, nifty_ratio, bias)
+    advancers = sum(1 for v in nifty_rets.values() if v > 0)
+    decliners = sum(1 for v in nifty_rets.values() if v < 0)
+    idb.record_day(date, nifty_ratio, bias, advancers, decliners)
 
     if bias is None:
         return {"nifty_ratio": nifty_ratio, "day_bias": None, "candidates": []}

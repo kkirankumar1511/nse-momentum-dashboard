@@ -150,21 +150,37 @@ def _migrate_daily_selection_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE intraday_daily_selection ADD COLUMN sector_gate_pass INTEGER")
     conn.commit()
 
+    # The raw advancer/decliner counts behind intraday_days.nifty_ratio --
+    # previously only the ratio itself was kept, so the Dashboard had
+    # nothing to show side by side with NSE's own live A/D widget (which
+    # displays counts, e.g. "36 / 14") for a direct visual diff -- a
+    # bare "1.94" next to "36 / 14" isn't comparable at a glance.
+    day_cols = {r["name"] for r in conn.execute("PRAGMA table_info(intraday_days)")}
+    if "advancers" not in day_cols:
+        conn.execute("ALTER TABLE intraday_days ADD COLUMN advancers INTEGER")
+    if "decliners" not in day_cols:
+        conn.execute("ALTER TABLE intraday_days ADD COLUMN decliners INTEGER")
+    conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # Days / daily selection -- Spec.md §2
 # ---------------------------------------------------------------------------
 
-def record_day(date: str, nifty_ratio: float, day_bias: str | None) -> None:
+def record_day(date: str, nifty_ratio: float, day_bias: str | None,
+               advancers: int | None = None, decliners: int | None = None) -> None:
     """One call per trading day the engine runs the 09:30 check --
     day_bias=None records a SKIPPED day (ratio didn't clear either
-    threshold), not an error."""
+    threshold), not an error. advancers/decliners are the raw NIFTY50
+    counts nifty_ratio was computed from -- kept alongside it so the
+    Dashboard can show them next to NSE's own live A/D widget for a
+    direct, same-format comparison."""
     conn = get_conn()
     conn.execute(
-        "INSERT INTO intraday_days (date, nifty_ratio, day_bias) VALUES (?, ?, ?) "
-        "ON CONFLICT(date) DO UPDATE SET nifty_ratio = excluded.nifty_ratio, "
-        "day_bias = excluded.day_bias",
-        (date, nifty_ratio, day_bias))
+        "INSERT INTO intraday_days (date, nifty_ratio, day_bias, advancers, decliners) "
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(date) DO UPDATE SET nifty_ratio = excluded.nifty_ratio, "
+        "day_bias = excluded.day_bias, advancers = excluded.advancers, decliners = excluded.decliners",
+        (date, nifty_ratio, day_bias, advancers, decliners))
     conn.commit()
     conn.close()
 
