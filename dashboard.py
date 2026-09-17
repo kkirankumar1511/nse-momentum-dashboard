@@ -31,6 +31,7 @@ import re
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 from kiteconnect.exceptions import TokenException
 
@@ -6002,15 +6003,30 @@ _INTRADAY_CHART_WARMUP_DAYS = 45  # enough for EMA21 to have converged well
 # shorter, display-only warmup window).
 
 
+# TradingView-style palette -- more saturated/higher-contrast than the
+# earlier plain green/red, distinct from the ov-pos/ov-neg colors used
+# elsewhere on the page so the chart doesn't visually blend into the
+# surrounding metric text.
+_CHART_UP, _CHART_DOWN = "#26a69a", "#ef5350"
+
+
 def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
                                   first_low: float | None, first_high: float | None,
-                                  sig: dict | None, pos: dict | None) -> "go.Figure | None":
-    """5-min candlestick for `symbol`'s session today, with the strategy's
-    own decision levels overlaid -- EMA21 (continuous line), the 09:15
-    first-candle low/high (Spec v2 §3.2 step 1b), the active signal's
-    high/low + breakout trigger level if one exists, and entry/stop/
-    target if a position is open. Returns None if no candle data is
-    available yet (e.g. called before 09:15)."""
+                                  sig: dict | None, pos: dict | None,
+                                  live_candle: dict | None = None) -> "go.Figure | None":
+    """5-min candlestick + volume for `symbol`'s session today, with the
+    strategy's own decision levels overlaid -- EMA21 (continuous line),
+    the 09:15 first-candle low/high (Spec v2 §3.2 step 1b), and either
+    the active signal's breakout trigger + would-be stop, or the real
+    entry/stop/target once a position is open. Returns None if no candle
+    data is available yet (e.g. called before 09:15).
+
+    live_candle: optional {"open","high","low","close","volume"} for the
+    CURRENTLY FORMING 5-min bar, built tick-by-tick by the caller from
+    live LTP (see _render_chart_and_tradebook_section()) -- Kite's
+    historical API only ever returns CLOSED candles, so without this the
+    chart visibly stalls for up to 5 minutes at a time instead of moving
+    with the live price."""
     try:
         hist = kite_client.fetch_intraday_candles(symbol, days=_INTRADAY_CHART_WARMUP_DAYS,
                                                    interval="5minute")
@@ -6020,41 +6036,77 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
         return None
     ema21_series = istrat.ema21(hist["close"])
     today_candles = hist[hist.index.normalize() == pd.Timestamp(today)]
-    if today_candles.empty:
+    if today_candles.empty and live_candle is None:
         return None
 
-    fig = go.Figure()
+    plot_df = today_candles
+    ema21_today = ema21_series.reindex(today_candles.index)
+    if live_candle is not None:
+        live_ts = pd.Timestamp(live_candle["ts"])
+        live_row = pd.DataFrame([{
+            "open": live_candle["open"], "high": live_candle["high"],
+            "low": live_candle["low"], "close": live_candle["close"],
+            "volume": live_candle["volume"],
+        }], index=[live_ts])
+        plot_df = pd.concat([today_candles[today_candles.index != live_ts], live_row]).sort_index()
+        # EMA21 "as of now" for the live bar -- close enough for a moving
+        # visual reference (this is display-only, never a trading
+        # decision): continue the series forward using the live close.
+        _live_ema = ema21_series.reindex(hist.index.append(pd.Index([live_ts]))).ffill().get(live_ts)
+        ema21_today = pd.concat([ema21_today[ema21_today.index != live_ts],
+                                 pd.Series([_live_ema], index=[live_ts])]).sort_index()
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25],
+                        vertical_spacing=0.03)
     fig.add_trace(go.Candlestick(
-        x=today_candles.index, open=today_candles["open"], high=today_candles["high"],
-        low=today_candles["low"], close=today_candles["close"], name=symbol,
-        increasing_line_color="#1a9850", decreasing_line_color="#d73027"))
+        x=plot_df.index, open=plot_df["open"], high=plot_df["high"],
+        low=plot_df["low"], close=plot_df["close"], name=symbol,
+        increasing_line_color=_CHART_UP, decreasing_line_color=_CHART_DOWN,
+        increasing_fillcolor=_CHART_UP, decreasing_fillcolor=_CHART_DOWN), row=1, col=1)
     fig.add_trace(go.Scatter(
-        x=today_candles.index, y=ema21_series.reindex(today_candles.index),
-        mode="lines", name="EMA21", line=dict(color="#7b3294", width=1.5)))
+        x=plot_df.index, y=ema21_today, mode="lines", name="EMA21",
+        line=dict(color="#7b3294", width=1.5)), row=1, col=1)
+    if "volume" in plot_df.columns:
+        vol_colors = [_CHART_UP if c >= o else _CHART_DOWN
+                     for o, c in zip(plot_df["open"], plot_df["close"])]
+        fig.add_trace(go.Bar(x=plot_df.index, y=plot_df["volume"], marker_color=vol_colors,
+                            opacity=0.6, name="Volume"), row=2, col=1)
 
     def _hline(y, color, label, dash="dot"):
         if y is not None and pd.notna(y):
-            fig.add_hline(y=float(y), line_color=color, line_dash=dash, line_width=1,
+            fig.add_hline(y=float(y), line_color=color, line_dash=dash, line_width=1.25,
                          annotation_text=label, annotation_position="right",
-                         annotation_font_size=10)
+                         annotation_font_size=10, row=1, col=1)
 
-    _hline(first_low, "#888888", "09:15 low")
-    _hline(first_high, "#888888", "09:15 high")
-    if sig is not None:
-        buf = sig["signal_atr"] * istrat.ATR_PCT_BUFFER
-        trigger = sig["signal_high"] + buf if direction == istrat.LONG else sig["signal_low"] - buf
-        _hline(sig["signal_high"], "#e6a817", "signal high")
-        _hline(sig["signal_low"], "#e6a817", "signal low")
-        _hline(trigger, "#e6a817", "entry trigger", dash="dash")
+    _hline(first_low, "#9e9e9e", "09:15 low")
+    _hline(first_high, "#9e9e9e", "09:15 high")
     if pos is not None:
         _hline(pos["entry_price"], "#2166ac", "entry", dash="solid")
-        _hline(pos["stop_price"], "#d73027", "stop", dash="solid")
-        _hline(pos["target_price"], "#1a9850", "target", dash="solid")
+        _hline(pos["stop_price"], _CHART_DOWN, "stop", dash="solid")
+        _hline(pos["target_price"], _CHART_UP, "target", dash="solid")
+    elif sig is not None:
+        # Signal high/low themselves are dropped as SEPARATE lines --
+        # the trigger sits only ~5% of ATR away from the signal high/low
+        # by construction, so showing both always overlapped. "Trigger"
+        # and "stop if triggered" convey the same information (and are
+        # the two levels that actually matter for what happens next)
+        # while staying visually distinct from each other.
+        buf = sig["signal_atr"] * istrat.ATR_PCT_BUFFER
+        if direction == istrat.LONG:
+            trigger, would_be_stop = sig["signal_high"] + buf, sig["signal_low"] - buf
+        else:
+            trigger, would_be_stop = sig["signal_low"] - buf, sig["signal_high"] + buf
+        _hline(trigger, "#e6a817", "entry trigger", dash="dash")
+        _hline(would_be_stop, _CHART_DOWN, "stop if triggered", dash="dot")
 
     fig.update_layout(
-        height=420, margin=dict(l=10, r=60, t=30, b=10),
-        xaxis_rangeslider_visible=False, showlegend=False,
-        yaxis_title="Price (₹)", plot_bgcolor="white", paper_bgcolor="white")
+        height=460, margin=dict(l=10, r=70, t=20, b=10),
+        showlegend=False, plot_bgcolor="white", paper_bgcolor="white",
+        bargap=0.15)
+    fig.update_xaxes(rangeslider_visible=False, showgrid=True, gridcolor="#eeeeee", row=1, col=1)
+    fig.update_xaxes(showgrid=False, row=2, col=1)
+    fig.update_yaxes(title_text="Price (₹)", showgrid=True, gridcolor="#eeeeee", row=1, col=1)
+    fig.update_yaxes(title_text="Vol", showgrid=False, row=2, col=1)
     return fig
 
 
@@ -6323,6 +6375,34 @@ def page_intraday_dashboard():
             _sel_pos_df = _open_now[_open_now["symbol"] == _sel_sym] if not _open_now.empty else _open_now
             _sel_pos = _sel_pos_df.iloc[0].to_dict() if not _sel_pos_df.empty else None
             _direction = day["day_bias"] if day is not None else istrat.LONG
+
+            # Live, tick-by-tick current (still-forming) candle -- Kite's
+            # historical API only ever returns CLOSED 5-min bars, so
+            # without this the chart visibly freezes for up to 5 minutes
+            # at a stretch instead of moving with the live price. Tracked
+            # in session_state (persists across this fragment's own
+            # reruns), reset the moment a new 5-min window starts.
+            _ticker = _get_dashboard_ticker()
+            _ensure_subscribed(_ticker, [_sel_sym])
+            _ltp, _ = _live_price_and_change(_ticker, _sel_sym)
+            _now = dt.datetime.now()
+            _cur_boundary = _now.replace(second=0, microsecond=0) - dt.timedelta(minutes=_now.minute % 5)
+            _live_key = f"_intraday_live_candle_{_sel_sym}_{today}"
+            _live_state = st.session_state.get(_live_key)
+            _live_candle = None
+            if _ltp is not None and _is_market_hours():
+                if _live_state is None or _live_state["boundary"] != _cur_boundary:
+                    _live_state = {"boundary": _cur_boundary, "open": _ltp, "high": _ltp,
+                                  "low": _ltp, "close": _ltp}
+                else:
+                    _live_state["high"] = max(_live_state["high"], _ltp)
+                    _live_state["low"] = min(_live_state["low"], _ltp)
+                    _live_state["close"] = _ltp
+                st.session_state[_live_key] = _live_state
+                _live_candle = {"ts": _cur_boundary, "open": _live_state["open"],
+                                "high": _live_state["high"], "low": _live_state["low"],
+                                "close": _live_state["close"], "volume": float("nan")}
+
             # first_low/first_high (the 09:15 first-candle gate reference)
             # only ever lives in the live engine's own in-memory tracker,
             # never persisted to the DB -- this dashboard process has no
@@ -6330,7 +6410,7 @@ def page_intraday_dashboard():
             # now (EMA21/signal/entry/stop/target still all render).
             fig = _build_intraday_candle_figure(
                 _sel_sym, _direction, today, first_low=None, first_high=None,
-                sig=_sel_sig, pos=_sel_pos)
+                sig=_sel_sig, pos=_sel_pos, live_candle=_live_candle)
             if fig is not None:
                 st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
             else:
