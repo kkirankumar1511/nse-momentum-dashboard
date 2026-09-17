@@ -1,30 +1,33 @@
 """
-Pure logic for the "DaysLowVolumnBreakout" intraday strategy -- v2
-(Sector-Gated), ported strictly from
-strategies/DaysLowVolumnBreakout_v2_SectorGate_Spec.md. v2 changes vs
-the original v1 spec (kept for history in DaysLowVolumnBreakout_
-Strategy_Spec.md, E:\\trading-workspace\\intraday-pullback-trading):
+Pure logic for the "DaysLowVolumnBreakout" intraday strategy -- v3
+(Top-5 Causal), ported strictly from
+strategies/DaysLowVolumnBreakout_v3_Top5Causal_Spec.md, cross-checked
+directly against its reference implementation (E:\\trading-workspace\\
+intraday-pullback-trading\\scratch_baseline_top5_best.py). v3 changes
+vs v2 (kept for history in DaysLowVolumnBreakout_v2_SectorGate_Spec.md):
 
-1. SIGNAL_WINDOW_START moved from "09:35" to "09:30" -- the candle
-   labeled 09:30 (covering 09:30-09:35) is now itself eligible to be a
-   signal candle.
-2. NEW first-candle invalidation gate (Spec v2 §3.2 step 1b): the day's
-   very first (09:15) candle's low/high is a second whole-day kill
-   switch, alongside the EMA21 gate -- either firing voids the whole
-   day for that candidate.
-3. NEW entry-time sector-confirmation gate (Spec v2 §6): once a
-   breakout triggers, the candidate's own primary sector's first-15m
-   A/D ratio must ALSO clear a strict 2.0/0.5 threshold (independent of
-   whatever the day-bias threshold is) or the trade is dropped. This is
-   computed/looked up by intraday_engine.py (needs sector-membership
-   I/O), not this module -- see sector_gate_pass() below for just the
-   threshold check itself.
-4. Day-bias threshold relaxed from 2.0/0.5 (v1) to 1.5/0.66 (v2's
-   best-found value, Spec v2 §9.4 -- do not casually retune, the
-   relationship was NOT monotonic in extensive sweeps).
+1. Candidate pool widened from top-2/day to **top-5/day**, walked with
+   a genuinely time-ordered ("causal") mechanism -- see
+   step_candidates_causal() below. This replaces the old rank-ordered
+   per-candidate independent scan, which had a real look-ahead bug (a
+   late-firing higher-rank signal could claim a slot ahead of an
+   early-firing lower-rank one -- impossible for a live system to know
+   in advance). MAX_TRADES_PER_DAY stays 2 -- only the pool searched
+   widened, not the number of trades taken.
+2. Signal-candle volume tolerance loosened from 5% to 10%
+   (VOL_THRESHOLD_PCT).
+3. Breakout window widened from 1 to 2 candles (BREAKOUT_WINDOW), with
+   a NEW requirement: every candle in that window must be the
+   confirming/continuation color (green for LONG, red for SHORT -- the
+   opposite of the signal candle's own pullback color). A single
+   wrong-colored candle drops the signal immediately, it does not wait
+   out the remaining window. The volume condition is checked ONLY at
+   signal-candle detection, never re-checked on the breakout candles
+   (tested and found dramatically worse if re-checked -- Spec v3 §6/§12).
 
-Entry/stop mechanics, target/exit management, position sizing, and the
-cost model are UNCHANGED from v1.
+First-candle gate, EMA21 gate, sector-confirmation gate (still strict
+2.0/0.5, independent of the day-bias threshold), target/exit management,
+and position sizing are UNCHANGED from v2.
 
 No Kite/broker/dashboard imports here on purpose -- everything in this
 module is pure pandas/stdlib, so it can be unit-tested and backtested
@@ -40,18 +43,28 @@ import pandas as pd
 LONG = "LONG"
 SHORT = "SHORT"
 
-# Spec v2 §3.1 constants
-SIGNAL_WINDOW_START = "09:30"  # v2: CHANGED from v1's "09:35" -- the
-# 09:30-labeled candle (covering 09:30-09:35) is now itself eligible.
+# Spec v3 §2/§5/§6 constants
+SIGNAL_WINDOW_START = "09:30"
 SIGNAL_WINDOW_END = "15:05"
 NEW_SIGNAL_CUTOFF = dt.time(11, 0)
-VOL_THRESHOLD_PCT = 0.05
+VOL_THRESHOLD_PCT = 0.10  # v3: CHANGED from v2's 0.05
 ATR_PCT_BUFFER = 0.05
-BREAKOUT_WINDOW = 1
+BREAKOUT_WINDOW = 2  # v3: CHANGED from v2's 1 -- see the confirm-color
+# rule in step_candle()/step_candidates_causal(): every candle in this
+# window must be the confirming color or the signal drops immediately,
+# it does not simply wait out the remaining window candles.
 ATR_PERIOD = 14
 EMA_SPAN = 21
 REWARD_RISK = 2.0
+# SQUAREOFF_TIME is a CANDLE LABEL (open-time), not a real-clock time --
+# the "15:10"-labeled candle covers 15:10:00-15:14:59 and closes at
+# 15:15:00 real time (Spec v3 §9's explicit audit finding: a live system
+# that naively squares off "at 15:10 real time" exits 5 minutes early on
+# the wrong price). intraday_engine.py's live loop must trigger its
+# force-squareoff at 15:15:00 real time to match this.
 SQUAREOFF_TIME = "15:10"
+TOP_N_CANDIDATES = 5  # v3: CHANGED from v2's 2 -- the SEARCHED pool widened;
+# MAX_TRADES_PER_DAY (below) stays 2, only the pool searched widened.
 
 # Spec v2 §2.2 day-bias ratio gate -- CHANGED from v1's strict 2.0/0.5
 # to this more moderate threshold (§9.4's sweep: neither the strict v1
@@ -145,7 +158,7 @@ def sector_gate_pass(sector_ratio: float, direction: str) -> bool:
     return sector_ratio < SECTOR_GATE_RATIO_SHORT_MAX
 
 
-def select_candidates(fno_ret_first15: pd.Series, bias: str, n: int = 2) -> pd.Series:
+def select_candidates(fno_ret_first15: pd.Series, bias: str, n: int = TOP_N_CANDIDATES) -> pd.Series:
     """Spec.md §2.3-2.4 -- rank the F&O universe (NOT NIFTY50 -- that's
     only used for the breadth ratio above) by first15_return, best-first
     for LONG / worst-first for SHORT, and take the top `n`. No sector or
@@ -218,6 +231,18 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
         # 2. An active signal -- check this candle for the breakout trigger.
         if active_signal is not None:
             breakout_counter += 1
+            # v3 NEW -- every candle in the (now 2-candle) breakout window
+            # must be the confirming/continuation color (green for LONG,
+            # red for SHORT -- opposite the signal candle's own pullback
+            # color) or the signal drops IMMEDIATELY, it does not wait out
+            # the remaining window candle(s) (Spec v3 §6 point 1).
+            confirm_is_green = row["close"] > row["open"]
+            confirm_is_red = row["close"] < row["open"]
+            wants_confirm_color = confirm_is_green if direction == LONG else confirm_is_red
+            if not wants_confirm_color:
+                active_signal = None
+                breakout_counter = 0
+                continue
             buf = active_signal["atr"] * ATR_PCT_BUFFER
             if direction == LONG:
                 trigger_level = active_signal["hi"] + buf
@@ -314,6 +339,22 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     active = state["active_signal"]
     if active is not None:
         state["breakout_counter"] += 1
+        # v3 NEW -- confirm-color rule (Spec v3 §6 point 1): every candle
+        # in the breakout window must be the confirming/continuation
+        # color (green for LONG, red for SHORT) or the signal drops
+        # immediately -- it does not wait out the remaining window
+        # candle(s). This is a CANDLE-CLOSE-only check (a live tick has
+        # no "color" mid-candle) -- check_tick_trigger()'s own tick-
+        # driven trigger check deliberately does not evaluate this,
+        # matching how the trigger price-crossing itself is checked
+        # continuously while color can only be confirmed at close.
+        confirm_is_green = row["close"] > row["open"]
+        confirm_is_red = row["close"] < row["open"]
+        wants_confirm_color = confirm_is_green if direction == LONG else confirm_is_red
+        if not wants_confirm_color:
+            state["active_signal"] = None
+            state["breakout_counter"] = 0
+            return state, {"type": "signal_expired"}
         buf = active["atr"] * ATR_PCT_BUFFER
         if direction == LONG:
             trigger_level = active["hi"] + buf
@@ -464,15 +505,27 @@ def leg_quantities(qty: int, legs: list[dict]) -> list[int]:
 # §8 -- transaction cost model
 # ---------------------------------------------------------------------------
 
-def round_trip_cost(entry_price: float, exit_price: float, qty: int) -> float:
+def round_trip_cost(entry_price: float, exit_price: float, qty: int,
+                    direction: str = LONG) -> float:
     """Spec.md §8 -- total cost (brokerage + STT + exchange + GST) for
-    one round-trip (one buy leg + one sell leg) of `qty` shares."""
+    one round-trip (one buy leg + one sell leg) of `qty` shares.
+
+    `direction` (v3 fix, Spec v3 §9): STT applies to whichever leg is
+    the actual SELL order, not always the exit leg. For LONG (buy then
+    sell), that's the exit. For SHORT (short-sell then cover-buy), the
+    SELL leg is the ENTRY, not the exit -- the previous default (always
+    charging STT on exit_turnover) silently mischarged every SHORT
+    trade, which this strategy trades more often than LONG (day-bias/
+    sector-gate mechanics naturally skew SHORT). `direction` defaults to
+    LONG only for source-compatibility with any pre-v3 caller that
+    doesn't pass it; live/backtest code should always pass it explicitly."""
     buy_turnover = entry_price * qty
     sell_turnover = exit_price * qty
+    stt_turnover = sell_turnover if direction == LONG else buy_turnover
 
     brokerage = (min(BROKERAGE_PCT * buy_turnover, BROKERAGE_CAP)
                 + min(BROKERAGE_PCT * sell_turnover, BROKERAGE_CAP))
-    stt = STT_SELL_PCT * sell_turnover
+    stt = STT_SELL_PCT * stt_turnover
     exchange_txn = EXCHANGE_TXN_PCT * (buy_turnover + sell_turnover)
     gst = GST_PCT * (brokerage + exchange_txn)
 

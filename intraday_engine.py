@@ -102,8 +102,12 @@ def run_selection(date: str, nifty50_symbols: list[str], fno_symbols: list[str],
             continue
         fno_rets[sym] = strat.first15_return(c0925, prev_close)
 
-    top = strat.select_candidates(pd.Series(fno_rets), bias, n=strat.MAX_TRADES_PER_DAY)
-    candidates = [{"symbol": sym, "direction": bias} for sym in top.index]
+    # v3 Spec §3 -- the SEARCHED pool widened to top-5 (TOP_N_CANDIDATES);
+    # MAX_TRADES_PER_DAY (still 2) is enforced later, by the causal walk's
+    # shared slot cap (Spec v3 §4), not by how many candidates are found here.
+    top = strat.select_candidates(pd.Series(fno_rets), bias, n=strat.TOP_N_CANDIDATES)
+    candidates = [{"symbol": sym, "direction": bias, "rank": i + 1}
+                 for i, sym in enumerate(top.index)]
     idb.record_candidates(date, [
         {"rank": i + 1, "symbol": sym, "ret_first15_pct": round(float(ret), 3)}
         for i, (sym, ret) in enumerate(top.items())])
@@ -180,13 +184,17 @@ class CandidateTracker:
     def __init__(self, date: str, symbol: str, direction: str,
                 ema21_series: pd.Series, atr14_series: pd.Series,
                 first_candle_low: float, first_candle_high: float,
-                sector: str | None = None, sector_ratio: float | None = None,
+                rank: int, sector: str | None = None, sector_ratio: float | None = None,
                 sector_gate_pass: bool = False):
         self.date = date
         self.symbol = symbol
         self.direction = direction
         self.ema21_series = ema21_series
         self.atr14_series = atr14_series
+        # v3 Spec §4 -- this candidate's rank in the day's top-5 pool,
+        # used ONLY to break ties when two-or-more candidates confirm a
+        # breakout at the exact same candle timestamp (lower rank wins).
+        self.rank = rank
         # v2 Spec §3.2 step 1b -- the day's 09:15 candle's own low/high,
         # fixed for the whole day (never refreshed, unlike ema21_series/
         # atr14_series which need the newest candle appended each boundary).
@@ -204,13 +212,21 @@ class CandidateTracker:
         self.done = False  # invalidated, or position fully closed -- nothing left to do today
 
 
-def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series,
-                   capital_alloc: float, risk_budget: float, mode: str) -> dict | None:
+def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series) -> dict | None:
     """One closed 5-min candle for one candidate -- advances its signal
-    state (step_candle()) and, on a trigger, sizes and records the new
-    position. Returns the event dict (see step_candle()'s docstring),
-    or a {"type": "position_opened", ...} event on a sized entry, or
-    None if nothing happened or tracker.done already.
+    state (step_candle()) only. Returns the raw event dict (see
+    step_candle()'s docstring), or None if nothing happened or
+    tracker.done already.
+
+    v3 Spec §4's causal multi-candidate walk requires collecting every
+    candidate's "triggered" event at the SAME boundary FIRST, sorting by
+    rank, then applying the day's shared 2-slot cap -- so unlike v2,
+    this function does NOT itself call _open_position_from_trigger() on
+    a trigger; the caller (run_live()'s boundary-processing block) does,
+    only for the entries that actually win a slot after that sort. The
+    tracker is marked done the instant it triggers regardless of what
+    happens next (Spec v3 §4: resolved the moment a breakout confirms,
+    whether or not it ends up winning a slot).
 
     Caller must update tracker.vol_min_so_far with this candle's own
     volume (running min, inclusive) BEFORE calling this -- see
@@ -261,7 +277,12 @@ def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series,
     if event["type"] == "triggered":
         if tracker.signal_db_id is not None:
             idb.update_signal_status(tracker.signal_db_id, "triggered")
-        return _open_position_from_trigger(tracker, event, capital_alloc, risk_budget, mode)
+        # Resolved the instant it triggers (Spec v3 §4) -- whether this
+        # candidate actually gets a trade depends on the sector gate AND
+        # the day's remaining slots, both applied by the caller after
+        # collecting every candidate's trigger at this same boundary.
+        tracker.done = True
+        return event
 
     return event
 
@@ -314,14 +335,23 @@ def _open_position_from_trigger(tracker: CandidateTracker, event: dict,
 
 
 def check_tick_entry(tracker: CandidateTracker, ltp: float, now: dt.datetime,
-                     capital_alloc: float, risk_budget: float, mode: str) -> dict | None:
+                     capital_alloc: float, risk_budget: float, mode: str,
+                     day_state: dict) -> dict | None:
     """Tick-driven counterpart to process_candle()'s candle-close trigger
     check (Spec.md §6.2) -- called on every live tick for a candidate
     that has an active signal but no position yet, so a breakout is
     caught the instant price crosses the trigger level rather than
     waiting up to 5 minutes for the candle to close. No-ops once
-    tracker.done or a position already exists."""
-    if tracker.done or tracker.position_id is not None:
+    tracker.done, a position already exists, or the day's trade slots
+    (`day_state["slots_remaining"]`, Spec v3 §4) are already used up.
+
+    Note: unlike the candle-close path, this does NOT (and cannot) check
+    the v3 confirm-color rule -- a live tick has no "candle color" until
+    that candle closes. A tick-driven trigger is a reasonable-but-not-
+    identical-to-backtest approximation for this reason (see Spec v3
+    §9's live-vs-candle-close audit); it is still gated by the sector
+    gate and the day's slot cap exactly like the candle-close path."""
+    if tracker.done or tracker.position_id is not None or day_state["slots_remaining"] <= 0:
         return None
     event = strat.check_tick_trigger(tracker.signal_state, tracker.direction, ltp, now)
     if event is None:
@@ -332,7 +362,11 @@ def check_tick_entry(tracker: CandidateTracker, ltp: float, now: dt.datetime,
     tracker.signal_state = dict(tracker.signal_state, active_signal=None, breakout_counter=0)
     if tracker.signal_db_id is not None:
         idb.update_signal_status(tracker.signal_db_id, "triggered")
-    return _open_position_from_trigger(tracker, event, capital_alloc, risk_budget, mode)
+    tracker.done = True  # resolved the instant it triggers (Spec v3 §4)
+    result = _open_position_from_trigger(tracker, event, capital_alloc, risk_budget, mode)
+    if result["type"] == "position_opened":
+        day_state["slots_remaining"] -= 1
+    return result
 
 
 def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.datetime,
@@ -362,7 +396,10 @@ def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.dateti
 
 
 def force_squareoff(tracker: CandidateTracker, ltp: float, now: dt.datetime, mode: str) -> dict | None:
-    """Spec.md §5.4 -- 15:10 force-close, time-driven regardless of price."""
+    """Spec §5.4 -- force-close at the "15:10"-labeled candle's close,
+    which is the price at 15:15:00 real time (Spec v3 §9) -- time-driven
+    regardless of price. Called by run_live() once its own loop exits at
+    15:15:00 real time."""
     if tracker.position_id is None:
         return None
     pos = idb.get_position(tracker.position_id)
@@ -379,7 +416,7 @@ def _close_leg(tracker: CandidateTracker, pos: dict, leg_type: str, qty: int,
         order_id = kite_client.place_order(pos["symbol"], qty, side, product="MIS", order_type="MARKET")
     sign = 1 if pos["direction"] == strat.LONG else -1
     gross = (exit_price - pos["entry_price"]) * qty * sign
-    cost = strat.round_trip_cost(pos["entry_price"], exit_price, qty)
+    cost = strat.round_trip_cost(pos["entry_price"], exit_price, qty, direction=pos["direction"])
     net = gross - cost
     idb.close_position_leg(tracker.position_id, leg_type, qty, exit_price, str(now), gross, cost, net, order_id)
     if leg_type in ("stop", "squareoff"):
@@ -593,7 +630,7 @@ def run_live(mode: str = "paper") -> None:
         first_candle_low = float(first_candle.iloc[0]["low"])
         first_candle_high = float(first_candle.iloc[0]["high"])
         t = CandidateTracker(date_str, sym, c["direction"], ema21_series, atr14_series,
-                            first_candle_low, first_candle_high,
+                            first_candle_low, first_candle_high, c["rank"],
                             sector=c.get("sector"), sector_ratio=c.get("sector_ratio"),
                             sector_gate_pass=c.get("sector_gate_pass", False))
         # Seed the running vol-min from today's pre-window candles (09:15-
@@ -603,7 +640,7 @@ def run_live(mode: str = "paper") -> None:
         t.vol_min_so_far = float(pre_window["volume"].min()) if not pre_window.empty else None
         trackers.append(t)
 
-    # Live tick feed (WebSocket, not REST polling) -- both candidates'
+    # Live tick feed (WebSocket, not REST polling) -- all candidates'
     # trigger/stop/target checks below react to real ticks as they
     # arrive instead of a fixed poll cadence. See live_ticker.py.
     inst_map = kite_client.instrument_map()
@@ -611,12 +648,26 @@ def run_live(mode: str = "paper") -> None:
     ticker = live_ticker.LiveTicker({tok: sym for sym, tok in token_by_symbol.items()})
     ticker.start()
 
+    # v3 Spec §4 -- the day's shared trade-slot cap, mutated by both the
+    # candle-close path (below) and the tick-driven path
+    # (check_tick_entry()) -- a single dict so both share the same live
+    # count rather than each keeping its own (which would let both
+    # independently think a slot was free and double-fill it).
+    day_state = {"slots_remaining": strat.MAX_TRADES_PER_DAY}
+
     try:
         last_candle_ts = None
-        print("Entering intraday loop (09:30-15:10)...")
+        print("Entering intraday loop (09:30-15:15)...")
         while True:
             now = dt.datetime.now()
-            if now.time() >= dt.time(15, 10):
+            # v3 Spec §9's explicit audit finding: the "15:10"-labeled
+            # candle (covering 15:10:00-15:14:59) is what the backtest's
+            # squareoff uses, and its CLOSE is the price at 15:15:00 real
+            # time -- exiting "at 15:10" (the old v1/v2 exit time) would
+            # square off 5 minutes early on the wrong price. This applies
+            # to v1/v2 too, not just v3 -- the squareoff mechanism itself
+            # was never v3-specific, only this timing bug was.
+            if now.time() >= dt.time(15, 15):
                 break
 
             boundary = _last_closed_candle_label(now)
@@ -625,7 +676,20 @@ def run_live(mode: str = "paper") -> None:
             # follows the same constant rather than a separate hardcoded
             # time, to avoid the two silently drifting apart again.
             if (boundary.time() >= dt.datetime.strptime(strat.SIGNAL_WINDOW_START, "%H:%M").time()
-                    and (last_candle_ts is None or boundary > last_candle_ts)):
+                    and (last_candle_ts is None or boundary > last_candle_ts)
+                    and day_state["slots_remaining"] > 0):
+                # v3 Spec §4 -- collect EVERY candidate's event at this
+                # SAME boundary first; only after all of them have been
+                # advanced do we sort the ones that triggered by rank and
+                # apply the day's shared slot cap. Acting on each tracker
+                # immediately as it's evaluated (as v1/v2 did, fine there
+                # since it only ever had 2 candidates and no shared slot
+                # cap to race over) would let whichever candidate simply
+                # happens to iterate first claim a slot regardless of
+                # rank, if two or more confirm at this exact timestamp --
+                # this collect-then-sort step is what Spec v3 §4 requires
+                # instead: ties broken by rank, not iteration order.
+                fires_this_candle = []  # (rank, tracker, event)
                 for t in trackers:
                     if t.done or t.position_id is not None:
                         # Once a position is open, EMA21/ATR14/vol tracking
@@ -655,10 +719,26 @@ def run_live(mode: str = "paper") -> None:
                     row = row_df.iloc[0]
                     t.vol_min_so_far = (row["volume"] if t.vol_min_so_far is None
                                        else min(t.vol_min_so_far, row["volume"]))
-                    event = process_candle(t, boundary, row, capital_alloc, risk_budget, mode)
-                    if event:
+                    event = process_candle(t, boundary, row)
+                    if event and event["type"] == "triggered":
+                        fires_this_candle.append((t.rank, t, event))
+                    elif event:
                         print(f"{boundary} {t.symbol}: {event}")
                 last_candle_ts = boundary
+
+                for rank, t, event in sorted(fires_this_candle, key=lambda x: x[0]):
+                    if day_state["slots_remaining"] <= 0:
+                        # Lost the tie / day already filled by an earlier
+                        # candidate this same boundary -- t.done is already
+                        # True (set in process_candle() the instant it
+                        # triggered), no position opened, nothing more to do.
+                        print(f"{boundary} {t.symbol}: triggered but day's "
+                             f"{strat.MAX_TRADES_PER_DAY} slots already filled -- no trade")
+                        continue
+                    result = _open_position_from_trigger(t, event, capital_alloc, risk_budget, mode)
+                    print(f"{boundary} {t.symbol}: {result}")
+                    if result["type"] == "position_opened":
+                        day_state["slots_remaining"] -= 1
 
             for t in trackers:
                 if t.done:
@@ -671,15 +751,28 @@ def run_live(mode: str = "paper") -> None:
                     continue
                 now2 = dt.datetime.now()
                 if t.position_id is None:
-                    event = check_tick_entry(t, ltp, now2, capital_alloc, risk_budget, mode)
+                    event = check_tick_entry(t, ltp, now2, capital_alloc, risk_budget, mode, day_state)
                 else:
                     event = check_intracandle_exit(t, ltp, now2, mode)
                 if event:
                     print(f"{now2:%H:%M:%S} {t.symbol}: {event}")
 
+            if day_state["slots_remaining"] <= 0:
+                # v3 Spec §4 -- "the outer timestamp loop then breaks --
+                # no further candles are processed for that day, for any
+                # remaining candidate." Any candidate still watching (not
+                # yet done) has nothing left it could do -- mark it done
+                # so the tick loop above also stops touching it, but keep
+                # the process itself alive (still need to watch any OPEN
+                # position's stop/target/squareoff through end of day).
+                for t in trackers:
+                    if t.position_id is None and not t.done:
+                        t.done = True
+                        idb.mark_candidate_status(t.date, t.symbol, "day_slots_filled")
+
             time.sleep(CHECK_INTERVAL_SECONDS)
 
-        print("15:10 -- squaring off any remaining open positions...")
+        print("15:15 -- squaring off any remaining open positions...")
         for t in trackers:
             if t.position_id is None:
                 continue

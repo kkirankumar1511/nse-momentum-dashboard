@@ -5995,11 +5995,13 @@ def _live_price_and_change(ticker: live_ticker.LiveTicker, symbol: str) -> tuple
 def page_intraday_dashboard():
     _mode = "live" if config.STRATEGY.get("intraday_live_enabled", False) else "paper"
     _tip = html_lib.escape(
-        "The DaysLowVolumnBreakout intraday strategy -- day-bias from NIFTY "
-        "50 breadth, top-2 F&O momentum candidates, a low-volume pullback "
-        "signal, ATR-buffered breakout entry, half-target/half-15:10 exit. "
-        "Paper mode simulates every fill with zero real orders; switching "
-        "to live is a separate, deliberate step (Admin).")
+        "The DaysLowVolumnBreakout intraday strategy (v3, Top-5 Causal) -- "
+        "day-bias from NIFTY 50 breadth, a top-5 F&O momentum candidate pool "
+        "walked causally in real time for 2 trade slots/day, a low-volume "
+        "pullback signal, ATR-buffered 2-candle breakout entry, sector "
+        "confirmation gate, half-target/half-15:15 exit. Paper mode "
+        "simulates every fill with zero real orders; switching to live is "
+        "a separate, deliberate step (Admin).")
     _mode_badge = ('<span class="ov-badge ov-badge-red">🔴 LIVE</span>' if _mode == "live"
                   else '<span class="ov-badge ov-badge-blue">📝 PAPER</span>')
     st.markdown(
@@ -6101,16 +6103,38 @@ def page_intraday_dashboard():
                 st.markdown(f'<div class="ov-grid-metrics">{_bias_box}{_ratio_box}</div>',
                            unsafe_allow_html=True)
     
-        # --- Today's 2 candidates ------------------------------------------------
+        # --- Today's candidates (v3: top-5 pool, 2 trade slots) ------------------
         st.markdown(
             '<p class="ov-card-title" style="margin-top:16px;"><span class="ov-dot" '
-            'style="background:var(--ov-teal);"></span>Today\'s candidates</p>', unsafe_allow_html=True)
+            f'style="background:var(--ov-teal);"></span>Today\'s candidates '
+            f'<span class="ov-card-meta">(top-{istrat.TOP_N_CANDIDATES} pool, '
+            f'{istrat.MAX_TRADES_PER_DAY} trade slots)</span></p>', unsafe_allow_html=True)
         candidates = idb.get_candidates(today)
         if candidates.empty:
             st.info("No candidates selected yet today.")
         else:
+            # v3 Spec §4 -- only MAX_TRADES_PER_DAY of the pool ever actually
+            # trade (first to confirm, in rank order on ties); this counts
+            # real positions opened today, not just candidates evaluated.
+            _today_positions = idb.get_positions(date=today, mode=_mode)
+            _slots_filled = int(_today_positions["symbol"].nunique()) if not _today_positions.empty else 0
+            _slots_cls = "ov-pos" if _slots_filled < istrat.MAX_TRADES_PER_DAY else "ov-neg"
+            st.markdown(
+                f'<p class="ov-card-meta">Trade slots: '
+                f'<span class="{_slots_cls}">{_slots_filled}/{istrat.MAX_TRADES_PER_DAY} filled</span></p>',
+                unsafe_allow_html=True)
+
             _ensure_subscribed(ticker, list(candidates["symbol"]))
-            cand_cols = st.columns(len(candidates))
+            # Wrap into rows of up to 3 cards -- st.columns() called once per
+            # chunk renders each call as its own row; collecting the returned
+            # column objects into one flat list lets the existing per-card
+            # body below (unchanged) just zip against it as if it were one
+            # single row, same as the old 2-candidate st.columns(len(...)).
+            _CHUNK = 3
+            _cand_rows = list(candidates.iterrows())
+            cand_cols = []
+            for _i in range(0, len(_cand_rows), _CHUNK):
+                cand_cols.extend(st.columns(min(_CHUNK, len(_cand_rows) - _i)))
             for col, (_, c) in zip(cand_cols, candidates.iterrows()):
                 with col:
                   with st.container(border=True, key=f"ov-card-cand-{c['symbol']}"):
@@ -6239,6 +6263,11 @@ def page_intraday_dashboard():
                                        unsafe_allow_html=True)
                             st.caption(f"Breakout triggered but {c.get('sector') or 'sector'}'s "
                                       f"ratio ({_sr_text}) didn't confirm -- trade dropped.")
+                        elif c.get("status") == "day_slots_filled":
+                            st.markdown('<span class="ov-badge ov-badge-gray">Day\'s slots filled</span>',
+                                       unsafe_allow_html=True)
+                            st.caption(f"Both of today's {istrat.MAX_TRADES_PER_DAY} trade slots were "
+                                      "taken by other candidates before this one confirmed.")
                         elif dt.datetime.now().time() > istrat.NEW_SIGNAL_CUTOFF:
                             st.markdown('<span class="ov-badge ov-badge-gray">No signal formed</span>',
                                        unsafe_allow_html=True)
