@@ -54,6 +54,12 @@ DEFAULT_PAPER_CAPITAL = 1_000_000.0
 # just bounds how quickly the loop notices them.
 CHECK_INTERVAL_SECONDS = 1
 TICK_STALE_SECONDS = 20  # fall back to a REST get_ltp() if the feed goes quiet this long
+# NSE settlement-type suffixes a stock's Kite trading symbol can carry
+# while under a temporary special settlement/surveillance category (most
+# commonly "-BE", trade-for-trade) -- the company itself trades
+# completely normally, just under this suffixed symbol instead of its
+# plain one. See _prev_close_and_0925()'s docstring for why this matters.
+_NSE_SETTLEMENT_SUFFIXES = ("-BE", "-BZ", "-BL", "-BT")
 
 
 def _push(title: str, message: str) -> None:
@@ -409,10 +415,10 @@ def _prev_close_and_0925(symbols: list[str], today: dt.date) -> tuple[dict[str, 
     purpose, since it's no longer close to 09:30.
 
     Falls back to the old slow-but-robust per-symbol historical-candle
-    fetch ONLY for symbols the batched call didn't return usable data
-    for (rare -- e.g. a newly-listed stock quote() doesn't recognize
-    yet), so a handful of stragglers can't silently degrade the whole
-    run back to 72s."""
+    fetch ONLY for symbols the batched call (and the settlement-suffix
+    retry below) didn't return usable data for (rare -- e.g. a
+    newly-listed stock quote() doesn't recognize yet), so a handful of
+    stragglers can't silently degrade the whole run back to 72s."""
     close_0925, prev_close = {}, {}
     try:
         quotes = kite_client.get_quote_with_change(symbols)
@@ -427,8 +433,36 @@ def _prev_close_and_0925(symbols: list[str], today: dt.date) -> tuple[dict[str, 
 
     missing = [s for s in symbols if s not in close_0925 or s not in prev_close]
     if missing:
-        print(f"[intraday_engine] {len(missing)} symbol(s) missing from the batched "
-             f"quote() -- falling back to per-symbol fetch for those")
+        # A "missing" symbol is often NOT actually missing data -- NSE
+        # temporarily moves a stock into a trade-for-trade/surveillance
+        # settlement segment, which changes its Kite trading symbol to
+        # e.g. "HFCL-BE" instead of "HFCL", while the underlying company
+        # keeps trading completely normally. Confirmed live 2026-09-17:
+        # HFCL had real, current quote data the whole time under -BE;
+        # treating it as genuinely missing would have wrongly failed the
+        # sector gate (Spec v2 §6/§10.3) closed for a stock that wasn't
+        # actually missing anything. Tried BEFORE the slow per-symbol
+        # historical-candle fallback below, since it's one more cheap
+        # batch call, not a real fallback path.
+        suffix_keys = [f"{s}{suf}" for s in missing for suf in _NSE_SETTLEMENT_SUFFIXES]
+        try:
+            suffix_quotes = kite_client.get_quote_with_change(suffix_keys)
+        except Exception as e:
+            suffix_quotes = {}
+            print(f"[intraday_engine] settlement-suffix retry fetch failed -- {e}")
+        for s in missing:
+            for suf in _NSE_SETTLEMENT_SUFFIXES:
+                q = suffix_quotes.get(f"{s}{suf}")
+                if q and q.get("last_price") and q.get("prev_close"):
+                    close_0925[s] = float(q["last_price"])
+                    prev_close[s] = float(q["prev_close"])
+                    break
+
+    missing = [s for s in symbols if s not in close_0925 or s not in prev_close]
+    if missing:
+        print(f"[intraday_engine] {len(missing)} symbol(s) still missing after the "
+             f"batched quote() + settlement-suffix retry -- falling back to per-symbol "
+             f"fetch for those")
     today_ts = pd.Timestamp(today)
     for sym in missing:
         try:
