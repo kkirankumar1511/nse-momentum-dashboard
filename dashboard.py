@@ -1050,6 +1050,7 @@ COLUMN_LABELS = {
     "current_qty": "Current qty", "rank": "Momentum rank", "rank_fmt": "Rank",
     "cand_rank": "Rank", "cand_sector": "Sector", "ret_first15_pct": "1st-15m %",
     "chg_pct": "Chg %", "gate": "Sector gate", "state": "State",
+    "direction": "Direction", "qty_remaining": "Qty", "upnl": "Unrealized P&L",
 
     # Screener / momentum
     "score": "Score", "price": "Price", "rs_3m": "RS 3M", "rs_6m": "RS 6M",
@@ -6458,7 +6459,37 @@ def page_intraday_dashboard():
                             badges={"leg_type": _INTRADAY_EVENT_BADGES}),
                         unsafe_allow_html=True)
                 if not _open_now.empty:
-                    st.caption(f"{len(_open_now)} position(s) still open -- see candidate table above.")
+                    st.markdown('<p class="ov-card-meta">Open position(s), live</p>',
+                               unsafe_allow_html=True)
+                    _ensure_subscribed(_ticker, list(_open_now["symbol"]))
+                    _open_rows = []
+                    for _, _p in _open_now.iterrows():
+                        _p_ltp, _ = _live_price_and_change(_ticker, _p["symbol"])
+                        _p_dir_sign = 1.0 if _p["direction"] == istrat.LONG else -1.0
+                        if _p_ltp is not None:
+                            _p_chg_pct = (_p_ltp - _p["entry_price"]) / _p["entry_price"] * 100.0 * _p_dir_sign
+                            _p_upnl = (_p_ltp - _p["entry_price"]) * _p["qty_remaining"] * _p_dir_sign
+                        else:
+                            _p_chg_pct, _p_upnl = float("nan"), float("nan")
+                        _open_rows.append({
+                            "symbol": _p["symbol"], "direction": _p["direction"],
+                            "entry_price": _p["entry_price"], "ltp": _p_ltp,
+                            "chg_pct": _p_chg_pct, "qty_remaining": _p["qty_remaining"],
+                            "upnl": _p_upnl,
+                        })
+                    _open_df = pd.DataFrame(_open_rows)
+                    st.markdown(
+                        _ov_table_html(
+                            _open_df,
+                            columns=["symbol", "direction", "entry_price", "ltp", "chg_pct",
+                                    "qty_remaining", "upnl"],
+                            sym_cols=["symbol"], pnl_cols=["chg_pct", "upnl"],
+                            num_fmt={"entry_price": "₹{:,.2f}", "ltp": "₹{:,.2f}",
+                                    "chg_pct": "{:+.2f}%", "qty_remaining": "{:.0f}",
+                                    "upnl": "₹{:+,.2f}"},
+                            badges={"direction": {"LONG": "ov-badge-green", "SHORT": "ov-badge-red"}},
+                            na_rep="—"),
+                        unsafe_allow_html=True)
             st.page_link(page_intraday_tradebook_p, label="View full tradebook →", icon="📒")
 
     _render_chart_and_tradebook_section()
