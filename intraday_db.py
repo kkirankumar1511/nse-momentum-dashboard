@@ -139,6 +139,15 @@ def _migrate_daily_selection_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE intraday_daily_selection ADD COLUMN status TEXT NOT NULL DEFAULT 'watching'")
     if "status_updated_at" not in cols:
         conn.execute("ALTER TABLE intraday_daily_selection ADD COLUMN status_updated_at TEXT")
+    # v2 Spec §6 -- entry-time sector-confirmation gate, resolved once at
+    # 09:30 per candidate (sector name, that sector's own first-15m A/D
+    # ratio, and whether it cleared the strict 2.0/0.5 threshold).
+    if "sector" not in cols:
+        conn.execute("ALTER TABLE intraday_daily_selection ADD COLUMN sector TEXT")
+    if "sector_ratio" not in cols:
+        conn.execute("ALTER TABLE intraday_daily_selection ADD COLUMN sector_ratio REAL")
+    if "sector_gate_pass" not in cols:
+        conn.execute("ALTER TABLE intraday_daily_selection ADD COLUMN sector_gate_pass INTEGER")
     conn.commit()
 
 
@@ -183,22 +192,40 @@ def record_candidates(date: str, candidates: list[dict]) -> None:
 def get_candidates(date: str) -> pd.DataFrame:
     conn = get_conn()
     df = pd.read_sql(
-        "SELECT rank, symbol, ret_first15_pct, status FROM intraday_daily_selection "
-        "WHERE date = ? ORDER BY rank", conn, params=(date,))
+        "SELECT rank, symbol, ret_first15_pct, status, sector, sector_ratio, "
+        "sector_gate_pass FROM intraday_daily_selection WHERE date = ? ORDER BY rank",
+        conn, params=(date,))
     conn.close()
+    if not df.empty:
+        df["sector_gate_pass"] = df["sector_gate_pass"].astype("boolean")
     return df
 
 
 def mark_candidate_status(date: str, symbol: str, status: str) -> None:
-    """status: 'watching' (default) | 'invalidated' | 'traded'. Called
-    the moment a candidate's day is decided one way or the other, so the
-    Dashboard can show a definitive state instead of inferring it from
-    intraday_signals (which has no row at all for a candidate invalidated
-    before ever forming a signal candle)."""
+    """status: 'watching' (default) | 'invalidated' | 'sector_gate_failed'
+    | 'traded'. Called the moment a candidate's day is decided one way or
+    the other, so the Dashboard can show a definitive state instead of
+    inferring it from intraday_signals (which has no row at all for a
+    candidate invalidated before ever forming a signal candle)."""
     conn = get_conn()
     conn.execute(
         "UPDATE intraday_daily_selection SET status = ?, status_updated_at = datetime('now') "
         "WHERE date = ? AND symbol = ?", (status, date, symbol))
+    conn.commit()
+    conn.close()
+
+
+def update_candidate_sector_gate(date: str, symbol: str, sector: str | None,
+                                 sector_ratio: float | None, gate_pass: bool) -> None:
+    """Spec v2 §6 -- persists a candidate's resolved primary sector, that
+    sector's own first-15m A/D ratio, and whether it cleared the strict
+    2.0/0.5 gate. Called once at 09:30 (resolve_sector_gates()), looked
+    up (not recomputed) later if/when that candidate's breakout triggers."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE intraday_daily_selection SET sector = ?, sector_ratio = ?, "
+        "sector_gate_pass = ? WHERE date = ? AND symbol = ?",
+        (sector, sector_ratio, int(gate_pass), date, symbol))
     conn.commit()
     conn.close()
 

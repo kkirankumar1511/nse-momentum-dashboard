@@ -6083,7 +6083,8 @@ def page_intraday_dashboard():
                 st.info("No selection recorded yet today -- the engine runs this once, at 09:30.")
             elif day["day_bias"] is None:
                 st.warning(f"⚠️ No trade today -- NIFTY 50 first-15-min ratio was "
-                          f"{day['nifty_ratio']:.2f} (needs >2.0 for LONG or <0.5 for SHORT).")
+                          f"{day['nifty_ratio']:.2f} (needs >{istrat.BIAS_RATIO_LONG_MIN} for LONG "
+                          f"or <{istrat.BIAS_RATIO_SHORT_MAX} for SHORT).")
             else:
                 bias_tone = "green" if day["day_bias"] == "LONG" else "red"
                 bias_cls = "ov-pos" if day["day_bias"] == "LONG" else "ov-neg"
@@ -6106,10 +6107,13 @@ def page_intraday_dashboard():
                 with col:
                   with st.container(border=True, key=f"ov-card-cand-{c['symbol']}"):
                     cand_price, cand_chg = _live_price_and_change(ticker, c["symbol"])
-                    try:
-                        _profile = su.resolve_sector_profiles([c["symbol"]], verbose=False).get(c["symbol"], {})
-                        sector = _profile.get("primary_sector")
-                    except Exception:
+                    # v2 Spec §6 -- sector is resolved/persisted once at
+                    # 09:30 by resolve_sector_gates(), authoritative for
+                    # what the entry gate actually used (a fresh live
+                    # re-resolve here could theoretically disagree if the
+                    # 7-day sector cache happened to refresh mid-day).
+                    sector = c.get("sector")
+                    if pd.isna(sector):
                         sector = None
                     st.markdown(f"**#{int(c['rank'])} {c['symbol']}**"
                                + (f"  ·  _{sector}_" if sector else ""))
@@ -6154,7 +6158,30 @@ def page_intraday_dashboard():
                             f"{sector_ad['advances']} / {sector_ad['declines']}" if sector_ad else "—")
                         st.markdown(f'<div class="ov-grid-metrics">{_sec_price_box}{_sec_ad_box}</div>',
                                    unsafe_allow_html=True)
-    
+
+                    # v2 Spec §6 -- the entry-time sector-CONFIRMATION gate
+                    # itself: a FIXED ratio computed once at 09:30 from
+                    # first15_return (not the live-updating A/D snapshot
+                    # above), checked against a strict 2.0/0.5 threshold
+                    # the moment this candidate's breakout triggers.
+                    # Deliberately shown separately from "Sector A/D" above
+                    # so the two aren't confused with each other.
+                    _sgp = c.get("sector_gate_pass")
+                    if pd.notna(_sgp):
+                        _sr = c.get("sector_ratio")
+                        _gate_ratio_text = f"{_sr:.2f}" if pd.notna(_sr) else "no data"
+                        _gate_badge_cls = "ov-badge-green" if _sgp else "ov-badge-red"
+                        _gate_verdict = "PASS" if _sgp else "FAIL"
+                        _gate_needs = (f"&gt;{istrat.SECTOR_GATE_RATIO_LONG_MIN}" if day["day_bias"] == "LONG"
+                                      else f"&lt;{istrat.SECTOR_GATE_RATIO_SHORT_MAX}")
+                        st.markdown(
+                            f'<p class="ov-card-title" style="margin-top:10px;font-size:12px;">'
+                            f'<span class="ov-dot" style="background:var(--ov-amber);"></span>'
+                            f'Entry gate (sector, fixed @ 09:30)</p>'
+                            f'<span class="ov-badge {_gate_badge_cls}">{_gate_verdict}</span> '
+                            f'<span class="ov-card-meta">ratio {_gate_ratio_text} (needs {_gate_needs})</span>',
+                            unsafe_allow_html=True)
+
                     # signal / position state machine, most-recent first
                     sig = idb.get_active_signal(today, c["symbol"])
                     open_pos = idb.get_open_positions(date=today, mode=_mode)
@@ -6193,10 +6220,17 @@ def page_intraday_dashboard():
                             st.markdown('<span class="ov-badge ov-badge-gray">Day closed</span>',
                                        unsafe_allow_html=True)
                         elif c.get("status") == "invalidated":
-                            st.markdown('<span class="ov-badge ov-badge-red">Day invalidated (EMA21)</span>',
+                            st.markdown('<span class="ov-badge ov-badge-red">Day invalidated</span>',
                                        unsafe_allow_html=True)
-                            st.caption("Close crossed to the wrong side of EMA21 -- "
+                            st.caption("EMA21 or first-candle gate fired -- "
                                       "no trade for this stock for the rest of today.")
+                        elif c.get("status") == "sector_gate_failed":
+                            _sr = c.get("sector_ratio")
+                            _sr_text = f"{_sr:.2f}" if pd.notna(_sr) else "no data"
+                            st.markdown('<span class="ov-badge ov-badge-red">Sector gate failed</span>',
+                                       unsafe_allow_html=True)
+                            st.caption(f"Breakout triggered but {c.get('sector') or 'sector'}'s "
+                                      f"ratio ({_sr_text}) didn't confirm -- trade dropped.")
                         elif dt.datetime.now().time() > istrat.NEW_SIGNAL_CUTOFF:
                             st.markdown('<span class="ov-badge ov-badge-gray">No signal formed</span>',
                                        unsafe_allow_html=True)

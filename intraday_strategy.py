@@ -1,17 +1,30 @@
 """
-Pure logic for the "DaysLowVolumnBreakout" intraday strategy -- ported
-strictly from DaysLowVolumnBreakout_Strategy_Spec.md (E:\\trading-
-workspace\\intraday-pullback-trading), NOT from that project's own
-strategy.py/pullback.py modules. Those modules implement an older,
-since-rejected variant (top-20 selection + a 200-EMA regime filter + an
-EMA13/21/50/200 stack gate + a breakeven-stop-move) -- the spec's own
-§9 explicitly lists all of these as tested and found worse. The
-Spec-matching logic (top-2 selection, ratio-gated day bias, continuous
-EMA21 invalidation, ATR14x5% buffer, no breakeven, no sector filter)
-only ever existed in that project's disposable scratch_*.py scripts;
-this module is a from-scratch, clean implementation of the same rules,
-independently verified to reproduce those scripts' own 5-year published
-results byte-for-byte (see verify_intraday_strategy.py).
+Pure logic for the "DaysLowVolumnBreakout" intraday strategy -- v2
+(Sector-Gated), ported strictly from
+strategies/DaysLowVolumnBreakout_v2_SectorGate_Spec.md. v2 changes vs
+the original v1 spec (kept for history in DaysLowVolumnBreakout_
+Strategy_Spec.md, E:\\trading-workspace\\intraday-pullback-trading):
+
+1. SIGNAL_WINDOW_START moved from "09:35" to "09:30" -- the candle
+   labeled 09:30 (covering 09:30-09:35) is now itself eligible to be a
+   signal candle.
+2. NEW first-candle invalidation gate (Spec v2 §3.2 step 1b): the day's
+   very first (09:15) candle's low/high is a second whole-day kill
+   switch, alongside the EMA21 gate -- either firing voids the whole
+   day for that candidate.
+3. NEW entry-time sector-confirmation gate (Spec v2 §6): once a
+   breakout triggers, the candidate's own primary sector's first-15m
+   A/D ratio must ALSO clear a strict 2.0/0.5 threshold (independent of
+   whatever the day-bias threshold is) or the trade is dropped. This is
+   computed/looked up by intraday_engine.py (needs sector-membership
+   I/O), not this module -- see sector_gate_pass() below for just the
+   threshold check itself.
+4. Day-bias threshold relaxed from 2.0/0.5 (v1) to 1.5/0.66 (v2's
+   best-found value, Spec v2 §9.4 -- do not casually retune, the
+   relationship was NOT monotonic in extensive sweeps).
+
+Entry/stop mechanics, target/exit management, position sizing, and the
+cost model are UNCHANGED from v1.
 
 No Kite/broker/dashboard imports here on purpose -- everything in this
 module is pure pandas/stdlib, so it can be unit-tested and backtested
@@ -27,8 +40,9 @@ import pandas as pd
 LONG = "LONG"
 SHORT = "SHORT"
 
-# Spec.md §3.1 constants
-SIGNAL_WINDOW_START = "09:35"
+# Spec v2 §3.1 constants
+SIGNAL_WINDOW_START = "09:30"  # v2: CHANGED from v1's "09:35" -- the
+# 09:30-labeled candle (covering 09:30-09:35) is now itself eligible.
 SIGNAL_WINDOW_END = "15:05"
 NEW_SIGNAL_CUTOFF = dt.time(11, 0)
 VOL_THRESHOLD_PCT = 0.05
@@ -39,9 +53,20 @@ EMA_SPAN = 21
 REWARD_RISK = 2.0
 SQUAREOFF_TIME = "15:10"
 
-# Spec.md §2.2 day-bias ratio gate
-BIAS_RATIO_LONG_MIN = 2.0
-BIAS_RATIO_SHORT_MAX = 0.5
+# Spec v2 §2.2 day-bias ratio gate -- CHANGED from v1's strict 2.0/0.5
+# to this more moderate threshold (§9.4's sweep: neither the strict v1
+# value nor a fully-relaxed 1.0/1.0 performed as well as this one).
+BIAS_RATIO_LONG_MIN = 1.5
+BIAS_RATIO_SHORT_MAX = 0.66
+
+# Spec v2 §6.3 -- entry-time sector-confirmation gate threshold.
+# Deliberately kept STRICT (2.0/0.5) independent of the day-bias
+# threshold above -- §9.5's sweep found relaxing this to match a looser
+# day-bias threshold consistently hurt performance in every combination
+# tested. Checked only once a breakout has already triggered (§6),
+# against a ratio computed once at 09:30 (see intraday_engine.py).
+SECTOR_GATE_RATIO_LONG_MIN = 2.0
+SECTOR_GATE_RATIO_SHORT_MAX = 0.5
 
 # Spec.md §7 position sizing
 MAX_TRADES_PER_DAY = 2
@@ -91,17 +116,33 @@ def first15_return(close_0925: float, prev_day_close: float) -> float:
 
 
 def day_bias(nifty_ratio: float) -> str | None:
-    """Spec.md §2.2's day-bias gate. `nifty_ratio` = advancers/decliners
+    """Spec v2 §2.2's day-bias gate. `nifty_ratio` = advancers/decliners
     among NIFTY50 constituents by first15_return sign (ratio = +inf if
     decliners == 0). Returns None -- the day is SKIPPED entirely -- when
-    the ratio doesn't clear either threshold. Do not loosen this to a
-    plain >=1/<1 split; that weaker gate was tested and found worse
-    (Spec.md §9, this exact threshold pair is the validated one)."""
+    the ratio doesn't clear either threshold. Do not casually retune
+    BIAS_RATIO_LONG_MIN/SHORT_MAX -- the relationship between this
+    threshold and outcome was NOT monotonic in Spec v2 §9.4's sweep."""
     if nifty_ratio > BIAS_RATIO_LONG_MIN:
         return LONG
     if nifty_ratio < BIAS_RATIO_SHORT_MAX:
         return SHORT
     return None
+
+
+def sector_gate_pass(sector_ratio: float, direction: str) -> bool:
+    """Spec v2 §6.3 -- the entry-time sector-confirmation gate itself
+    (just the threshold check; intraday_engine.py owns resolving a
+    candidate's primary sector and computing sector_ratio, since that
+    needs sector-membership I/O this pure module deliberately has none
+    of). Checked only once a candidate's breakout has already triggered
+    (§6) -- a fail here drops that candidate's trade entirely, it does
+    not block the OTHER candidate.
+
+    Deliberately independent of day_bias()'s own (now-relaxed) threshold
+    -- this stays at the strict 2.0/0.5 regardless (§9.5)."""
+    if direction == LONG:
+        return sector_ratio > SECTOR_GATE_RATIO_LONG_MIN
+    return sector_ratio < SECTOR_GATE_RATIO_SHORT_MAX
 
 
 def select_candidates(fno_ret_first15: pd.Series, bias: str, n: int = 2) -> pd.Series:
@@ -125,13 +166,17 @@ def select_candidates(fno_ret_first15: pd.Series, bias: str, n: int = 2) -> pd.S
 # ---------------------------------------------------------------------------
 
 def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
-               atr14_series: pd.Series) -> dict | None:
-    """Spec.md §3.2's walk-forward loop, for one candidate on one day.
+               atr14_series: pd.Series, first_candle_low: float,
+               first_candle_high: float) -> dict | None:
+    """Spec v2 §3.2's walk-forward loop, for one candidate on one day.
 
     `day`: that symbol's 5-min OHLCV candles for the day, indexed by
     timestamp (any candles outside the signal window are ignored).
     `ema21_series`/`atr14_series`: this symbol's CONTINUOUS multi-day
     series (§1) -- looked up by timestamp, never recomputed per day.
+    `first_candle_low`/`first_candle_high`: the day's very first (09:15)
+    candle's own low/high, captured once before this loop runs (§3.2 v2
+    step 1b) -- a fixed value for the whole day, not looked up per candle.
 
     Returns {"signal_time", "entry_time", "entry_price", "stop_price"}
     on a triggered entry, else None (day invalidated, or no signal ever
@@ -143,7 +188,7 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
 
     # "lowest volume so far today" resets each day at 09:15 (§1's one
     # session-scoped exception) -- NOT the same as the signal window,
-    # which only starts at 09:35.
+    # which starts at 09:30.
     day_open_ts = win.index[0].normalize() + pd.Timedelta(hours=9, minutes=15)
     vol_so_far_full = day.loc[day.index >= day_open_ts, "volume"]
 
@@ -153,13 +198,20 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
 
     for ts, row in win.iterrows():
         # 1. EMA21 day-invalidation gate -- checked every candle,
-        # regardless of any active signal (Spec.md §3.2.1, §9.5).
+        # regardless of any active signal (Spec §3.2 step 1, §9.5).
         e21 = ema21_series.get(ts)
         if pd.notna(e21):
             if direction == LONG and row["close"] < e21:
                 invalidated = True
             elif direction == SHORT and row["close"] > e21:
                 invalidated = True
+        # 1b. NEW v2 -- first-candle-close-through invalidation gate,
+        # same whole-day-kill-switch semantics as the EMA21 gate above,
+        # just a different reference level (the day's own 09:15 candle).
+        if direction == LONG and row["close"] < first_candle_low:
+            invalidated = True
+        elif direction == SHORT and row["close"] > first_candle_high:
+            invalidated = True
         if invalidated:
             return None
 
@@ -216,7 +268,8 @@ def new_signal_state() -> dict:
 
 
 def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | None,
-                sig_atr: float | None, vol_min_so_far: float) -> tuple[dict, dict | None]:
+                sig_atr: float | None, vol_min_so_far: float,
+                first_candle_low: float, first_candle_high: float) -> tuple[dict, dict | None]:
     """One incremental step of the §3.2 walk-forward loop. Does NOT
     mutate `state` -- returns a new state dict (caller keeps its own
     running copy, e.g. one per candidate per day).
@@ -227,6 +280,9 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     INCLUDING this candle -- the caller must update its own running min
     with this candle's volume BEFORE calling step_candle (find_entry()'s
     vol_so_far_full.loc[:ts].min() is inclusive of ts).
+    `first_candle_low`/`first_candle_high`: the day's 09:15 candle's own
+    low/high (v2 §3.2 step 1b) -- fixed for the whole day, the caller
+    captures it once and passes the same value on every call.
 
     Returns (new_state, event) -- event is None (nothing happened this
     candle) or one of:
@@ -243,6 +299,13 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
         if direction == LONG and row["close"] < e21:
             state["invalidated"] = True
         elif direction == SHORT and row["close"] > e21:
+            state["invalidated"] = True
+    # v2 NEW -- first-candle-close-through gate (§3.2 step 1b), same
+    # whole-day-kill-switch semantics as the EMA21 gate just above.
+    if not state["invalidated"]:
+        if direction == LONG and row["close"] < first_candle_low:
+            state["invalidated"] = True
+        elif direction == SHORT and row["close"] > first_candle_high:
             state["invalidated"] = True
     if state["invalidated"]:
         state["active_signal"] = None

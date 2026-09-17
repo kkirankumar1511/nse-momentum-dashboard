@@ -38,6 +38,7 @@ import live_ticker
 import kite_client
 import notify
 import nse_holidays
+import sector_universe as su
 import state_db
 
 EMA_WARMUP_DAYS = 120  # >> "several weeks" Spec.md §1 asks for, comfortably covers EMA21/ATR14 warmup
@@ -103,6 +104,64 @@ def run_selection(date: str, nifty50_symbols: list[str], fno_symbols: list[str],
     return {"nifty_ratio": nifty_ratio, "day_bias": bias, "candidates": candidates}
 
 
+def resolve_sector_gates(date: str, candidates: list[dict], close_0925: dict[str, float],
+                         prev_close: dict[str, float], today: dt.date) -> None:
+    """Spec v2 §6 -- for each candidate, resolve its primary sector and
+    compute that sector's OWN first-15m A/D ratio ONCE (§6.4: fixed for
+    the whole day, looked up -- not recomputed -- when a breakout later
+    triggers). Mutates each `candidates` dict in place, adding "sector",
+    "sector_ratio", "sector_gate_pass"; also persists these to
+    intraday_daily_selection so the Dashboard can show them.
+
+    §10.3's data-completeness warning is handled here explicitly: a
+    sector typically has far fewer constituents than NIFTY50/F&O (15-30
+    vs 50-200+), so ONE missing member's data materially skews the
+    ratio. close_0925/prev_close are extended with a fetch for any
+    sector constituent not already covered by the caller's own batch
+    (mirrors _prev_close_and_0925()'s own fetch), but if any constituent
+    STILL has no data after that, the gate fails closed (sector_ratio=
+    None, sector_gate_pass=False) rather than silently computing a ratio
+    off an incomplete member set -- do not loosen this to "skip missing
+    symbols and compute anyway", that is exactly the bug §10.3 found."""
+    catalog = su.fetch_index_constituents()
+    symbols = [c["symbol"] for c in candidates]
+    profiles = su.resolve_sector_profiles(symbols)
+
+    for c in candidates:
+        sym = c["symbol"]
+        sector = profiles.get(sym, {}).get("primary_sector")
+        c["sector"] = sector
+        if sector is None:
+            # §6.1.5 -- no resolvable primary sector at all: automatic fail.
+            c["sector_ratio"] = None
+            c["sector_gate_pass"] = False
+            idb.update_candidate_sector_gate(date, sym, None, None, False)
+            continue
+
+        members = list(catalog.get(sector, {}).keys())
+        missing = [s for s in members if s not in close_0925 or s not in prev_close]
+        if missing:
+            extra_c0925, extra_prev = _prev_close_and_0925(missing, today)
+            close_0925.update(extra_c0925)
+            prev_close.update(extra_prev)
+        still_missing = [s for s in members if s not in close_0925 or s not in prev_close]
+        if still_missing:
+            print(f"[intraday_engine] sector gate: {sector} incomplete data for "
+                 f"{len(still_missing)}/{len(members)} constituents "
+                 f"({still_missing[:5]}{'...' if len(still_missing) > 5 else ''}) -- "
+                 f"treating gate as FAILED (Spec v2 §10.3 fail-closed on incomplete data)")
+            c["sector_ratio"] = None
+            c["sector_gate_pass"] = False
+            idb.update_candidate_sector_gate(date, sym, sector, None, False)
+            continue
+
+        sector_ratio, _ = mkt.compute_first15_breadth(members, close_0925, prev_close)
+        gate_pass = strat.sector_gate_pass(sector_ratio, c["direction"])
+        c["sector_ratio"] = sector_ratio
+        c["sector_gate_pass"] = gate_pass
+        idb.update_candidate_sector_gate(date, sym, sector, sector_ratio, gate_pass)
+
+
 # ---------------------------------------------------------------------------
 # Per-candidate tracking
 # ---------------------------------------------------------------------------
@@ -113,12 +172,25 @@ class CandidateTracker:
     and (once a position opens) as LTP ticks arrive."""
 
     def __init__(self, date: str, symbol: str, direction: str,
-                ema21_series: pd.Series, atr14_series: pd.Series):
+                ema21_series: pd.Series, atr14_series: pd.Series,
+                first_candle_low: float, first_candle_high: float,
+                sector: str | None = None, sector_ratio: float | None = None,
+                sector_gate_pass: bool = False):
         self.date = date
         self.symbol = symbol
         self.direction = direction
         self.ema21_series = ema21_series
         self.atr14_series = atr14_series
+        # v2 Spec §3.2 step 1b -- the day's 09:15 candle's own low/high,
+        # fixed for the whole day (never refreshed, unlike ema21_series/
+        # atr14_series which need the newest candle appended each boundary).
+        self.first_candle_low = first_candle_low
+        self.first_candle_high = first_candle_high
+        # v2 Spec §6 -- resolved once at 09:30 (resolve_sector_gates()),
+        # looked up (not recomputed) the moment a breakout triggers.
+        self.sector = sector
+        self.sector_ratio = sector_ratio
+        self.sector_gate_pass = sector_gate_pass
         self.signal_state = strat.new_signal_state()
         self.vol_min_so_far: float | None = None
         self.signal_db_id: int | None = None
@@ -137,7 +209,7 @@ def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series,
     Caller must update tracker.vol_min_so_far with this candle's own
     volume (running min, inclusive) BEFORE calling this -- see
     step_candle()'s docstring for why (the running min starts at 09:15,
-    three candles before the signal window itself opens at 09:35)."""
+    two candles before the signal window itself opens at 09:30)."""
     if tracker.done or tracker.position_id is not None:
         # A position is already open (triggered by this same candle's
         # close just above, or by a live tick before this candle even
@@ -150,7 +222,8 @@ def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series,
     e21 = tracker.ema21_series.get(ts)
     sig_atr = tracker.atr14_series.get(ts)
     new_state, event = strat.step_candle(
-        tracker.signal_state, ts, row, tracker.direction, e21, sig_atr, tracker.vol_min_so_far)
+        tracker.signal_state, ts, row, tracker.direction, e21, sig_atr, tracker.vol_min_so_far,
+        tracker.first_candle_low, tracker.first_candle_high)
     tracker.signal_state = new_state
 
     if event is None:
@@ -192,7 +265,25 @@ def _open_position_from_trigger(tracker: CandidateTracker, event: dict,
     """Shared by both trigger paths -- process_candle()'s candle-close
     "triggered" event (step_candle()) and check_tick_trigger()'s live-
     tick equivalent -- so a breakout is sized/recorded identically no
-    matter which one detected it first."""
+    matter which one detected it first.
+
+    v2 Spec §6 -- the sector-confirmation gate is checked HERE, right
+    after a breakout triggers and before any sizing/order placement --
+    it can only ever drop THIS candidate's trade, never affect the
+    other candidate. tracker.sector_gate_pass was resolved once at 09:30
+    (resolve_sector_gates()), not recomputed now."""
+    if not tracker.sector_gate_pass:
+        tracker.done = True
+        idb.mark_candidate_status(tracker.date, tracker.symbol, "sector_gate_failed")
+        _sector_detail = (f"{tracker.sector or 'unresolved'}, ratio {tracker.sector_ratio:.2f}"
+                         if tracker.sector_ratio is not None
+                         else f"{tracker.sector or 'unresolved'}, no data")
+        _push(f"KK Trading — {tracker.symbol} trade dropped (sector gate)",
+             f"Breakout triggered but {tracker.symbol}'s sector ({_sector_detail}) "
+             f"didn't confirm {tracker.direction} -- no trade taken ({mode} mode).")
+        return {"type": "sector_gate_failed", "sector": tracker.sector,
+               "sector_ratio": tracker.sector_ratio}
+
     entry_price, stop_price = event["entry_price"], event["stop_price"]
     qty = strat.position_size(capital_alloc, risk_budget, entry_price, stop_price)
     if qty <= 0:
@@ -417,8 +508,8 @@ def run_live(mode: str = "paper") -> None:
         print("No clear day bias -- no trading today.")
         _push("KK Trading — no intraday trade today",
              f"NIFTY 50 first-15m ratio was {sel['nifty_ratio']:.2f} -- doesn't "
-             f"clear the LONG (>2.0) or SHORT (<0.5) threshold. Sitting out "
-             f"today ({mode} mode).")
+             f"clear the LONG (>{strat.BIAS_RATIO_LONG_MIN}) or SHORT "
+             f"(<{strat.BIAS_RATIO_SHORT_MAX}) threshold. Sitting out today ({mode} mode).")
         return
     if not sel["candidates"]:
         print("Day bias set but no valid candidates -- no trading today.")
@@ -427,9 +518,20 @@ def run_live(mode: str = "paper") -> None:
              f"but no valid F&O candidates found. Sitting out today ({mode} mode).")
         return
 
+    # v2 Spec §6.4 -- resolve each candidate's sector-confirmation-gate
+    # ratio ONCE here, right after selection, using the same 09:30
+    # snapshot data (extended with any sector constituents not already
+    # covered) -- fixed for the whole day, looked up (never recomputed)
+    # the moment a breakout later triggers (see _open_position_from_trigger()).
+    resolve_sector_gates(date_str, sel["candidates"], close_0925, prev_close, today)
+
     _cands_df = idb.get_candidates(date_str)
     _cand_summary = ", ".join(
-        f"#{int(r['rank'])} {r['symbol']} ({r['ret_first15_pct']:+.2f}%)"
+        f"#{int(r['rank'])} {r['symbol']} ({r['ret_first15_pct']:+.2f}%) "
+        f"sector={r['sector']} ratio={r['sector_ratio']:.2f} "
+        f"gate={'PASS' if r['sector_gate_pass'] else 'FAIL'}"
+        if pd.notna(r['sector_ratio']) else
+        f"#{int(r['rank'])} {r['symbol']} ({r['ret_first15_pct']:+.2f}%) sector=unresolved"
         for _, r in _cands_df.iterrows())
     _push(f"KK Trading — {sel['day_bias']} day ({mode})",
          f"NIFTY 50 ratio {sel['nifty_ratio']:.2f} -> {sel['day_bias']}. "
@@ -445,12 +547,25 @@ def run_live(mode: str = "paper") -> None:
         hist = kite_client.fetch_intraday_candles(sym, days=EMA_WARMUP_DAYS, interval="5minute")
         ema21_series = strat.ema21(hist["close"])
         atr14_series = strat.atr14(hist)
-        t = CandidateTracker(date_str, sym, c["direction"], ema21_series, atr14_series)
+        today_so_far = hist[hist.index.normalize() == pd.Timestamp(today)]
+        # v2 Spec §3.2 step 1b -- the day's very first (09:15) candle's
+        # own low/high, captured once, fixed for the whole day.
+        first_candle = today_so_far.loc[today_so_far.index == pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=15)]
+        if first_candle.empty:
+            print(f"[intraday_engine] {sym}: 09:15 candle missing -- cannot apply the "
+                 f"first-candle gate safely, dropping this candidate for today.")
+            idb.mark_candidate_status(date_str, sym, "invalidated")
+            continue
+        first_candle_low = float(first_candle.iloc[0]["low"])
+        first_candle_high = float(first_candle.iloc[0]["high"])
+        t = CandidateTracker(date_str, sym, c["direction"], ema21_series, atr14_series,
+                            first_candle_low, first_candle_high,
+                            sector=c.get("sector"), sector_ratio=c.get("sector_ratio"),
+                            sector_gate_pass=c.get("sector_gate_pass", False))
         # Seed the running vol-min from today's pre-window candles (09:15-
         # 09:30) -- see step_candle()'s docstring; the running min starts
-        # at session open, not at the 09:35 signal-window start.
-        today_so_far = hist[hist.index.normalize() == pd.Timestamp(today)]
-        pre_window = today_so_far.loc[today_so_far.index < pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=35)]
+        # at session open, not at the 09:30 signal-window start.
+        pre_window = today_so_far.loc[today_so_far.index < pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=30)]
         t.vol_min_so_far = float(pre_window["volume"].min()) if not pre_window.empty else None
         trackers.append(t)
 
@@ -464,14 +579,19 @@ def run_live(mode: str = "paper") -> None:
 
     try:
         last_candle_ts = None
-        print("Entering intraday loop (09:35-15:10)...")
+        print("Entering intraday loop (09:30-15:10)...")
         while True:
             now = dt.datetime.now()
             if now.time() >= dt.time(15, 10):
                 break
 
             boundary = _last_closed_candle_label(now)
-            if boundary.time() >= dt.time(9, 35) and (last_candle_ts is None or boundary > last_candle_ts):
+            # v2 Spec §3.1 -- SIGNAL_WINDOW_START moved to "09:30" (the
+            # candle labeled 09:30 is now itself eligible), so this gate
+            # follows the same constant rather than a separate hardcoded
+            # time, to avoid the two silently drifting apart again.
+            if (boundary.time() >= dt.datetime.strptime(strat.SIGNAL_WINDOW_START, "%H:%M").time()
+                    and (last_candle_ts is None or boundary > last_candle_ts)):
                 for t in trackers:
                     if t.done or t.position_id is not None:
                         # Once a position is open, EMA21/ATR14/vol tracking
