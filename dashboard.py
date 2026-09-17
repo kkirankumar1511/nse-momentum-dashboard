@@ -5994,6 +5994,70 @@ def _live_price_and_change(ticker: live_ticker.LiveTicker, symbol: str) -> tuple
     return (q["last_price"], q["change_pct"]) if q else (None, None)
 
 
+_INTRADAY_CHART_WARMUP_DAYS = 45  # enough for EMA21 to have converged well
+# past its 21-bar min_periods without paying EMA_WARMUP_DAYS=120's full
+# fetch cost for what's purely a visual reference line here, not a
+# trading decision (see intraday_strategy.ema21()'s own continuous-
+# series requirement -- this chart still respects it, just with a
+# shorter, display-only warmup window).
+
+
+def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
+                                  first_low: float | None, first_high: float | None,
+                                  sig: dict | None, pos: dict | None) -> "go.Figure | None":
+    """5-min candlestick for `symbol`'s session today, with the strategy's
+    own decision levels overlaid -- EMA21 (continuous line), the 09:15
+    first-candle low/high (Spec v2 §3.2 step 1b), the active signal's
+    high/low + breakout trigger level if one exists, and entry/stop/
+    target if a position is open. Returns None if no candle data is
+    available yet (e.g. called before 09:15)."""
+    try:
+        hist = kite_client.fetch_intraday_candles(symbol, days=_INTRADAY_CHART_WARMUP_DAYS,
+                                                   interval="5minute")
+    except Exception:
+        return None
+    if hist.empty:
+        return None
+    ema21_series = istrat.ema21(hist["close"])
+    today_candles = hist[hist.index.normalize() == pd.Timestamp(today)]
+    if today_candles.empty:
+        return None
+
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=today_candles.index, open=today_candles["open"], high=today_candles["high"],
+        low=today_candles["low"], close=today_candles["close"], name=symbol,
+        increasing_line_color="#1a9850", decreasing_line_color="#d73027"))
+    fig.add_trace(go.Scatter(
+        x=today_candles.index, y=ema21_series.reindex(today_candles.index),
+        mode="lines", name="EMA21", line=dict(color="#7b3294", width=1.5)))
+
+    def _hline(y, color, label, dash="dot"):
+        if y is not None and pd.notna(y):
+            fig.add_hline(y=float(y), line_color=color, line_dash=dash, line_width=1,
+                         annotation_text=label, annotation_position="right",
+                         annotation_font_size=10)
+
+    _hline(first_low, "#888888", "09:15 low")
+    _hline(first_high, "#888888", "09:15 high")
+    if sig is not None:
+        buf = sig["signal_atr"] * istrat.ATR_PCT_BUFFER
+        trigger = sig["signal_high"] + buf if direction == istrat.LONG else sig["signal_low"] - buf
+        _hline(sig["signal_high"], "#e6a817", "signal high")
+        _hline(sig["signal_low"], "#e6a817", "signal low")
+        _hline(trigger, "#e6a817", "entry trigger", dash="dash")
+    if pos is not None:
+        _hline(pos["entry_price"], "#2166ac", "entry", dash="solid")
+        _hline(pos["stop_price"], "#d73027", "stop", dash="solid")
+        _hline(pos["target_price"], "#1a9850", "target", dash="solid")
+
+    fig.update_layout(
+        height=420, margin=dict(l=10, r=60, t=30, b=10),
+        xaxis_rangeslider_visible=False, showlegend=False,
+        yaxis_title="Price (₹)", plot_bgcolor="white", paper_bgcolor="white")
+    return fig
+
+
 def page_intraday_dashboard():
     _mode = "live" if config.STRATEGY.get("intraday_live_enabled", False) else "paper"
     _tip = html_lib.escape(
@@ -6227,6 +6291,72 @@ def page_intraday_dashboard():
                 }), unsafe_allow_html=True)
 
     _render_live_section()
+
+    # --- Live chart + today's trade book (slower refresh -- redrawing a
+    # candlestick every 1s like the price ticks above would be wasted
+    # work, candles only change every 5 minutes) -----------------------------
+    @st.fragment(run_every="15s" if _is_market_hours() else None)
+    def _render_chart_and_tradebook_section():
+        _cands_now = idb.get_candidates(today)
+        if _cands_now.empty:
+            return
+        _open_now = idb.get_open_positions(date=today, mode=_mode)
+        # Default to whichever candidate has an open position, else rank 1.
+        _default_sym = (_open_now.iloc[0]["symbol"] if not _open_now.empty
+                        else _cands_now.iloc[0]["symbol"])
+        _syms = list(_cands_now["symbol"])
+        _sel_sym = st.selectbox("Chart", _syms,
+                                index=_syms.index(_default_sym) if _default_sym in _syms else 0,
+                                key="intraday_chart_symbol")
+
+        col_chart, col_tb = st.columns([3, 2])
+        with col_chart:
+          with st.container(border=True, key="ov-card-intraday-chart"):
+            _sel_sig = idb.get_active_signal(today, _sel_sym)
+            _sel_pos_df = _open_now[_open_now["symbol"] == _sel_sym] if not _open_now.empty else _open_now
+            _sel_pos = _sel_pos_df.iloc[0].to_dict() if not _sel_pos_df.empty else None
+            _direction = day["day_bias"] if day is not None else istrat.LONG
+            # first_low/first_high (the 09:15 first-candle gate reference)
+            # only ever lives in the live engine's own in-memory tracker,
+            # never persisted to the DB -- this dashboard process has no
+            # way to read it, so those two overlay lines are skipped for
+            # now (EMA21/signal/entry/stop/target still all render).
+            fig = _build_intraday_candle_figure(
+                _sel_sym, _direction, today, first_low=None, first_high=None,
+                sig=_sel_sig, pos=_sel_pos)
+            if fig is not None:
+                st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+            else:
+                st.info("No candle data yet for this symbol today.")
+
+        with col_tb:
+          with st.container(border=True, key="ov-card-intraday-tb"):
+            st.markdown(
+                '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-purple);">'
+                '</span>Today\'s trade book</p>', unsafe_allow_html=True)
+            _legs_today = idb.get_legs(date=today, mode=_mode)
+            if _legs_today.empty and _open_now.empty:
+                st.caption("No trades yet today.")
+            else:
+                _pnl_today = float(_legs_today["net_pnl"].sum()) if not _legs_today.empty else 0.0
+                st.markdown(
+                    f'<p class="ov-card-meta">Net P&amp;L today: '
+                    f'<span class="{"ov-pos" if _pnl_today >= 0 else "ov-neg"}">'
+                    f'₹{_pnl_today:+,.2f}</span></p>', unsafe_allow_html=True)
+                if not _legs_today.empty:
+                    _tb_show = _legs_today.sort_values("exit_time", ascending=False).head(10)
+                    st.markdown(
+                        _ov_table_html(
+                            _tb_show, columns=["symbol", "leg_type", "qty", "exit_price", "net_pnl"],
+                            sym_cols=["symbol"], pnl_cols=["net_pnl"],
+                            num_fmt={"exit_price": "₹{:,.2f}", "qty": "{:.0f}"},
+                            badges={"leg_type": _INTRADAY_EVENT_BADGES}),
+                        unsafe_allow_html=True)
+                if not _open_now.empty:
+                    st.caption(f"{len(_open_now)} position(s) still open -- see candidate table above.")
+            st.page_link(page_intraday_tradebook_p, label="View full tradebook →", icon="📒")
+
+    _render_chart_and_tradebook_section()
 
     # --- Event timeline -------------------------------------------------------
     st.markdown(
