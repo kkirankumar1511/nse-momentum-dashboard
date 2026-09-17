@@ -1,7 +1,9 @@
 """
 Live/paper orchestration for the "DaysLowVolumnBreakout" intraday
 strategy -- run as `python intraday_engine.py` during real market hours
-(09:15-15:15 IST), no flags needed for normal/scheduled use: the mode
+(09:15-15:10 IST -- squareoff timed to Zerodha's own 15:12:00
+auto-square-off for F&O-enabled equity MIS, see run_live()'s own
+comment on this), no flags needed for normal/scheduled use: the mode
 is decided entirely by config.STRATEGY["intraday_live_enabled"] (the
 Admin page checkbox) at each invocation, so a scheduled daily launch
 runs the exact same command every day and automatically trades live
@@ -396,10 +398,15 @@ def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.dateti
 
 
 def force_squareoff(tracker: CandidateTracker, ltp: float, now: dt.datetime, mode: str) -> dict | None:
-    """Spec §5.4 -- force-close at the "15:10"-labeled candle's close,
-    which is the price at 15:15:00 real time (Spec v3 §9) -- time-driven
-    regardless of price. Called by run_live() once its own loop exits at
-    15:15:00 real time."""
+    """Spec §5.4 -- force-close, time-driven regardless of price. Called
+    by run_live() once its own loop exits at 15:10:00 real time -- a
+    2-minute safety buffer before Zerodha's own 15:12:00 auto-square-off
+    for F&O-enabled equity (CAS cash segment) MIS positions, the actual
+    broker-enforced cutoff this code trades against. NOT the same as the
+    backtest's own squareoff-price convention (the "15:10"-labeled
+    candle's close = 15:15:00 real time, Spec v3 §9) -- that price isn't
+    achievable live for this broker, see run_live()'s own comment on
+    this exact point."""
     if tracker.position_id is None:
         return None
     pos = idb.get_position(tracker.position_id)
@@ -657,17 +664,34 @@ def run_live(mode: str = "paper") -> None:
 
     try:
         last_candle_ts = None
-        print("Entering intraday loop (09:30-15:15)...")
+        print("Entering intraday loop (09:30-15:10)...")
         while True:
             now = dt.datetime.now()
-            # v3 Spec §9's explicit audit finding: the "15:10"-labeled
-            # candle (covering 15:10:00-15:14:59) is what the backtest's
-            # squareoff uses, and its CLOSE is the price at 15:15:00 real
-            # time -- exiting "at 15:10" (the old v1/v2 exit time) would
-            # square off 5 minutes early on the wrong price. This applies
-            # to v1/v2 too, not just v3 -- the squareoff mechanism itself
-            # was never v3-specific, only this timing bug was.
-            if now.time() >= dt.time(15, 15):
+            # Two DIFFERENT 15:xx numbers are in play here, and only one
+            # of them governs live trading:
+            #  - The backtest's own squareoff price convention (Spec v3
+            #    §9) uses the "15:10"-labeled candle's CLOSE, i.e. the
+            #    price at 15:15:00 real time -- that's what the published
+            #    backtest numbers assume was achievable.
+            #  - Zerodha (the broker this account trades through) auto-
+            #    square-offs MIS positions on F&O-enabled equity (cash
+            #    segment, CAS) at 15:12:00 real time, NOT 15:15 -- a hard
+            #    broker-side risk-management cutoff, not something this
+            #    code can trade past. Waiting until 15:15 would mean
+            #    Zerodha's own system force-closes the position first, at
+            #    an uncontrolled price, before this code's own squareoff
+            #    order even fires.
+            # This live loop follows the ACHIEVABLE constraint (15:12),
+            # not the backtest's theoretical one -- exiting at 15:10
+            # leaves a 2-minute safety buffer for order placement/fill
+            # latency before Zerodha's own cutoff. This is a genuine,
+            # unavoidable gap between backtested and live squareoff
+            # pricing for this broker -- squareoff-reason exits will
+            # price off wherever the market is at 15:10 instead of
+            # 15:15, which can come out better or worse than the
+            # backtest's own assumption trade to trade, not
+            # systematically either way.
+            if now.time() >= dt.time(15, 10):
                 break
 
             boundary = _last_closed_candle_label(now)
@@ -772,7 +796,8 @@ def run_live(mode: str = "paper") -> None:
 
             time.sleep(CHECK_INTERVAL_SECONDS)
 
-        print("15:15 -- squaring off any remaining open positions...")
+        print("15:10 -- squaring off any remaining open positions "
+             "(2-min buffer before Zerodha's 15:12 auto-square-off)...")
         for t in trackers:
             if t.position_id is None:
                 continue
