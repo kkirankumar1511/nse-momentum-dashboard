@@ -6081,9 +6081,21 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
     _hline(first_low, "#9e9e9e", "09:15 low")
     _hline(first_high, "#9e9e9e", "09:15 high")
     if pos is not None:
-        _hline(pos["entry_price"], "#2166ac", "entry", dash="solid")
-        _hline(pos["stop_price"], _CHART_DOWN, "stop", dash="solid")
-        _hline(pos["target_price"], _CHART_UP, "target", dash="solid")
+        # Entry marked as an arrow ON the actual entry candle (not a
+        # line stretched across the whole day) -- stop/target stay as
+        # dotted reference lines at the real price level, since those
+        # ARE prices the position is still exposed to for the rest of
+        # the day, unlike entry which is a one-time past event.
+        _is_long = direction == istrat.LONG
+        fig.add_annotation(
+            x=pd.Timestamp(pos["entry_time"]), y=float(pos["entry_price"]),
+            xref="x", yref="y", text="entry", showarrow=True,
+            arrowhead=2, arrowsize=1, arrowwidth=1.5, arrowcolor="#2166ac",
+            ax=0, ay=28 if _is_long else -28,
+            font=dict(size=10, color="#2166ac"),
+            bgcolor="rgba(255,255,255,0.85)", row=1, col=1)
+        _hline(pos["stop_price"], _CHART_DOWN, "stop", dash="dot")
+        _hline(pos["target_price"], _CHART_UP, "target", dash="dot")
     elif sig is not None:
         # Signal high/low themselves are dropped as SEPARATE lines --
         # the trigger sits only ~5% of ATR away from the signal high/low
