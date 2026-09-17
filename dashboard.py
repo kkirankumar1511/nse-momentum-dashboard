@@ -6010,7 +6010,6 @@ def page_intraday_dashboard():
         unsafe_allow_html=True)
 
     today = dt.date.today().isoformat()
-    day = idb.get_day(today)
     cap = idb.get_capital(_mode)
 
     # --- Capital / P&L strip -------------------------------------------------
@@ -6034,6 +6033,15 @@ def page_intraday_dashboard():
 
     @st.fragment(run_every="1s" if _is_market_hours() else None)
     def _render_live_section():
+        # `day` MUST be fetched here, every rerun -- not once outside this
+        # fragment -- or it goes stale the moment intraday_days first gets
+        # its row written at 09:30: a page loaded/left open before that
+        # (day=None captured once) would keep rendering with day=None
+        # forever after, even as `candidates` below (fetched fresh inside
+        # the fragment) starts returning real rows -- crashing the sector-
+        # gate display's `day["day_bias"]` lookup with day=None (confirmed
+        # live 2026-09-17, right around today's own 09:30 selection).
+        day = idb.get_day(today)
         # Persistent WebSocket ticker for this whole server process (see
         # _get_dashboard_ticker()) -- NIFTY 50 is always wanted; candidates/
         # sectors get subscribed below once known, each only actually
@@ -6167,7 +6175,7 @@ def page_intraday_dashboard():
                     # Deliberately shown separately from "Sector A/D" above
                     # so the two aren't confused with each other.
                     _sgp = c.get("sector_gate_pass")
-                    if pd.notna(_sgp):
+                    if pd.notna(_sgp) and day is not None:
                         _sr = c.get("sector_ratio")
                         _gate_ratio_text = f"{_sr:.2f}" if pd.notna(_sr) else "no data"
                         _gate_badge_cls = "ov-badge-green" if _sgp else "ov-badge-red"
