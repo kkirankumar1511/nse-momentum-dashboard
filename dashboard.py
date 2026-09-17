@@ -6011,6 +6011,21 @@ _INTRADAY_CHART_WARMUP_DAYS = 45  # enough for EMA21 to have converged well
 _CHART_UP, _CHART_DOWN = "#26a69a", "#ef5350"
 
 
+@st.cache_data(ttl=15, show_spinner=False)
+def _cached_intraday_hist(symbol: str, days: int) -> pd.DataFrame:
+    """Historical 5-min candles are a real Kite REST call, unlike the LTP
+    reads elsewhere on this page which just read the WebSocket ticker's
+    in-memory tick cache (free). Caching this for a short TTL is what
+    lets _render_chart_and_tradebook_section() rerun once a second (to
+    keep the live-tick candle as fresh as every other live price on this
+    page) without turning that into one Kite historical-data call per
+    second per open chart -- cache_data is shared across all sessions on
+    this server process, so concurrent viewers don't multiply the calls
+    either. Nothing about the actual current candle depends on this --
+    that part is always built fresh from the live ticker, never cached."""
+    return kite_client.fetch_intraday_candles(symbol, days=days, interval="5minute")
+
+
 def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
                                   first_low: float | None, first_high: float | None,
                                   sig: dict | None, pos: dict | None,
@@ -6029,8 +6044,7 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
     chart visibly stalls for up to 5 minutes at a time instead of moving
     with the live price."""
     try:
-        hist = kite_client.fetch_intraday_candles(symbol, days=_INTRADAY_CHART_WARMUP_DAYS,
-                                                   interval="5minute")
+        hist = _cached_intraday_hist(symbol, _INTRADAY_CHART_WARMUP_DAYS)
     except Exception:
         return None
     if hist.empty:
@@ -6362,10 +6376,13 @@ def page_intraday_dashboard():
 
     _render_live_section()
 
-    # --- Live chart + today's trade book (slower refresh -- redrawing a
-    # candlestick every 1s like the price ticks above would be wasted
-    # work, candles only change every 5 minutes) -----------------------------
-    @st.fragment(run_every="15s" if _is_market_hours() else None)
+    # --- Live chart + today's trade book -------------------------------------
+    # Same 1s cadence as the price ticks above -- the still-forming candle
+    # is built from the live ticker (free, in-memory) same as every other
+    # LTP on this page; only the historical-candle Kite REST call is
+    # expensive, and that's throttled separately via _cached_intraday_hist()'s
+    # own 15s TTL rather than by slowing this whole fragment down.
+    @st.fragment(run_every="1s" if _is_market_hours() else None)
     def _render_chart_and_tradebook_section():
         # Fetched fresh here, not read from the sibling _render_live_
         # section()'s own `day` -- that's a local variable scoped to
