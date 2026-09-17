@@ -44,6 +44,14 @@ import sector_universe as su
 import state_db
 
 EMA_WARMUP_DAYS = 120  # >> "several weeks" Spec.md §1 asks for, comfortably covers EMA21/ATR14 warmup
+# Per-boundary refresh window -- deliberately small (see run_live()'s own
+# comment on this): only needs to safely reach back to the last candle
+# already in a tracker's cached t.hist, which is at most a few calendar
+# days ago even across a weekend/holiday. Measured 2026-09-17: a days=3
+# fetch is ~13x faster than re-pulling the full EMA_WARMUP_DAYS (0.11s
+# vs 1.2-1.4s per symbol) -- Kite's historical API appears to chunk a
+# request internally in proportion to the days asked for.
+_REFRESH_WINDOW_DAYS = 3
 # Fallback only -- config.STRATEGY["intraday_paper_capital"]/["intraday_live_capital"]
 # (both Admin-editable) are what run_live() actually seeds each mode's
 # starting capital from; this constant is just the .get() default for a
@@ -212,6 +220,19 @@ class CandidateTracker:
         self.signal_db_id: int | None = None
         self.position_id: int | None = None
         self.done = False  # invalidated, or position fully closed -- nothing left to do today
+        # Cached raw candle history (EMA_WARMUP_DAYS deep), set by the
+        # caller right after construction. Performance-critical: each
+        # candle-close boundary used to re-fetch this whole ~120-day
+        # history per candidate just to pick up ONE new candle (measured
+        # 2026-09-17: ~1.2-1.4s/symbol, i.e. up to ~6s sequential for a
+        # full 5-candidate pool, most of it wasted re-downloading days
+        # already known) -- that blocked the tick-driven stop/target/
+        # entry checks for the SAME 6s once every 5 minutes, on live
+        # market data. Instead, each boundary now fetches only a small
+        # recent window (~0.11s/symbol, measured) and merges it into this
+        # cached frame before recomputing ema21_series/atr14_series -- see
+        # run_live()'s per-boundary loop.
+        self.hist: pd.DataFrame | None = None
 
 
 def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series) -> dict | None:
@@ -640,6 +661,7 @@ def run_live(mode: str = "paper") -> None:
                             first_candle_low, first_candle_high, c["rank"],
                             sector=c.get("sector"), sector_ratio=c.get("sector_ratio"),
                             sector_gate_pass=c.get("sector_gate_pass", False))
+        t.hist = hist
         # Seed the running vol-min from today's pre-window candles (09:15-
         # 09:30) -- see step_candle()'s docstring; the running min starts
         # at session open, not at the 09:30 signal-window start.
@@ -722,24 +744,41 @@ def run_live(mode: str = "paper") -> None:
                         # below entirely rather than pay for it uselessly
                         # every 5 minutes until the position closes.
                         continue
-                    # Re-fetch the full continuous history (not just the new
-                    # candle) and recompute ema21_series/atr14_series from
-                    # it every boundary -- the trackers' series were only
-                    # ever set ONCE at setup time (before market open even
-                    # finished its first 15 minutes), so t.ema21_series.get(ts)/
-                    # t.atr14_series.get(ts) came back None for every candle
-                    # closing after that snapshot, silently disabling both
-                    # invalidation and signal formation for the whole day
-                    # (confirmed live 2026-09-16: YESBANK's real 09:35 candle
-                    # satisfied every signal condition when replayed offline
-                    # with fresh series, but produced nothing live because
-                    # sig_atr came back None from the frozen snapshot).
-                    fresh = kite_client.fetch_intraday_candles(t.symbol, days=EMA_WARMUP_DAYS, interval="5minute")
-                    row_df = fresh[fresh.index == boundary]
+                    # Refresh t.hist with just a SMALL recent window and
+                    # merge it in, rather than re-fetching the whole
+                    # ~120-day history every boundary -- the trackers'
+                    # series were only ever set ONCE at setup time (before
+                    # market open even finished its first 15 minutes), so
+                    # t.ema21_series.get(ts)/t.atr14_series.get(ts) came
+                    # back None for every candle closing after that
+                    # snapshot, silently disabling both invalidation and
+                    # signal formation for the whole day (confirmed live
+                    # 2026-09-16: YESBANK's real 09:35 candle satisfied
+                    # every signal condition when replayed offline with
+                    # fresh series, but produced nothing live because
+                    # sig_atr came back None from the frozen snapshot) --
+                    # that bug's fix originally re-fetched the FULL
+                    # history each time, which worked but cost ~1.2-1.4s/
+                    # symbol (measured 2026-09-17), blocking the tick-
+                    # driven stop/target/entry checks below for up to ~6s
+                    # across a full 5-candidate pool, once every 5 minutes,
+                    # on live market data. A small window (days=3, safely
+                    # covers today + a weekend/holiday gap) measured at
+                    # ~0.11s/symbol instead -- merged into the cached
+                    # t.hist (keeping the newest value for any overlapping
+                    # timestamp, since a just-closed candle's own data can
+                    # still settle/revise slightly for a few minutes after
+                    # its close -- confirmed live 2026-09-17) before
+                    # recomputing the continuous EMA21/ATR14 series.
+                    delta = kite_client.fetch_intraday_candles(t.symbol, days=_REFRESH_WINDOW_DAYS,
+                                                               interval="5minute")
+                    row_df = delta[delta.index == boundary]
                     if row_df.empty:
                         continue
-                    t.ema21_series = strat.ema21(fresh["close"])
-                    t.atr14_series = strat.atr14(fresh)
+                    t.hist = pd.concat([t.hist, delta])
+                    t.hist = t.hist[~t.hist.index.duplicated(keep="last")].sort_index()
+                    t.ema21_series = strat.ema21(t.hist["close"])
+                    t.atr14_series = strat.atr14(t.hist)
                     row = row_df.iloc[0]
                     t.vol_min_so_far = (row["volume"] if t.vol_min_so_far is None
                                        else min(t.vol_min_so_far, row["volume"]))
