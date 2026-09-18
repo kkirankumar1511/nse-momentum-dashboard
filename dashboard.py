@@ -6087,11 +6087,14 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
         fig.add_trace(go.Bar(x=plot_df.index, y=plot_df["volume"], marker_color=vol_colors,
                             opacity=0.6, name="Volume"), row=2, col=1)
 
+    _level_values = []
+
     def _hline(y, color, label, dash="dot"):
         if y is not None and pd.notna(y):
             fig.add_hline(y=float(y), line_color=color, line_dash=dash, line_width=1.25,
                          annotation_text=label, annotation_position="right",
                          annotation_font_size=10, row=1, col=1)
+            _level_values.append(float(y))
 
     _hline(first_low, "#9e9e9e", "09:15 low")
     _hline(first_high, "#9e9e9e", "09:15 high")
@@ -6109,6 +6112,7 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
             ax=0, ay=28 if _is_long else -28,
             font=dict(size=10, color="#2166ac"),
             bgcolor="rgba(255,255,255,0.85)", row=1, col=1)
+        _level_values.append(float(pos["entry_price"]))
         _hline(pos["stop_price"], _CHART_DOWN, "stop", dash="dot")
         _hline(pos["target_price"], _CHART_UP, "target", dash="dot")
     elif sig is not None:
@@ -6137,6 +6141,31 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
         uirevision=symbol)
     fig.update_xaxes(rangeslider_visible=False, showgrid=True, gridcolor="#eeeeee", row=1, col=1)
     fig.update_xaxes(showgrid=False, row=2, col=1)
+    # STICKY y-range instead of Plotly's default autorange -- autorange
+    # recomputes the tightest possible bounds on EVERY call, so a live
+    # tick nudging the still-forming candle's high/low by even a few
+    # paise shifted the whole visible price scale, making every candle
+    # appear to jump/redraw each second even though only that one
+    # candle's data actually changed (uirevision only preserves a
+    # user's own manual zoom, it doesn't stop autorange from
+    # recomputing on new data). Cached in session_state per symbol/day
+    # and only ever WIDENED, never recentered/shrunk, the same ratchet
+    # idea as the MAD trail stop -- so the axis, and hence the whole
+    # chart, only actually moves when price genuinely approaches the
+    # edge of the current range, not on every tick's tiny wiggle.
+    _price_values = pd.concat([plot_df["high"], plot_df["low"], ema21_today]).dropna()
+    if _level_values:
+        _price_values = pd.concat([_price_values, pd.Series(_level_values)])
+    if not _price_values.empty:
+        _pmin, _pmax = float(_price_values.min()), float(_price_values.max())
+        _pad = max((_pmax - _pmin) * 0.10, _pmax * 0.005, 0.5)
+        _range_key = f"_intraday_chart_yrange_{symbol}_{today}"
+        _stored = st.session_state.get(_range_key)
+        if _stored is None or _pmin - _pad < _stored[0] or _pmax + _pad > _stored[1]:
+            _stored = [min(_pmin - _pad, _stored[0]) if _stored else _pmin - _pad,
+                      max(_pmax + _pad, _stored[1]) if _stored else _pmax + _pad]
+            st.session_state[_range_key] = _stored
+        fig.update_yaxes(range=_stored, row=1, col=1)
     fig.update_yaxes(title_text="Price (₹)", showgrid=True, gridcolor="#eeeeee", row=1, col=1)
     fig.update_yaxes(title_text="Vol", showgrid=False, row=2, col=1)
     return fig
