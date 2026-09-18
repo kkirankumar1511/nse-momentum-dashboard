@@ -6183,7 +6183,17 @@ def page_intraday_dashboard():
 
     st.divider()
 
-    @st.fragment(run_every="1s" if _is_market_hours() else None)
+    # 3s, not 1s -- this fragment rebuilds the candidate table via
+    # st.markdown(html, unsafe_allow_html=True), which always replaces the
+    # ENTIRE table's DOM in one shot (there's no per-cell patching for raw
+    # HTML the way st.plotly_chart can diff a keyed component) -- at 1s
+    # that read as the whole table flickering every second just to move a
+    # couple of LTP/% digits. 3s keeps prices reasonably fresh for a
+    # decision-support table (the actual trading logic reacts via the
+    # engine process's own live tick feed, independent of what this page
+    # visually shows) while cutting both the flicker and the per-candidate
+    # DB query load by roughly 3x.
+    @st.fragment(run_every="3s" if _is_market_hours() else None)
     def _render_live_section():
         # `day` MUST be fetched here, every rerun -- not once outside this
         # fragment -- or it goes stale the moment intraday_days first gets
@@ -6314,12 +6324,29 @@ def page_intraday_dashboard():
                              f"Target ₹{_p['target_price']:.2f} / Qty "
                              f"{int(_p['qty_remaining'])}/{int(_p['qty'])}")
                 elif sig is not None:
-                    state = "Signal active"
                     _buf = sig["signal_atr"] * istrat.ATR_PCT_BUFFER
                     _proj_entry = (sig["signal_high"] + _buf if day and day["day_bias"] == istrat.LONG
                                   else sig["signal_low"] - _buf)
-                    detail = (f"H/L ₹{sig['signal_high']:.2f}/₹{sig['signal_low']:.2f} → entry "
-                             f"₹{_proj_entry:.2f} · formed {pd.Timestamp(sig['signal_time']):%H:%M}")
+                    # The sector gate is only ENFORCED at the moment a
+                    # breakout actually triggers (_open_position_from_
+                    # trigger()) -- the engine keeps tracking/forming
+                    # signals for every candidate regardless of its sector
+                    # outcome, resolved once at 09:30, and only rejects it
+                    # right at the trigger instant (candidate "status" in
+                    # the DB only flips to sector_gate_failed then, not
+                    # now). So a candidate can sit here showing "Signal
+                    # active" even though its own gate column already says
+                    # FAIL -- without calling that out, it looks like a
+                    # live, actionable setup when any trigger it produces
+                    # will actually be silently rejected.
+                    if c.get("sector_gate_pass") is False:
+                        state = "Signal active (sector already failed)"
+                        detail = (f"H/L ₹{sig['signal_high']:.2f}/₹{sig['signal_low']:.2f} → would-be "
+                                 f"entry ₹{_proj_entry:.2f} -- won't open, sector gate already failed")
+                    else:
+                        state = "Signal active"
+                        detail = (f"H/L ₹{sig['signal_high']:.2f}/₹{sig['signal_low']:.2f} → entry "
+                                 f"₹{_proj_entry:.2f} · formed {pd.Timestamp(sig['signal_time']):%H:%M}")
                 else:
                     all_positions_today = idb.get_positions(date=today, mode=_mode)
                     sym_positions = all_positions_today[all_positions_today["symbol"] == c["symbol"]] \
@@ -6388,6 +6415,7 @@ def page_intraday_dashboard():
                                        else "ov-badge-red" if v.startswith("FAIL") else "ov-badge-gray"),
                     "state": {
                         "Position open": "ov-badge-green", "Signal active": "ov-badge-amber",
+                        "Signal active (sector already failed)": "ov-badge-gray",
                         "Invalidated": "ov-badge-red", "Sector gate failed": "ov-badge-red",
                         "Day closed": "ov-badge-gray", "Slots filled": "ov-badge-gray",
                         "No signal formed": "ov-badge-gray", "No signal yet": "ov-badge-gray",
@@ -6467,7 +6495,17 @@ def page_intraday_dashboard():
                 _sel_sym, _direction, today, first_low=None, first_high=None,
                 sig=_sel_sig, pos=_sel_pos, live_candle=_live_candle)
             if fig is not None:
-                st.plotly_chart(fig, width="stretch",
+                # A stable key is what lets Streamlit reuse the SAME chart
+                # component across reruns instead of tearing it down and
+                # remounting a brand-new one every second -- without it,
+                # each rerun's new Figure object gets treated as a new
+                # component instance, so the WHOLE chart visibly redraws
+                # from scratch instead of Plotly's own react()-based diff
+                # just moving the current candle/EMA point. Keyed on the
+                # symbol (not a constant) so switching symbols still
+                # mounts a fresh chart rather than trying to diff into an
+                # unrelated one.
+                st.plotly_chart(fig, width="stretch", key=f"intraday_chart_{_sel_sym}",
                                 config={"displayModeBar": True, "scrollZoom": True})
             else:
                 st.info("No candle data yet for this symbol today.")
