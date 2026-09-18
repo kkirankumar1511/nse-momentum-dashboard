@@ -231,18 +231,10 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
         # 2. An active signal -- check this candle for the breakout trigger.
         if active_signal is not None:
             breakout_counter += 1
-            # v3 NEW -- every candle in the (now 2-candle) breakout window
-            # must be the confirming/continuation color (green for LONG,
-            # red for SHORT -- opposite the signal candle's own pullback
-            # color) or the signal drops IMMEDIATELY, it does not wait out
-            # the remaining window candle(s) (Spec v3 §6 point 1).
-            confirm_is_green = row["close"] > row["open"]
-            confirm_is_red = row["close"] < row["open"]
-            wants_confirm_color = confirm_is_green if direction == LONG else confirm_is_red
-            if not wants_confirm_color:
-                active_signal = None
-                breakout_counter = 0
-                continue
+            # Trigger checked FIRST -- see step_candle()'s own comment for
+            # why a range/volume gate can never be satisfied by the
+            # actual triggering candle (breaking out necessarily exceeds
+            # the signal candle's own high/low).
             buf = active_signal["atr"] * ATR_PCT_BUFFER
             if direction == LONG:
                 trigger_level = active_signal["hi"] + buf
@@ -255,6 +247,25 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
                              else (active_signal["hi"] + buf))
                 return {"signal_time": active_signal["time"], "entry_time": ts,
                        "entry_price": trigger_level, "stop_price": stop_price}
+            # v3.1 NEW -- this window candle did NOT trigger. Before
+            # continuing to the next window candle it must have been a
+            # clean continuation of the signal candle's own pullback: the
+            # confirming/continuation color (green for LONG, red for
+            # SHORT), LOWER volume than the signal candle, and its own
+            # high/low still WITHIN the signal candle's range -- fail any
+            # of these and the signal drops immediately rather than
+            # waiting out the remaining window candle(s) (Spec v3 §6
+            # point 1, extended). See step_candle()'s own comment for the
+            # live-vs-backtest rationale, kept identical here.
+            confirm_is_green = row["close"] > row["open"]
+            confirm_is_red = row["close"] < row["open"]
+            wants_confirm_color = confirm_is_green if direction == LONG else confirm_is_red
+            volume_ok = row["volume"] < active_signal["volume"]
+            range_ok = row["high"] <= active_signal["hi"] and row["low"] >= active_signal["lo"]
+            if not (wants_confirm_color and volume_ok and range_ok):
+                active_signal = None
+                breakout_counter = 0
+                continue
             if breakout_counter >= BREAKOUT_WINDOW:
                 active_signal = None
                 breakout_counter = 0
@@ -271,7 +282,8 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
         is_lowest_volume = row["volume"] <= vol_min_so_far * (1 + VOL_THRESHOLD_PCT)
         sig_atr = atr14_series.get(ts)
         if wants_color and is_lowest_volume and pd.notna(sig_atr) and sig_atr > 0:
-            active_signal = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr}
+            active_signal = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
+                             "volume": row["volume"]}
             breakout_counter = 0
 
     return None
@@ -339,22 +351,12 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     active = state["active_signal"]
     if active is not None:
         state["breakout_counter"] += 1
-        # v3 NEW -- confirm-color rule (Spec v3 §6 point 1): every candle
-        # in the breakout window must be the confirming/continuation
-        # color (green for LONG, red for SHORT) or the signal drops
-        # immediately -- it does not wait out the remaining window
-        # candle(s). This is a CANDLE-CLOSE-only check (a live tick has
-        # no "color" mid-candle) -- check_tick_trigger()'s own tick-
-        # driven trigger check deliberately does not evaluate this,
-        # matching how the trigger price-crossing itself is checked
-        # continuously while color can only be confirmed at close.
-        confirm_is_green = row["close"] > row["open"]
-        confirm_is_red = row["close"] < row["open"]
-        wants_confirm_color = confirm_is_green if direction == LONG else confirm_is_red
-        if not wants_confirm_color:
-            state["active_signal"] = None
-            state["breakout_counter"] = 0
-            return state, {"type": "signal_expired"}
+        # Trigger is checked FIRST, before any quality gate -- a genuine
+        # breakout candle necessarily exceeds the signal candle's own
+        # high/low (that's what "trigger" means), so a range/volume gate
+        # can never be satisfied BY the triggering candle itself; it only
+        # makes sense as a check on a candle that did NOT trigger, to
+        # decide whether the window continues to the next candle.
         buf = active["atr"] * ATR_PCT_BUFFER
         if direction == LONG:
             trigger_level = active["hi"] + buf
@@ -368,6 +370,33 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
                     "entry_price": trigger_level, "stop_price": stop_price}
             state["active_signal"] = None
             return state, event
+        # v3.1 -- this window candle did NOT trigger. Before letting the
+        # window continue to the next candle, it must have been a clean
+        # continuation of the signal candle's own pullback: the
+        # confirming color (green for LONG, red for SHORT), LOWER volume
+        # than the signal candle (not a fresh volume spike), and its own
+        # high/low still WITHIN the signal candle's range (hasn't already
+        # poked outside it without actually triggering). Fail any of
+        # these and the signal drops immediately rather than waiting out
+        # the remaining window candle(s). This is a CANDLE-CLOSE-only
+        # check (a live tick has no "color"/final volume mid-candle) --
+        # check_tick_trigger()'s own tick-driven trigger check
+        # deliberately evaluates none of this, matching how the trigger
+        # price-crossing itself is checked continuously while these can
+        # only be confirmed at close. In practice this only actually
+        # runs for a window candle that didn't already trigger via a live
+        # tick during its own formation -- process_candle()'s own
+        # tracker.done guard skips calling this entirely once a tick has
+        # already triggered.
+        confirm_is_green = row["close"] > row["open"]
+        confirm_is_red = row["close"] < row["open"]
+        wants_confirm_color = confirm_is_green if direction == LONG else confirm_is_red
+        volume_ok = row["volume"] < active["volume"]
+        range_ok = row["high"] <= active["hi"] and row["low"] >= active["lo"]
+        if not (wants_confirm_color and volume_ok and range_ok):
+            state["active_signal"] = None
+            state["breakout_counter"] = 0
+            return state, {"type": "signal_expired"}
         if state["breakout_counter"] >= BREAKOUT_WINDOW:
             state["active_signal"] = None
             state["breakout_counter"] = 0
@@ -381,7 +410,8 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     wants_color = is_red if direction == LONG else is_green
     is_lowest_volume = row["volume"] <= vol_min_so_far * (1 + VOL_THRESHOLD_PCT)
     if wants_color and is_lowest_volume and pd.notna(sig_atr) and sig_atr > 0:
-        state["active_signal"] = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr}
+        state["active_signal"] = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
+                                  "volume": row["volume"]}
         state["breakout_counter"] = 0
         return state, {"type": "signal_formed", "time": ts, "high": row["high"],
                        "low": row["low"], "atr": sig_atr}
