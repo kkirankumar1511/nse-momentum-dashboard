@@ -815,22 +815,21 @@ def run_live(mode: str = "paper") -> None:
                 if ltp is None:
                     continue
                 now2 = dt.datetime.now()
-                # Tick-driven entry (check_tick_entry(), catching a breakout
-                # the instant a live tick crosses the trigger level) is
-                # disabled here for now, per explicit instruction -- entries
-                # only fire from the candle-close path above
-                # (process_candle()/step_candle()), i.e. at most once every
-                # 5 minutes when the candle a trigger would need actually
-                # closes, matching the backtest's own candle-close
-                # convention exactly rather than the faster-but-diverging
-                # tick approximation. check_tick_entry() is left defined,
-                # just unused, so this is a one-line revert if re-enabled
-                # later. Intracandle STOP/TARGET exit monitoring below is
-                # unchanged -- this only affects new entries.
-                if t.position_id is not None:
+                # Tick-driven entry, restored -- catches a breakout the
+                # instant a live tick crosses the trigger level rather than
+                # waiting up to 5 minutes for the candle to close. This can
+                # NEVER fire during the signal candle itself: active_signal
+                # is only ever set inside step_candle() once that candle has
+                # actually CLOSED (intraday_strategy.py's step_candle(),
+                # bottom branch) -- so the earliest any live tick can be
+                # checked against a trigger is already within the candle
+                # immediately following the signal candle, never before.
+                if t.position_id is None:
+                    event = check_tick_entry(t, ltp, now2, capital_alloc, risk_budget, mode, day_state)
+                else:
                     event = check_intracandle_exit(t, ltp, now2, mode)
-                    if event:
-                        print(f"{now2:%H:%M:%S} {t.symbol}: {event}")
+                if event:
+                    print(f"{now2:%H:%M:%S} {t.symbol}: {event}")
 
             if day_state["slots_remaining"] <= 0:
                 # v3 Spec §4 -- "the outer timestamp loop then breaks --
