@@ -806,7 +806,21 @@ def run_live(mode: str = "paper") -> None:
                         day_state["slots_remaining"] -= 1
 
             for t in trackers:
-                if t.done:
+                # BUGFIX 2026-09-18: `done` means "stop searching for a NEW
+                # entry" (set the instant a trigger fires, Spec v3 §4) --
+                # it does NOT mean "nothing left to watch for this
+                # candidate." A tracker with an OPEN position still has
+                # `done=True` (set the moment it triggered) but must keep
+                # being checked here for its stop/target, or it silently
+                # loses tick-driven exit monitoring for the rest of the
+                # day the instant it opens -- confirmed live: ATHERENERG's
+                # stop was breached and sat unclosed for several minutes
+                # because this exact guard skipped it every single tick
+                # after entry, until a manual intervention closed it. Only
+                # skip a tracker that's BOTH done AND has no open position
+                # (invalidated / expired / sector-gate-failed / slots-
+                # filled -- genuinely nothing left to do for it).
+                if t.done and t.position_id is None:
                     continue
                 token = token_by_symbol.get(t.symbol)
                 if token is None:
