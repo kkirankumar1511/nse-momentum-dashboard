@@ -6330,7 +6330,18 @@ def page_intraday_dashboard():
                         state, detail = "Invalidated", "EMA21 / first-candle gate fired"
                     elif c.get("status") == "sector_gate_failed":
                         _sr = c.get("sector_ratio")
-                        _sr_text = f"{_sr:.2f}" if pd.notna(_sr) else "no data"
+                        # A sector ratio can legitimately be infinite (zero
+                        # decliners among its constituents, see
+                        # intraday_market.compute_first15_breadth()'s own
+                        # docstring) -- ".2f" on float("inf") literally
+                        # prints the string "inf", so special-case it
+                        # rather than let that leak into the UI.
+                        if pd.isna(_sr):
+                            _sr_text = "no data"
+                        elif math.isinf(_sr):
+                            _sr_text = "∞"
+                        else:
+                            _sr_text = f"{_sr:.2f}"
                         state = "Sector gate failed"
                         detail = f"Triggered, ratio {_sr_text} didn't confirm"
                     elif c.get("status") == "day_slots_filled":
@@ -6341,8 +6352,17 @@ def page_intraday_dashboard():
                 _sgp = c.get("sector_gate_pass")
                 _sr = c.get("sector_ratio")
                 if pd.notna(_sgp) and day is not None:
-                    gate = (f"{'PASS' if _sgp else 'FAIL'} {_sr:.2f}" if pd.notna(_sr)
-                           else f"{'PASS' if _sgp else 'FAIL'} —")
+                    _verdict = "PASS" if _sgp else "FAIL"
+                    if pd.isna(_sr):
+                        gate = f"{_verdict} —"
+                    elif math.isinf(_sr):
+                        # Zero decliners among the sector's constituents --
+                        # a genuinely infinite ratio (compute_first15_
+                        # breadth()'s own documented behavior), not a bug;
+                        # ".2f" would otherwise print the literal "inf".
+                        gate = f"{_verdict} ∞"
+                    else:
+                        gate = f"{_verdict} {_sr:.2f}"
                 else:
                     gate = "—"
 
