@@ -6067,7 +6067,19 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
         # EMA21 "as of now" for the live bar -- close enough for a moving
         # visual reference (this is display-only, never a trading
         # decision): continue the series forward using the live close.
-        _live_ema = ema21_series.reindex(hist.index.append(pd.Index([live_ts]))).ffill().get(live_ts)
+        #
+        # .get(live_ts) on a Series can return a Series (not a scalar!)
+        # if live_ts happens to be duplicated in the reindexed result --
+        # a real race right at candle close, where Kite's historical API
+        # may already carry this exact boundary as a closed candle while
+        # this function's caller still treats it as "live" (confirmed
+        # live 2026-09-18: a stray Series here poisoned the y-range
+        # min()/max() below with "truth value of a Series is ambiguous").
+        # Selecting .iloc[-1] after filtering to just this timestamp's
+        # row(s) guarantees a plain scalar either way.
+        _ema_reindexed = ema21_series.reindex(hist.index.append(pd.Index([live_ts]))).ffill()
+        _ema_at_live_ts = _ema_reindexed[_ema_reindexed.index == live_ts]
+        _live_ema = float(_ema_at_live_ts.iloc[-1]) if not _ema_at_live_ts.empty else None
         ema21_today = pd.concat([ema21_today[ema21_today.index != live_ts],
                                  pd.Series([_live_ema], index=[live_ts])]).sort_index()
 
@@ -6156,6 +6168,12 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
     _price_values = pd.concat([plot_df["high"], plot_df["low"], ema21_today]).dropna()
     if _level_values:
         _price_values = pd.concat([_price_values, pd.Series(_level_values)])
+    # Defensive: coerce to plain numeric and drop anything that doesn't
+    # convert cleanly, so a stray non-scalar value sneaking in here some
+    # other way degrades to "skip the fixed range for this tick" rather
+    # than crashing the whole chart (this is display-only sizing, never
+    # a trading decision -- safe to just fall back).
+    _price_values = pd.to_numeric(_price_values, errors="coerce").dropna()
     if not _price_values.empty:
         _pmin, _pmax = float(_price_values.min()), float(_price_values.max())
         _pad = max((_pmax - _pmin) * 0.10, _pmax * 0.005, 0.5)
