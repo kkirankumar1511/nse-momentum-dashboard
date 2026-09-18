@@ -6472,12 +6472,17 @@ def page_intraday_dashboard():
     _render_live_section()
 
     # --- Live chart + today's trade book -------------------------------------
-    # Same 1s cadence as the price ticks above -- the still-forming candle
-    # is built from the live ticker (free, in-memory) same as every other
-    # LTP on this page; only the historical-candle Kite REST call is
-    # expensive, and that's throttled separately via _cached_intraday_hist()'s
-    # own 15s TTL rather than by slowing this whole fragment down.
-    @st.fragment(run_every="1s" if _is_market_hours() else None)
+    # 3s, not 1s -- Streamlit visually highlights/pulses a fragment's
+    # ENTIRE bounding box on every one of its reruns (its own built-in
+    # signal that a background update just happened), independent of how
+    # efficiently the content inside actually updates. At 1s that read as
+    # the whole chart card pulsing continuously, on top of (not fixed by)
+    # the plotly key= and sticky y-range work, which only control what
+    # happens to the chart's OWN content during a rerun, not whether the
+    # fragment reruns in the first place. 3s (matching the candidate
+    # table's own cadence) keeps the still-forming candle reasonably live
+    # while cutting that visible pulse rate by a third.
+    @st.fragment(run_every="3s" if _is_market_hours() else None)
     def _render_chart_and_tradebook_section():
         # Fetched fresh here, not read from the sibling _render_live_
         # section()'s own `day` -- that's a local variable scoped to
