@@ -43,16 +43,35 @@ import pandas as pd
 LONG = "LONG"
 SHORT = "SHORT"
 
-# Spec v3 §2/§5/§6 constants
-SIGNAL_WINDOW_START = "09:30"
+# Spec v5 (Gated-2nd-Candle) §2 constants -- current baseline, supersedes
+# v2/v3/v4 for paper trading. See strategies/
+# DaysLowVolumnBreakout_v5_GatedSecondCandle_Spec.md.
+SIGNAL_WINDOW_START = "09:25"  # v5: CHANGED from v3's "09:30" -- day-bias,
+# sector-gate, and this candle's own shape are all resolved from the SAME
+# 09:25-candle close, so allowing it as a signal candle isn't a look-ahead
+# change (spec §3.1) -- verified: CAGR 21.51%->23.93%, PF 1.55->1.63,
+# DD -8.34%->-7.57% on the same top-2 pool/rule otherwise.
 SIGNAL_WINDOW_END = "15:05"
-NEW_SIGNAL_CUTOFF = dt.time(10, 30)
-VOL_THRESHOLD_PCT = 0.10  # v3: CHANGED from v2's 0.05
+NEW_SIGNAL_CUTOFF = dt.time(11, 0)  # v5: REVERTED from v3's 10:30 -- that
+# value does NOT transfer across pool sizes (spec §3.1's explicit sweep:
+# 10:30 on this top-2/gated-2nd-candle rule scores CAGR 15.20%/PF 1.42,
+# clearly worse than 11:00; 10:30 only won for the earlier top-5 pool).
+VOL_THRESHOLD_PCT = 0.05  # v5: REVERTED from v3's 0.10 back to v2's 5%
+# tolerance -- part of the v5 baseline rule set, not carried over from v3.
 ATR_PCT_BUFFER = 0.05
-BREAKOUT_WINDOW = 2  # v3: CHANGED from v2's 1 -- see the confirm-color
-# rule in step_candle()/step_candidates_causal(): every candle in this
-# window must be the confirming color or the signal drops immediately,
-# it does not simply wait out the remaining window candles.
+BREAKOUT_WINDOW = 2  # v5's "gated-2nd-candle" entry (spec §2): window
+# candle #1 checks only the trigger price-cross; if it doesn't trigger,
+# THIS ALREADY-CLOSED candle is gated on confirming color + lower volume
+# than the signal candle + staying within the signal candle's own
+# high/low range before candle #2 gets a chance at the same trigger
+# check. See step_candle()/find_entry()'s own trigger-checked-first
+# ordering below -- this already matches v5's rule exactly (verified
+# 2026-09-18): color/volume/range are only ever evaluated on a candle
+# that has ALREADY closed without triggering, never on the candle
+# currently being checked for its own trigger, which is what makes this
+# genuinely real-time-executable rather than needing to see a candle's
+# own close before acting on its own trigger touch (the v3/v4 flaw this
+# spec found and rejected -- see spec §1).
 ATR_PERIOD = 14
 EMA_SPAN = 21
 REWARD_RISK = 2.0
@@ -63,8 +82,15 @@ REWARD_RISK = 2.0
 # the wrong price). intraday_engine.py's live loop must trigger its
 # force-squareoff at 15:15:00 real time to match this.
 SQUAREOFF_TIME = "15:10"
-TOP_N_CANDIDATES = 5  # v3: CHANGED from v2's 2 -- the SEARCHED pool widened;
-# MAX_TRADES_PER_DAY (below) stays 2, only the pool searched widened.
+TOP_N_CANDIDATES = 2  # v5: REVERTED from v3's 5 back to v2's top-2 -- v5
+# spec §5's explicit re-test found the top-5 pool actually WORSE than
+# top-2 on this same gated-2nd-candle rule once re-verified on a
+# corrected candidate list (CAGR 17.93% vs top-2's 24.14%, drawdown
+# -19.59% vs -11.46%) -- the top-5 pool's earlier-reported 27.96% CAGR
+# was a stale-candidate-list artifact, not a real finding. With
+# TOP_N_CANDIDATES == MAX_TRADES_PER_DAY (both 2), every searched
+# candidate has a real shot at a slot again, matching v2's original
+# plain top-2 design.
 
 # Spec v2 §2.2 day-bias ratio gate -- CHANGED from v1's strict 2.0/0.5
 # to this more moderate threshold (§9.4's sweep: neither the strict v1

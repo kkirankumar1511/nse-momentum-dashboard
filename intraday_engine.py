@@ -405,16 +405,22 @@ def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.dateti
     if pos is None or pos["status"] != "open":
         return None
 
+    # v5 spec §2 "Exit": once the target has fired on the first half, the
+    # runner half rides UNCONDITIONALLY to the 15:10 forced squareoff --
+    # no further stop (or target) check on it at all, not even the
+    # original stop level. (Superseded v3/v2 behavior: the stop used to
+    # still apply to the runner here -- that's no longer correct per v5.)
+    already_took_target = pos["qty_remaining"] < pos["qty"]
+    if already_took_target:
+        return None
+
     direction = pos["direction"]
     hit_stop = ltp <= pos["stop_price"] if direction == strat.LONG else ltp >= pos["stop_price"]
     hit_target = ltp >= pos["target_price"] if direction == strat.LONG else ltp <= pos["target_price"]
-    # A position already down to its runner half (qty_remaining < qty) has
-    # already taken its target leg -- only the stop (or 15:10) applies now.
-    already_took_target = pos["qty_remaining"] < pos["qty"]
 
     if hit_stop:
         return _close_leg(tracker, pos, "stop", pos["qty_remaining"], pos["stop_price"], now, mode)
-    if hit_target and not already_took_target:
+    if hit_target:
         half = pos["qty"] // 2
         return _close_leg(tracker, pos, "target", half, pos["target_price"], now, mode)
     return None

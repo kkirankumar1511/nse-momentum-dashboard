@@ -6192,11 +6192,13 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
 def page_intraday_dashboard():
     _mode = "live" if config.STRATEGY.get("intraday_live_enabled", False) else "paper"
     _tip = html_lib.escape(
-        "The DaysLowVolumnBreakout intraday strategy (v3, Top-5 Causal) -- "
-        "day-bias from NIFTY 50 breadth, a top-5 F&O momentum candidate pool "
-        "walked causally in real time for 2 trade slots/day, a low-volume "
-        "pullback signal, ATR-buffered 2-candle breakout entry, sector "
-        "confirmation gate, half-target/half-15:15 exit. Paper mode "
+        "The DaysLowVolumnBreakout intraday strategy (v5, Gated 2nd Candle) -- "
+        "day-bias from NIFTY 50 breadth, a top-2 F&O momentum candidate pool, "
+        "a low-volume pullback signal (09:25 window), a genuinely real-time "
+        "gated-2-candle breakout entry (only a price-cross fires entry; "
+        "color/volume/range only ever gate whether an already-closed candle "
+        "gets a 2nd chance), sector confirmation gate, half-target (runner "
+        "then rides unconditionally to 15:15)/full-stop exit. Paper mode "
         "simulates every fill with zero real orders; switching to live is "
         "a separate, deliberate step (Admin).")
     _mode_badge = ('<span class="ov-badge ov-badge-red">🔴 LIVE</span>' if _mode == "live"
