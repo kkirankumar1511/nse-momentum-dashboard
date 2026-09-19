@@ -5935,9 +5935,9 @@ _EXIT_TYPE_BADGES = {
 
 _INTRADAY_EVENT_BADGES = {
     "signal_formed": "ov-badge-amber", "expired": "ov-badge-gray",
-    "invalidated": "ov-badge-gray", "triggered": "ov-badge-green",
-    "target": "ov-badge-green", "stop": "ov-badge-red",
-    "squareoff": "ov-badge-blue",
+    "re_signaled": "ov-badge-amber", "invalidated": "ov-badge-gray",
+    "triggered": "ov-badge-green", "target": "ov-badge-green",
+    "stop": "ov-badge-red", "squareoff": "ov-badge-blue",
 }
 
 LIVE_TICK_STALE_SECONDS = 20  # fall back to a REST quote if the feed goes quiet this long
@@ -6662,9 +6662,15 @@ def page_intraday_dashboard():
     poss = idb.get_positions(date=today, mode=_mode)
     legs = idb.get_legs(date=today, mode=_mode)
     events = []
+    # "active" has no event badge of its own -- falls back to
+    # "signal_formed" (a signal record simply exists, still being
+    # watched). Every other status (expired / re_signaled / triggered /
+    # invalidated) is shown as itself.
+    _sig_status_to_event = {"expired": "expired", "re_signaled": "re_signaled",
+                            "triggered": "triggered", "invalidated": "invalidated"}
     for _, s in sigs.iterrows():
         events.append({"time": s["signal_time"], "symbol": s["symbol"],
-                      "event": "signal_formed" if s["status"] != "expired" else "expired",
+                      "event": _sig_status_to_event.get(s["status"], "signal_formed"),
                       "detail": f"high ₹{s['signal_high']:.2f} / low ₹{s['signal_low']:.2f}"})
     for _, p in poss.iterrows():
         events.append({"time": p["entry_time"], "symbol": p["symbol"], "event": "triggered",

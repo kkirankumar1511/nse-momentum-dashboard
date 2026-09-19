@@ -236,6 +236,9 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
     breakout_counter = 0
 
     for ts, row in win.iterrows():
+        sig_atr = atr14_series.get(ts)  # this candle's own ATR -- needed both
+        # for a fresh signal formation below AND for a re-signal check while
+        # an existing signal is active, computed once here either way.
         # 1. EMA21 day-invalidation gate -- checked every candle,
         # regardless of any active signal (Spec §3.2 step 1, §9.5).
         e21 = ema21_series.get(ts)
@@ -283,16 +286,32 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
             # waiting out the remaining window candle(s) (Spec v3 §6
             # point 1, extended). See step_candle()'s own comment for the
             # live-vs-backtest rationale, kept identical here.
-            confirm_is_green = row["close"] > row["open"]
-            confirm_is_red = row["close"] < row["open"]
-            wants_confirm_color = confirm_is_green if direction == LONG else confirm_is_red
-            volume_ok = row["volume"] < active_signal["volume"]
-            range_ok = row["high"] <= active_signal["hi"] and row["low"] >= active_signal["lo"]
-            if not (wants_confirm_color and volume_ok and range_ok):
-                active_signal = None
-                breakout_counter = 0
+            # v5.1 -- "re-signal on close": see step_candle()'s own
+            # comment for the full rationale (verified 2026-09-19 against
+            # scratch_v2_gated2nd_resignal_close.py: CAGR 24.14%->28.20%,
+            # DD -11.46%->-11.26%). A candle that fails to keep the
+            # window open -- candle #1 failing this gate, or candle #2
+            # exhausting the window -- gets one more chance to become a
+            # brand-new signal candle if its own close extended the
+            # pullback beyond the CURRENT active signal's close. Can
+            # chain indefinitely, same as step_candle().
+            gate_ok = False
+            if breakout_counter < BREAKOUT_WINDOW:
+                confirm_is_green = row["close"] > row["open"]
+                confirm_is_red = row["close"] < row["open"]
+                wants_confirm_color = confirm_is_green if direction == LONG else confirm_is_red
+                volume_ok = row["volume"] < active_signal["volume"]
+                range_ok = row["high"] <= active_signal["hi"] and row["low"] >= active_signal["lo"]
+                gate_ok = wants_confirm_color and volume_ok and range_ok
+            if gate_ok:
                 continue
-            if breakout_counter >= BREAKOUT_WINDOW:
+            resig_ok = (row["close"] < active_signal["signal_close"] if direction == LONG
+                       else row["close"] > active_signal["signal_close"])
+            if resig_ok and pd.notna(sig_atr) and sig_atr > 0:
+                active_signal = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
+                                 "volume": row["volume"], "signal_close": row["close"]}
+                breakout_counter = 0
+            else:
                 active_signal = None
                 breakout_counter = 0
             continue
@@ -306,10 +325,9 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
         wants_color = is_red if direction == LONG else is_green
         vol_min_so_far = vol_so_far_full.loc[:ts].min()
         is_lowest_volume = row["volume"] <= vol_min_so_far * (1 + VOL_THRESHOLD_PCT)
-        sig_atr = atr14_series.get(ts)
         if wants_color and is_lowest_volume and pd.notna(sig_atr) and sig_atr > 0:
             active_signal = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
-                             "volume": row["volume"]}
+                             "volume": row["volume"], "signal_close": row["close"]}
             breakout_counter = 0
 
     return None
@@ -414,20 +432,45 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
         # tick during its own formation -- process_candle()'s own
         # tracker.done guard skips calling this entirely once a tick has
         # already triggered.
-        confirm_is_green = row["close"] > row["open"]
-        confirm_is_red = row["close"] < row["open"]
-        wants_confirm_color = confirm_is_green if direction == LONG else confirm_is_red
-        volume_ok = row["volume"] < active["volume"]
-        range_ok = row["high"] <= active["hi"] and row["low"] >= active["lo"]
-        if not (wants_confirm_color and volume_ok and range_ok):
-            state["active_signal"] = None
+        # v5.1 -- "re-signal on close": rather than being the final word,
+        # a candle that fails to keep the window open (either candle #1
+        # failing the color/volume/range gate, or candle #2 exhausting
+        # the window) gets ONE more chance to become a brand-new signal
+        # candle in its own right, if its own close extended the
+        # pullback beyond the CURRENT active signal's close (a deeper
+        # low for LONG, a higher high for SHORT -- still fading, just
+        # further). Still only ever uses this candle's own already-
+        # closed price vs an already-known fixed value, so it's exactly
+        # as real-time-safe as everything else here. Can chain
+        # indefinitely (a re-signaled candle's own failing window candle
+        # can itself re-signal again) -- verified 2026-09-19 against
+        # scratch_v2_gated2nd_resignal_close.py: CAGR 24.14%->28.20%,
+        # DD -11.46%->-11.26%, on the same underlying candidate list.
+        gate_ok = False
+        if state["breakout_counter"] < BREAKOUT_WINDOW:
+            # Candle #1 only -- same continuation gate as before decides
+            # whether candle #2 gets a look BEFORE trying a re-signal.
+            confirm_is_green = row["close"] > row["open"]
+            confirm_is_red = row["close"] < row["open"]
+            wants_confirm_color = confirm_is_green if direction == LONG else confirm_is_red
+            volume_ok = row["volume"] < active["volume"]
+            range_ok = row["high"] <= active["hi"] and row["low"] >= active["lo"]
+            gate_ok = wants_confirm_color and volume_ok and range_ok
+        if gate_ok:
+            return state, None
+        # Gate failed (candle #1) or window exhausted (candle #2) --
+        # try a re-signal before giving up entirely.
+        resig_ok = (row["close"] < active["signal_close"] if direction == LONG
+                   else row["close"] > active["signal_close"])
+        if resig_ok and pd.notna(sig_atr) and sig_atr > 0:
+            state["active_signal"] = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
+                                      "volume": row["volume"], "signal_close": row["close"]}
             state["breakout_counter"] = 0
-            return state, {"type": "signal_expired"}
-        if state["breakout_counter"] >= BREAKOUT_WINDOW:
-            state["active_signal"] = None
-            state["breakout_counter"] = 0
-            return state, {"type": "signal_expired"}
-        return state, None
+            return state, {"type": "re_signaled", "time": ts, "high": row["high"],
+                           "low": row["low"], "atr": sig_atr}
+        state["active_signal"] = None
+        state["breakout_counter"] = 0
+        return state, {"type": "signal_expired"}
 
     if ts.time() > NEW_SIGNAL_CUTOFF:
         return state, None
@@ -437,7 +480,7 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     is_lowest_volume = row["volume"] <= vol_min_so_far * (1 + VOL_THRESHOLD_PCT)
     if wants_color and is_lowest_volume and pd.notna(sig_atr) and sig_atr > 0:
         state["active_signal"] = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
-                                  "volume": row["volume"]}
+                                  "volume": row["volume"], "signal_close": row["close"]}
         state["breakout_counter"] = 0
         return state, {"type": "signal_formed", "time": ts, "high": row["high"],
                        "low": row["low"], "atr": sig_atr}
