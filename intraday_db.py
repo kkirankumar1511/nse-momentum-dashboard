@@ -162,6 +162,19 @@ def _migrate_daily_selection_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE intraday_days ADD COLUMN decliners INTEGER")
     conn.commit()
 
+    # v5.2 EMA-trail exit: once price first touches the 1:2R target, the
+    # first-half booking is DEFERRED and trailed against EMA5/EMA10
+    # instead. target_touch_time (NULL = target not yet touched) and
+    # trail_ema (5 or 10) are persisted so the exit state survives in the
+    # DB, is visible to the Dashboard, and doesn't live only in the
+    # engine process's memory.
+    pos_cols = {r["name"] for r in conn.execute("PRAGMA table_info(intraday_positions)")}
+    if "target_touch_time" not in pos_cols:
+        conn.execute("ALTER TABLE intraday_positions ADD COLUMN target_touch_time TEXT")
+    if "trail_ema" not in pos_cols:
+        conn.execute("ALTER TABLE intraday_positions ADD COLUMN trail_ema INTEGER")
+    conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # Days / daily selection -- Spec.md §2
@@ -319,7 +332,8 @@ def close_position_leg(position_id: int, leg_type: str, qty: int, exit_price: fl
                        order_id: str | None = None) -> None:
     """Records one exit leg and decrements the parent position's
     qty_remaining -- flips status to 'closed' once it reaches 0.
-    leg_type: 'target' | 'stop' | 'squareoff' | 'eod_data_end'."""
+    leg_type: 'target' | 'ema5_trail_exit' | 'ema10_trail_exit' | 'stop' |
+    'squareoff' | 'eod_data_end'."""
     conn = get_conn()
     conn.execute(
         "INSERT INTO intraday_legs (position_id, leg_type, qty, exit_price, exit_time, "
@@ -332,6 +346,17 @@ def close_position_leg(position_id: int, leg_type: str, qty: int, exit_price: fl
     conn.execute(
         "UPDATE intraday_positions SET qty_remaining = ?, status = ? WHERE id = ?",
         (new_remaining, new_status, position_id))
+    conn.commit()
+    conn.close()
+
+
+def mark_target_touched(position_id: int, touch_time: str, trail_ema: int) -> None:
+    """v5.2: the 1:2R target was first touched and the first-half booking
+    is deferred -- record when, and which EMA (5 or 10) to trail."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE intraday_positions SET target_touch_time = ?, trail_ema = ? WHERE id = ?",
+        (touch_time, trail_ema, position_id))
     conn.commit()
     conn.close()
 

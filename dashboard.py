@@ -5937,6 +5937,7 @@ _INTRADAY_EVENT_BADGES = {
     "signal_formed": "ov-badge-amber", "expired": "ov-badge-gray",
     "re_signaled": "ov-badge-amber", "invalidated": "ov-badge-gray",
     "triggered": "ov-badge-green", "target": "ov-badge-green",
+    "ema5_trail_exit": "ov-badge-green", "ema10_trail_exit": "ov-badge-green",
     "stop": "ov-badge-red", "squareoff": "ov-badge-blue",
 }
 
@@ -6215,15 +6216,19 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
 def page_intraday_dashboard():
     _mode = "live" if config.STRATEGY.get("intraday_live_enabled", False) else "paper"
     _tip = html_lib.escape(
-        "The DaysLowVolumnBreakout intraday strategy (v5, Gated 2nd Candle) -- "
+        "The DaysLowVolumnBreakout intraday strategy (v5.3) -- "
         "day-bias from NIFTY 50 breadth, a top-2 F&O momentum candidate pool, "
         "a low-volume pullback signal (09:25 window), a genuinely real-time "
         "gated-2-candle breakout entry (only a price-cross fires entry; "
         "color/volume/range only ever gate whether an already-closed candle "
-        "gets a 2nd chance), sector confirmation gate, half-target (runner "
-        "then rides unconditionally to 15:15)/full-stop exit. Paper mode "
-        "simulates every fill with zero real orders; switching to live is "
-        "a separate, deliberate step (Admin).")
+        "gets a 2nd chance), a lower-volume re-signal that can happen at most "
+        "once per signal, sector confirmation gate. Exit: the original stop "
+        "protects the whole position throughout; on touching the 1:2R target "
+        "the first half is not sold there but trailed on EMA5 (EMA10 fallback) "
+        "and sold on the first candle closing through it (filled at the next "
+        "candle's open); the rest squares off at 15:10. Paper mode simulates "
+        "every fill with zero real orders; switching to live is a separate, "
+        "deliberate step (Admin).")
     _mode_badge = ('<span class="ov-badge ov-badge-red">🔴 LIVE</span>' if _mode == "live"
                   else '<span class="ov-badge ov-badge-blue">📝 PAPER</span>')
     st.markdown(
@@ -6395,6 +6400,14 @@ def page_intraday_dashboard():
                     detail = (f"Entry ₹{_p['entry_price']:.2f} / Stop ₹{_p['stop_price']:.2f} / "
                              f"Target ₹{_p['target_price']:.2f} / Qty "
                              f"{int(_p['qty_remaining'])}/{int(_p['qty'])}")
+                    # v5.2 EMA-trail: once the 1:2R target is touched the
+                    # first-half booking is deferred and trailed -- surface
+                    # that instead of leaving "Target" looking untouched.
+                    if pd.notna(_p.get("target_touch_time")) and pd.notna(_p.get("trail_ema")) \
+                            and int(_p["qty_remaining"]) == int(_p["qty"]):
+                        detail += (f" · target touched {pd.Timestamp(_p['target_touch_time']):%H:%M}, "
+                                  f"trailing EMA{int(_p['trail_ema'])} "
+                                  f"(1st half sells on a close through it)")
                 elif sig is not None:
                     _buf = sig["signal_atr"] * istrat.ATR_PCT_BUFFER
                     _proj_entry = (sig["signal_high"] + _buf if day and day["day_bias"] == istrat.LONG

@@ -235,6 +235,11 @@ class CandidateTracker:
         # cached frame before recomputing ema21_series/atr14_series -- see
         # run_live()'s per-boundary loop.
         self.hist: pd.DataFrame | None = None
+        # v5.2 EMA-trail: the newest CLOSED candle label already checked
+        # against the trail EMA for this tracker's open position (so a
+        # boundary is never evaluated twice, and a skipped boundary is
+        # caught up in order rather than lost).
+        self.trail_checked_through = pd.Timestamp.min
 
 
 def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series) -> dict | None:
@@ -409,35 +414,163 @@ def check_tick_entry(tracker: CandidateTracker, ltp: float, now: dt.datetime,
     return result
 
 
+def _closed_only(hist: pd.DataFrame | None, boundary: pd.Timestamp) -> pd.DataFrame | None:
+    """NO-LOOK-AHEAD guard: keeps only candles whose label is <= the last
+    fully CLOSED candle's label (`boundary`). A candle's label is its
+    OPEN time, so anything labeled after `boundary` is still forming (or
+    hasn't started) and its close/EMA contribution is not yet knowable."""
+    if hist is None:
+        return None
+    return hist[hist.index <= boundary]
+
+
+def _floor5(ts: pd.Timestamp) -> pd.Timestamp:
+    """The 5-minute candle label (open time) containing `ts`."""
+    ts = pd.Timestamp(ts)
+    return ts.replace(second=0, microsecond=0, nanosecond=0) - pd.Timedelta(minutes=ts.minute % 5)
+
+
 def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.datetime,
                            mode: str) -> dict | None:
-    """Spec.md §6.2 -- between candle closes, watch LTP against the open
-    position's stop/target continuously rather than waiting for the
-    next 5-min candle. No-ops if this tracker has no open position."""
+    """v5.2 exit, tick-driven part (spec §1 steps 1-2). Between candle
+    closes, watch LTP against the open position's stop/target:
+
+    1. STOP first, always -- the original stop protects the WHOLE
+       remaining quantity at every point: before the target, while the
+       first-half booking is deferred (full size), and the runner half
+       afterwards. (The v5 spec's prose said the runner rides with no
+       stop; the validated backtest code and v5.2's own exit-path table,
+       e.g. "EMA5-trail -> stop: 89 positions", say otherwise -- the
+       stop applies to the runner. Corrected here.)
+    2. TARGET, only until first touched: price reaching the 1:2R target
+       no longer books the first half there by default. Where the target
+       sits vs EMA5/EMA10 of the last COMPLETED candle (never the
+       still-forming touch candle -- no look-ahead) decides whether to
+       DEFER (persist target_touch_time + trail_ema, sell nothing; the
+       trail itself is checked at candle closes by
+       step_position_boundary()) or, if neither EMA tier applies, book
+       the first half at the fixed target exactly like v5.1.
+
+    No-ops if this tracker has no open position."""
     if tracker.position_id is None:
         return None
     pos = idb.get_position(tracker.position_id)
     if pos is None or pos["status"] != "open":
         return None
 
-    # v5 spec §2 "Exit": once the target has fired on the first half, the
-    # runner half rides UNCONDITIONALLY to the 15:10 forced squareoff --
-    # no further stop (or target) check on it at all, not even the
-    # original stop level. (Superseded v3/v2 behavior: the stop used to
-    # still apply to the runner here -- that's no longer correct per v5.)
-    already_took_target = pos["qty_remaining"] < pos["qty"]
-    if already_took_target:
-        return None
-
     direction = pos["direction"]
     hit_stop = ltp <= pos["stop_price"] if direction == strat.LONG else ltp >= pos["stop_price"]
-    hit_target = ltp >= pos["target_price"] if direction == strat.LONG else ltp <= pos["target_price"]
-
     if hit_stop:
         return _close_leg(tracker, pos, "stop", pos["qty_remaining"], pos["stop_price"], now, mode)
-    if hit_target:
-        half = pos["qty"] // 2
+
+    # Target logic applies only once: not yet touched, first half not yet booked.
+    if pos.get("target_touch_time") is not None or pos["qty_remaining"] < pos["qty"]:
+        return None
+    hit_target = ltp >= pos["target_price"] if direction == strat.LONG else ltp <= pos["target_price"]
+    if not hit_target:
+        return None
+
+    half = pos["qty"] // 2
+    # EMAs from the last COMPLETED candle only.
+    last_closed = _last_closed_candle_label(now)
+    closed = _closed_only(getattr(tracker, "hist", None), last_closed)
+    e5 = e10 = None
+    if closed is not None and not closed.empty:
+        e5 = strat.ema_n(closed["close"], strat.TRAIL_EMA_FAST).iloc[-1]
+        e10 = strat.ema_n(closed["close"], strat.TRAIL_EMA_SLOW).iloc[-1]
+    trail = strat.choose_trail_ema(direction, pos["target_price"], e5, e10)
+
+    if half <= 0:
+        # A 1-share position can't be split -- mark touched (so this isn't
+        # re-evaluated every tick) and let it ride whole; stop/squareoff
+        # still apply.
+        idb.mark_target_touched(tracker.position_id, str(now), None)
+        return None
+    if trail is None:
+        # Neither EMA tier applies -> v5.1 behavior: book the first half
+        # at the fixed target price right now.
+        idb.mark_target_touched(tracker.position_id, str(now), None)
         return _close_leg(tracker, pos, "target", half, pos["target_price"], now, mode)
+
+    idb.mark_target_touched(tracker.position_id, str(now), trail)
+    _push(f"KK Trading — {pos['symbol']} target touched ({mode})",
+         f"1:2R target {pos['target_price']:.2f} reached -- first-half booking "
+         f"deferred, trailing EMA{trail}; original stop still protects the full position.")
+    return {"type": "target_touched", "trail_ema": trail, "target": pos["target_price"],
+            "ema5": None if e5 is None else float(e5), "ema10": None if e10 is None else float(e10)}
+
+
+def _refresh_position_hist(tracker: CandidateTracker, boundary: pd.Timestamp) -> bool:
+    """Merges a small recent window of closed candles into tracker.hist
+    (same pattern as the signal path -- keep the NEWEST value for any
+    overlapping label, since a just-closed candle can still settle for a
+    few minutes) and drops anything labeled after `boundary`. Returns
+    False (leaving hist untouched) if the fetch fails, so a transient API
+    error can't take down the engine loop while a position is open."""
+    try:
+        delta = kite_client.fetch_intraday_candles(tracker.symbol, days=_REFRESH_WINDOW_DAYS,
+                                                   interval="5minute")
+    except Exception as e:
+        print(f"[intraday_engine] {tracker.symbol}: candle refresh failed -- {e}")
+        return False
+    merged = pd.concat([tracker.hist, delta]) if tracker.hist is not None else delta
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    tracker.hist = _closed_only(merged, boundary)
+    return True
+
+
+def step_position_boundary(tracker: CandidateTracker, boundary: pd.Timestamp, now: dt.datetime,
+                           mode: str, live_price_fn) -> dict | None:
+    """v5.2 exit, candle-close part (spec §1 steps 3-5). Called once per
+    newly CLOSED candle (label `boundary`) for a tracker with an open
+    position -- independent of the day's remaining trade slots.
+
+    While the first-half booking is deferred: for each closed candle
+    AFTER the touch candle (the touch candle itself is excluded, like the
+    backtest), compare that candle's own close to that same candle's own
+    trail EMA. The first candle closing through it (LONG: below, SHORT:
+    above) books 50% at the NEXT candle's open.
+
+    NO LOOK-AHEAD: only candles labeled <= `boundary` (fully closed) are
+    ever examined; the fill is the next candle's open only if that candle
+    is ALREADY closed in hist (catch-up case) -- otherwise it's the live
+    price right now, i.e. the first price after the crossing candle
+    closed, never the crossing candle's own close (a value the order
+    could not actually have traded at)."""
+    if tracker.position_id is None:
+        return None
+    pos = idb.get_position(tracker.position_id)
+    if pos is None or pos["status"] != "open":
+        return None
+    if pos["qty_remaining"] < pos["qty"]:
+        return None  # first half already booked -- nothing candle-close-driven left
+
+    _refresh_position_hist(tracker, boundary)  # keeps EMAs current for the touch decision too
+
+    touch_time, span = pos.get("target_touch_time"), pos.get("trail_ema")
+    if touch_time is None or span is None or pd.isna(span) or tracker.hist is None:
+        return None
+    span = int(span)
+    touch_label = _floor5(touch_time)
+    hist = _closed_only(tracker.hist, boundary)
+    ema = strat.ema_n(hist["close"], span)
+    start = max(touch_label, tracker.trail_checked_through)  # strictly AFTER the touch candle
+    todo = hist[(hist.index > start) & (hist.index <= boundary)]
+    tracker.trail_checked_through = boundary
+    for ts, row in todo.iterrows():
+        if not strat.trail_crossed(pos["direction"], float(row["close"]), ema.get(ts)):
+            continue
+        later = hist[hist.index > ts]
+        if not later.empty:
+            fill_px = float(later.iloc[0]["open"])   # next candle already closed: exact open
+        else:
+            fill_px = live_price_fn()
+            if fill_px is None:
+                fill_px = float(row["close"])        # last resort only; no live price available
+        half = pos["qty"] // 2
+        if half <= 0:
+            return None
+        return _close_leg(tracker, pos, f"ema{span}_trail_exit", half, fill_px, now, mode)
     return None
 
 
@@ -709,6 +842,7 @@ def run_live(mode: str = "paper") -> None:
 
     try:
         last_candle_ts = None
+        last_pos_candle_ts = None  # v5.2 trail step's own boundary tracker
         print("Entering intraday loop (09:30-15:10)...")
         while True:
             now = dt.datetime.now()
@@ -740,6 +874,25 @@ def run_live(mode: str = "paper") -> None:
                 break
 
             boundary = _last_closed_candle_label(now)
+
+            # v5.2 EMA-trail (candle-close part): for every OPEN position,
+            # check the newly closed candle against its trail EMA. Its own
+            # boundary tracker (NOT last_candle_ts) and deliberately outside
+            # the `slots_remaining > 0` gate of the signal block below --
+            # that gate stops all signal processing once both slots fill,
+            # which is exactly when open positions most need this.
+            if last_pos_candle_ts is None or boundary > last_pos_candle_ts:
+                for t in trackers:
+                    if t.position_id is None:
+                        continue
+                    _tok = token_by_symbol.get(t.symbol)
+                    _px_fn = (lambda _t=t, _k=_tok: _get_live_ltp(ticker, _k, _t.symbol)) \
+                        if _tok is not None else (lambda: None)
+                    _ev = step_position_boundary(t, boundary, dt.datetime.now(), mode, _px_fn)
+                    if _ev:
+                        print(f"{boundary} {t.symbol}: {_ev}")
+                last_pos_candle_ts = boundary
+
             # v2 Spec §3.1 -- SIGNAL_WINDOW_START moved to "09:30" (the
             # candle labeled 09:30 is now itself eligible), so this gate
             # follows the same constant rather than a separate hardcoded
@@ -800,6 +953,7 @@ def run_live(mode: str = "paper") -> None:
                         continue
                     t.hist = pd.concat([t.hist, delta])
                     t.hist = t.hist[~t.hist.index.duplicated(keep="last")].sort_index()
+                    t.hist = _closed_only(t.hist, boundary)  # no look-ahead: never a forming candle
                     t.ema21_series = strat.ema21(t.hist["close"])
                     t.atr14_series = strat.atr14(t.hist)
                     row = row_df.iloc[0]
