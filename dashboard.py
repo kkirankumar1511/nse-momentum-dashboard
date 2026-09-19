@@ -6128,12 +6128,35 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
         _hline(pos["stop_price"], _CHART_DOWN, "stop", dash="dot")
         _hline(pos["target_price"], _CHART_UP, "target", dash="dot")
     elif sig is not None:
-        # Signal high/low themselves are dropped as SEPARATE lines --
-        # the trigger sits only ~5% of ATR away from the signal high/low
-        # by construction, so showing both always overlapped. "Trigger"
-        # and "stop if triggered" convey the same information (and are
-        # the two levels that actually matter for what happens next)
-        # while staying visually distinct from each other.
+        # Signal candle's own high/low -- shown as a shaded box spanning
+        # just that ONE candle's x-range, not full-width hlines, since
+        # signal_high/signal_low sit only ~5% of ATR away from the
+        # trigger/stop-if-triggered levels below and would collide with
+        # their labels if drawn the same way. A box also directly answers
+        # the v5 gated-2nd-candle rule's own question (spec S2): did the
+        # next candle's high/low stay CONTAINED within this box, or did
+        # it poke outside without triggering -- that visual containment
+        # is exactly what the color+volume+range gate is checking.
+        _sig_ts = pd.Timestamp(sig["signal_time"])
+        fig.add_shape(
+            type="rect", xref="x", yref="y",
+            x0=_sig_ts, x1=_sig_ts + pd.Timedelta(minutes=5),
+            y0=sig["signal_low"], y1=sig["signal_high"],
+            fillcolor="rgba(92,107,192,0.15)", line=dict(color="#5c6bc0", width=1.25),
+            row=1, col=1)
+        fig.add_annotation(
+            x=_sig_ts + pd.Timedelta(minutes=5), y=sig["signal_high"],
+            xref="x", yref="y", text="signal candle", showarrow=False,
+            font=dict(size=9, color="#5c6bc0"), xanchor="left", yanchor="bottom",
+            row=1, col=1)
+        _level_values.append(float(sig["signal_high"]))
+        _level_values.append(float(sig["signal_low"]))
+
+        # Trigger / stop-if-triggered stay as full-width hlines (unlike
+        # the signal box, these matter for the ENTIRE rest of the window,
+        # not just one candle) -- "trigger" and "stop if triggered" are
+        # the two levels that actually matter for what happens next,
+        # kept visually distinct from each other and from the box above.
         buf = sig["signal_atr"] * istrat.ATR_PCT_BUFFER
         if direction == istrat.LONG:
             trigger, would_be_stop = sig["signal_high"] + buf, sig["signal_low"] - buf
