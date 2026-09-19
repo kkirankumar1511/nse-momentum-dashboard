@@ -6497,75 +6497,83 @@ def page_intraday_dashboard():
         if _cands_now.empty:
             return
         _open_now = idb.get_open_positions(date=today, mode=_mode)
-        # Default to whichever candidate has an open position, else rank 1.
-        _default_sym = (_open_now.iloc[0]["symbol"] if not _open_now.empty
-                        else _cands_now.iloc[0]["symbol"])
+        # v5: TOP_N_CANDIDATES == MAX_TRADES_PER_DAY == 2, so there are
+        # NEVER more than 2 candidates to look at -- a dropdown to pick
+        # "which one" made sense for the old top-5 pool, but with only
+        # ever 2 possible, showing both charts side by side at once (no
+        # picking required) is strictly more informative for the same
+        # screen space.
         _syms = list(_cands_now["symbol"])
-        _sel_sym = st.selectbox("Chart", _syms,
-                                index=_syms.index(_default_sym) if _default_sym in _syms else 0,
-                                key="intraday_chart_symbol")
+        _ticker = _get_dashboard_ticker()
+        _ensure_subscribed(_ticker, _syms)
+        _direction = day["day_bias"] if day is not None else istrat.LONG
 
-        col_chart, col_tb = st.columns([3, 2])
-        with col_chart:
-          with st.container(border=True, key="ov-card-intraday-chart"):
-            _sel_sig = idb.get_active_signal(today, _sel_sym)
-            _sel_pos_df = _open_now[_open_now["symbol"] == _sel_sym] if not _open_now.empty else _open_now
-            _sel_pos = _sel_pos_df.iloc[0].to_dict() if not _sel_pos_df.empty else None
-            _direction = day["day_bias"] if day is not None else istrat.LONG
+        def _render_one_chart(sym: str) -> None:
+            with st.container(border=True, key=f"ov-card-intraday-chart-{sym}"):
+                st.markdown(f'<p class="ov-card-title">{html_lib.escape(sym)}</p>',
+                           unsafe_allow_html=True)
+                _sel_sig = idb.get_active_signal(today, sym)
+                _sel_pos_df = _open_now[_open_now["symbol"] == sym] if not _open_now.empty else _open_now
+                _sel_pos = _sel_pos_df.iloc[0].to_dict() if not _sel_pos_df.empty else None
 
-            # Live, tick-by-tick current (still-forming) candle -- Kite's
-            # historical API only ever returns CLOSED 5-min bars, so
-            # without this the chart visibly freezes for up to 5 minutes
-            # at a stretch instead of moving with the live price. Tracked
-            # in session_state (persists across this fragment's own
-            # reruns), reset the moment a new 5-min window starts.
-            _ticker = _get_dashboard_ticker()
-            _ensure_subscribed(_ticker, [_sel_sym])
-            _ltp, _ = _live_price_and_change(_ticker, _sel_sym)
-            _now = dt.datetime.now()
-            _cur_boundary = _now.replace(second=0, microsecond=0) - dt.timedelta(minutes=_now.minute % 5)
-            _live_key = f"_intraday_live_candle_{_sel_sym}_{today}"
-            _live_state = st.session_state.get(_live_key)
-            _live_candle = None
-            if _ltp is not None and _is_market_hours():
-                if _live_state is None or _live_state["boundary"] != _cur_boundary:
-                    _live_state = {"boundary": _cur_boundary, "open": _ltp, "high": _ltp,
-                                  "low": _ltp, "close": _ltp}
+                # Live, tick-by-tick current (still-forming) candle -- Kite's
+                # historical API only ever returns CLOSED 5-min bars, so
+                # without this the chart visibly freezes for up to 5 minutes
+                # at a stretch instead of moving with the live price. Tracked
+                # in session_state (persists across this fragment's own
+                # reruns, keyed per symbol), reset the moment a new 5-min
+                # window starts.
+                _ltp, _ = _live_price_and_change(_ticker, sym)
+                _now = dt.datetime.now()
+                _cur_boundary = _now.replace(second=0, microsecond=0) - dt.timedelta(minutes=_now.minute % 5)
+                _live_key = f"_intraday_live_candle_{sym}_{today}"
+                _live_state = st.session_state.get(_live_key)
+                _live_candle = None
+                if _ltp is not None and _is_market_hours():
+                    if _live_state is None or _live_state["boundary"] != _cur_boundary:
+                        _live_state = {"boundary": _cur_boundary, "open": _ltp, "high": _ltp,
+                                      "low": _ltp, "close": _ltp}
+                    else:
+                        _live_state["high"] = max(_live_state["high"], _ltp)
+                        _live_state["low"] = min(_live_state["low"], _ltp)
+                        _live_state["close"] = _ltp
+                    st.session_state[_live_key] = _live_state
+                    _live_candle = {"ts": _cur_boundary, "open": _live_state["open"],
+                                    "high": _live_state["high"], "low": _live_state["low"],
+                                    "close": _live_state["close"], "volume": float("nan")}
+
+                # first_low/first_high (the 09:15 first-candle gate reference)
+                # only ever lives in the live engine's own in-memory tracker,
+                # never persisted to the DB -- this dashboard process has no
+                # way to read it, so those two overlay lines are skipped for
+                # now (EMA21/signal/entry/stop/target still all render).
+                fig = _build_intraday_candle_figure(
+                    sym, _direction, today, first_low=None, first_high=None,
+                    sig=_sel_sig, pos=_sel_pos, live_candle=_live_candle)
+                if fig is not None:
+                    # A stable key is what lets Streamlit reuse the SAME
+                    # chart component across reruns instead of tearing it
+                    # down and remounting a brand-new one every tick --
+                    # without it, each rerun's new Figure object gets
+                    # treated as a new component instance, so the WHOLE
+                    # chart visibly redraws from scratch instead of
+                    # Plotly's own react()-based diff just moving the
+                    # current candle/EMA point.
+                    st.plotly_chart(fig, width="stretch", key=f"intraday_chart_{sym}",
+                                    config={"displayModeBar": True, "scrollZoom": True})
                 else:
-                    _live_state["high"] = max(_live_state["high"], _ltp)
-                    _live_state["low"] = min(_live_state["low"], _ltp)
-                    _live_state["close"] = _ltp
-                st.session_state[_live_key] = _live_state
-                _live_candle = {"ts": _cur_boundary, "open": _live_state["open"],
-                                "high": _live_state["high"], "low": _live_state["low"],
-                                "close": _live_state["close"], "volume": float("nan")}
+                    st.info(f"No candle data yet for {sym} today.")
 
-            # first_low/first_high (the 09:15 first-candle gate reference)
-            # only ever lives in the live engine's own in-memory tracker,
-            # never persisted to the DB -- this dashboard process has no
-            # way to read it, so those two overlay lines are skipped for
-            # now (EMA21/signal/entry/stop/target still all render).
-            fig = _build_intraday_candle_figure(
-                _sel_sym, _direction, today, first_low=None, first_high=None,
-                sig=_sel_sig, pos=_sel_pos, live_candle=_live_candle)
-            if fig is not None:
-                # A stable key is what lets Streamlit reuse the SAME chart
-                # component across reruns instead of tearing it down and
-                # remounting a brand-new one every second -- without it,
-                # each rerun's new Figure object gets treated as a new
-                # component instance, so the WHOLE chart visibly redraws
-                # from scratch instead of Plotly's own react()-based diff
-                # just moving the current candle/EMA point. Keyed on the
-                # symbol (not a constant) so switching symbols still
-                # mounts a fresh chart rather than trying to diff into an
-                # unrelated one.
-                st.plotly_chart(fig, width="stretch", key=f"intraday_chart_{_sel_sym}",
-                                config={"displayModeBar": True, "scrollZoom": True})
-            else:
-                st.info("No candle data yet for this symbol today.")
+        chart_cols = st.columns(2)
+        for _i in range(2):
+            with chart_cols[_i]:
+                if _i < len(_syms):
+                    _render_one_chart(_syms[_i])
+                else:
+                    with st.container(border=True, key=f"ov-card-intraday-chart-empty-{_i}"):
+                        st.caption("No 2nd candidate today.")
 
-        with col_tb:
-          with st.container(border=True, key="ov-card-intraday-tb"):
+        with st.container(border=True, key="ov-card-intraday-tb"):
             st.markdown(
                 '<p class="ov-card-title"><span class="ov-dot" style="background:var(--ov-purple);">'
                 '</span>Today\'s trade book</p>', unsafe_allow_html=True)
