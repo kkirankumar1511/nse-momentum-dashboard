@@ -1049,7 +1049,7 @@ COLUMN_LABELS = {
     "detail": "Reason/Detail", "resolved_at": "Resolved at",
     "current_qty": "Current qty", "rank": "Momentum rank", "rank_fmt": "Rank",
     "cand_rank": "Rank", "cand_sector": "Sector", "ret_first15_pct": "1st-15m %",
-    "chg_pct": "Chg %", "gate": "Sector gate", "state": "State",
+    "gap_pct": "09:15 gap %", "chg_pct": "Chg %", "gate": "Sector gate", "state": "State",
     "direction": "Direction", "qty_remaining": "Qty", "upnl": "Unrealized P&L",
 
     # Screener / momentum
@@ -6216,19 +6216,22 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
 def page_intraday_dashboard():
     _mode = "live" if config.STRATEGY.get("intraday_live_enabled", False) else "paper"
     _tip = html_lib.escape(
-        "The DaysLowVolumnBreakout intraday strategy (v5.3) -- "
-        "day-bias from NIFTY 50 breadth, a top-2 F&O momentum candidate pool, "
-        "a low-volume pullback signal (09:25 window), a genuinely real-time "
-        "gated-2-candle breakout entry (only a price-cross fires entry; "
-        "color/volume/range only ever gate whether an already-closed candle "
-        "gets a 2nd chance), a lower-volume re-signal that can happen at most "
-        "once per signal, sector confirmation gate. Exit: the original stop "
-        "protects the whole position throughout; on touching the 1:2R target "
-        "the first half is not sold there but trailed on EMA5 (EMA10 fallback) "
-        "and sold on the first candle closing through it (filled at the next "
-        "candle's open); the rest squares off at 15:10. Paper mode simulates "
-        "every fill with zero real orders; switching to live is a separate, "
-        "deliberate step (Admin).")
+        "The DaysLowVolumnBreakout intraday strategy (v5.4, paper-trading "
+        "trial of the disputed top-5 finding -- see the v5.4 spec §0) -- "
+        "day-bias from NIFTY 50 breadth, a top-5 F&O momentum candidate pool "
+        "(only 2 trade slots/day) with a new 09:15 overnight-gap filter "
+        "(candidates gapping >5% from prior close are skipped, backfilled from "
+        "the next-best ranked candidate), a low-volume pullback signal (09:25 "
+        "window), a genuinely real-time gated-2-candle breakout entry (only a "
+        "price-cross fires entry; color/volume/range only ever gate whether an "
+        "already-closed candle gets a 2nd chance), a lower-volume re-signal "
+        "that can happen at most once per signal, sector confirmation gate. "
+        "Exit: the original stop protects the whole position throughout; on "
+        "touching the 1:2R target the first half is not sold there but "
+        "trailed on EMA5 (EMA10 fallback) and sold on the first candle closing "
+        "through it (filled at the next candle's open); the rest squares off "
+        "at 15:10. Paper mode simulates every fill with zero real orders; "
+        "switching to live is a separate, deliberate step (Admin).")
     _mode_badge = ('<span class="ov-badge ov-badge-red">🔴 LIVE</span>' if _mode == "live"
                   else '<span class="ov-badge ov-badge-blue">📝 PAPER</span>')
     st.markdown(
@@ -6354,7 +6357,7 @@ def page_intraday_dashboard():
                 st.markdown(f'<div class="ov-grid-metrics">{_bias_box}{_ratio_box}{_code_ad_box}</div>',
                            unsafe_allow_html=True)
     
-        # --- Today's candidates (v3: top-5 pool, 2 trade slots) ------------------
+        # --- Today's candidates (v5.4: top-5 pool + gap filter, 2 trade slots) ---
         st.markdown(
             '<p class="ov-card-title" style="margin-top:16px;"><span class="ov-dot" '
             f'style="background:var(--ov-teal);"></span>Today\'s candidates '
@@ -6478,9 +6481,11 @@ def page_intraday_dashboard():
                 else:
                     gate = "—"
 
+                _gap = c.get("gap_pct")
                 _table_rows.append({
                     "cand_rank": int(c["rank"]), "symbol": c["symbol"],
                     "cand_sector": sector or "—", "ret_first15_pct": float(c["ret_first15_pct"]),
+                    "gap_pct": float(_gap) if pd.notna(_gap) else float("nan"),
                     "ltp": cand_price if cand_price is not None else float("nan"),
                     "chg_pct": cand_chg if cand_chg is not None else float("nan"),
                     "gate": gate, "state": state, "detail": detail or "—",
@@ -6489,11 +6494,11 @@ def page_intraday_dashboard():
             _tdf = pd.DataFrame(_table_rows)
             st.markdown(_ov_table_html(
                 _tdf,
-                columns=["cand_rank", "symbol", "cand_sector", "ret_first15_pct",
+                columns=["cand_rank", "symbol", "cand_sector", "ret_first15_pct", "gap_pct",
                         "ltp", "chg_pct", "gate", "state", "detail"],
                 sym_cols=["symbol"],
                 pnl_cols=["ret_first15_pct", "chg_pct"],
-                num_fmt={"ret_first15_pct": "{:+.2f}%", "ltp": "₹{:,.2f}",
+                num_fmt={"ret_first15_pct": "{:+.2f}%", "gap_pct": "{:+.2f}%", "ltp": "₹{:,.2f}",
                         "chg_pct": "{:+.2f}%"},
                 badges={
                     "gate": lambda v: ("ov-badge-green" if v.startswith("PASS")
@@ -6533,13 +6538,18 @@ def page_intraday_dashboard():
         if _cands_now.empty:
             return
         _open_now = idb.get_open_positions(date=today, mode=_mode)
-        # v5: TOP_N_CANDIDATES == MAX_TRADES_PER_DAY == 2, so there are
-        # NEVER more than 2 candidates to look at -- a dropdown to pick
-        # "which one" made sense for the old top-5 pool, but with only
-        # ever 2 possible, showing both charts side by side at once (no
-        # picking required) is strictly more informative for the same
-        # screen space.
+        # v5.4: TOP_N_CANDIDATES (5) no longer equals MAX_TRADES_PER_DAY
+        # (still 2) -- up to 5 candidates get scanned, but only ever 2
+        # can hold a position. Fixed 2-wide side-by-side charts (v5.3's
+        # layout) doesn't fit that anymore. Split instead: any OPEN
+        # POSITION (there are at most 2, by construction) always gets
+        # its own dedicated chart, since that's the most actionable
+        # thing on the page; a separate dropdown below covers whichever
+        # of the day's other (not-yet/never-traded) candidates you want
+        # to watch, without needing up to 5 permanently-visible panels.
         _syms = list(_cands_now["symbol"])
+        _open_syms = list(_open_now["symbol"]) if not _open_now.empty else []
+        _watch_syms = [s for s in _syms if s not in _open_syms]
         _ticker = _get_dashboard_ticker()
         _ensure_subscribed(_ticker, _syms)
         _direction = day["day_bias"] if day is not None else istrat.LONG
@@ -6600,14 +6610,25 @@ def page_intraday_dashboard():
                 else:
                     st.info(f"No candle data yet for {sym} today.")
 
-        chart_cols = st.columns(2)
-        for _i in range(2):
-            with chart_cols[_i]:
-                if _i < len(_syms):
-                    _render_one_chart(_syms[_i])
-                else:
-                    with st.container(border=True, key=f"ov-card-intraday-chart-empty-{_i}"):
-                        st.caption("No 2nd candidate today.")
+        if _open_syms:
+            st.markdown('<p class="ov-card-meta">Open position(s)</p>', unsafe_allow_html=True)
+            _pos_cols = st.columns(len(_open_syms))
+            for _col, _sym in zip(_pos_cols, _open_syms):
+                with _col:
+                    _render_one_chart(_sym)
+
+        if _watch_syms:
+            st.markdown(
+                f'<p class="ov-card-meta">Watch another candidate '
+                f'({len(_watch_syms)} of today\'s top-{istrat.TOP_N_CANDIDATES} not currently open)</p>',
+                unsafe_allow_html=True)
+            _watch_default = st.session_state.get("intraday_watch_symbol")
+            _watch_idx = _watch_syms.index(_watch_default) if _watch_default in _watch_syms else 0
+            _watch_sel = st.selectbox("Chart", _watch_syms, index=_watch_idx,
+                                      key="intraday_watch_symbol", label_visibility="collapsed")
+            _render_one_chart(_watch_sel)
+        elif not _open_syms:
+            st.info("No candidates today.")
 
         with st.container(border=True, key="ov-card-intraday-tb"):
             st.markdown(

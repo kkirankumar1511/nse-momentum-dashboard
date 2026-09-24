@@ -114,16 +114,54 @@ def run_selection(date: str, nifty50_symbols: list[str], fno_symbols: list[str],
             continue
         fno_rets[sym] = strat.first15_return(c0925, prev_close)
 
-    # v3 Spec §3 -- the SEARCHED pool widened to top-5 (TOP_N_CANDIDATES);
-    # MAX_TRADES_PER_DAY (still 2) is enforced later, by the causal walk's
-    # shared slot cap (Spec v3 §4), not by how many candidates are found here.
-    top = strat.select_candidates(pd.Series(fno_rets), bias, n=strat.TOP_N_CANDIDATES)
+    # v5.4 §4/§8 -- overnight-gap filter applied to the FULL ranked
+    # universe BEFORE picking the top TOP_N_CANDIDATES, not just to the
+    # top-N after the fact -- a gapped-out stock that would have ranked
+    # in the top 5 is skipped and the next-best non-gapped stock takes
+    # its place. Walking the ranked list lazily (stopping once
+    # TOP_N_CANDIDATES are accepted) means this only ever fetches the
+    # 09:15 candle for as many symbols as actually needed to fill the
+    # pool (typically just a few beyond 5, matching the spec's own ~6.5%
+    # measured discard rate), not the whole ~200-symbol F&O universe.
+    ranked_all = strat.select_candidates(pd.Series(fno_rets), bias, n=len(fno_rets))
+    today_date = dt.date.fromisoformat(date)
+    accepted: list[tuple[str, float, float | None]] = []  # (symbol, ret_first15_pct, gap_pct)
+    for sym, ret in ranked_all.items():
+        gap = _overnight_gap_pct(sym, prev_day_close.get(sym), today_date)
+        if not strat.passes_gap_filter(gap):
+            print(f"[intraday_engine] {sym}: excluded from candidate pool -- "
+                 f"09:15 gap {'unresolvable' if gap is None else f'{gap:+.2f}%'} "
+                 f"(threshold ±{strat.GAP_FILTER_PCT}%)")
+            continue
+        accepted.append((sym, float(ret), gap))
+        if len(accepted) >= strat.TOP_N_CANDIDATES:
+            break
+
     candidates = [{"symbol": sym, "direction": bias, "rank": i + 1}
-                 for i, sym in enumerate(top.index)]
+                 for i, (sym, _, _) in enumerate(accepted)]
     idb.record_candidates(date, [
-        {"rank": i + 1, "symbol": sym, "ret_first15_pct": round(float(ret), 3)}
-        for i, (sym, ret) in enumerate(top.items())])
+        {"rank": i + 1, "symbol": sym, "ret_first15_pct": round(ret, 3), "gap_pct": gap}
+        for i, (sym, ret, gap) in enumerate(accepted)])
     return {"nifty_ratio": nifty_ratio, "day_bias": bias, "candidates": candidates}
+
+
+def _overnight_gap_pct(symbol: str, prev_close: float | None, today: dt.date) -> float | None:
+    """v5.4 §4 step 1 -- today's 09:15 candle's own OPEN vs the previous
+    day's close. Read from the historical-candle API (not quote()): by
+    the time run_selection() runs (09:30, after its own wait), the 09:15
+    candle has already closed and its open is a fixed historical fact --
+    no need to have polled at 09:15:00 itself."""
+    if prev_close is None or prev_close == 0:
+        return None
+    try:
+        intraday = kite_client.fetch_intraday_candles(symbol, days=2, interval="5minute")
+        row = intraday[intraday.index == pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=15)]
+        if row.empty:
+            return None
+        return (float(row.iloc[0]["open"]) - prev_close) / prev_close * 100.0
+    except Exception as e:
+        print(f"[intraday_engine] {symbol}: gap-filter fetch failed -- {e}")
+        return None
 
 
 def resolve_sector_gates(date: str, candidates: list[dict], close_0925: dict[str, float],

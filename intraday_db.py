@@ -175,6 +175,17 @@ def _migrate_daily_selection_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE intraday_positions ADD COLUMN trail_ema INTEGER")
     conn.commit()
 
+    # v5.4 -- overnight-gap filter (checked once, pre-market, before a
+    # candidate is even ranked into the day's top-N pool). Persisted for
+    # every SELECTED candidate (they've all already passed the filter,
+    # by construction) purely for Dashboard visibility -- candidates
+    # that got discarded for gapping too far are logged, not stored,
+    # since intraday_daily_selection only ever holds the day's actual
+    # picks (rank 1..N), same as before this column existed.
+    if "gap_pct" not in cols:
+        conn.execute("ALTER TABLE intraday_daily_selection ADD COLUMN gap_pct REAL")
+    conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # Days / daily selection -- Spec.md §2
@@ -206,14 +217,15 @@ def get_day(date: str) -> dict | None:
 
 
 def record_candidates(date: str, candidates: list[dict]) -> None:
-    """candidates: [{"rank", "symbol", "ret_first15_pct"}, ...] -- call
-    once after record_day() when day_bias is not None."""
+    """candidates: [{"rank", "symbol", "ret_first15_pct", "gap_pct"(optional)}, ...]
+    -- call once after record_day() when day_bias is not None."""
     conn = get_conn()
     conn.executemany(
-        "INSERT INTO intraday_daily_selection (date, rank, symbol, ret_first15_pct) "
-        "VALUES (?, ?, ?, ?) ON CONFLICT(date, symbol) DO UPDATE SET "
-        "rank = excluded.rank, ret_first15_pct = excluded.ret_first15_pct",
-        [(date, c["rank"], c["symbol"], c["ret_first15_pct"]) for c in candidates])
+        "INSERT INTO intraday_daily_selection (date, rank, symbol, ret_first15_pct, gap_pct) "
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(date, symbol) DO UPDATE SET "
+        "rank = excluded.rank, ret_first15_pct = excluded.ret_first15_pct, "
+        "gap_pct = excluded.gap_pct",
+        [(date, c["rank"], c["symbol"], c["ret_first15_pct"], c.get("gap_pct")) for c in candidates])
     conn.commit()
     conn.close()
 
@@ -221,7 +233,7 @@ def record_candidates(date: str, candidates: list[dict]) -> None:
 def get_candidates(date: str) -> pd.DataFrame:
     conn = get_conn()
     df = pd.read_sql(
-        "SELECT rank, symbol, ret_first15_pct, status, sector, sector_ratio, "
+        "SELECT rank, symbol, ret_first15_pct, gap_pct, status, sector, sector_ratio, "
         "sector_gate_pass FROM intraday_daily_selection WHERE date = ? ORDER BY rank",
         conn, params=(date,))
     conn.close()

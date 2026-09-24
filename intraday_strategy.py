@@ -82,15 +82,47 @@ REWARD_RISK = 2.0
 # the wrong price). intraday_engine.py's live loop must trigger its
 # force-squareoff at 15:15:00 real time to match this.
 SQUAREOFF_TIME = "15:10"
-TOP_N_CANDIDATES = 2  # v5: REVERTED from v3's 5 back to v2's top-2 -- v5
-# spec §5's explicit re-test found the top-5 pool actually WORSE than
-# top-2 on this same gated-2nd-candle rule once re-verified on a
-# corrected candidate list (CAGR 17.93% vs top-2's 24.14%, drawdown
-# -19.59% vs -11.46%) -- the top-5 pool's earlier-reported 27.96% CAGR
-# was a stale-candidate-list artifact, not a real finding. With
-# TOP_N_CANDIDATES == MAX_TRADES_PER_DAY (both 2), every searched
-# candidate has a real shot at a slot again, matching v2's original
-# plain top-2 design.
+TOP_N_CANDIDATES = 5  # v5.4: back to top-5 (from v5/v5.3's top-2) -- per
+# explicit instruction, for PAPER trading only. v5.4's own §0 flags an
+# unreconciled conflict: this dashboard's own earlier v3/v5 top-5 re-test
+# found top-5 WORSE than top-2 (CAGR 17.93% vs 24.14%, DD -19.59% vs
+# -11.46%), while v5.4's own CHRONO-corrected backtest found top-5
+# BETTER (37.88% vs v5.3's 34.26%) -- the two disagree by >2x and neither
+# project has explained why. v5.4 §0 explicitly says NOT to deploy this
+# for real capital until that's resolved; paper mode is exactly the safe
+# way to actually test the disputed finding. MAX_TRADES_PER_DAY (below)
+# stays 2 -- the pool searched widens, the day's trade cap does not.
+#
+# CHRONO note (v5.4 §2.3/§5.1): the "look-ahead in slot-filling" bug
+# CHRONO fixes is a BACKTEST-SCRIPT artifact (a whole-day-at-once script
+# picking the best-ranked 2 of however many signalled, with hindsight of
+# which would trigger later) -- it does NOT apply to this live/paper
+# engine, which only ever sees candidates trigger one at a time in real
+# chronological order and fills a slot the INSTANT a trigger wins one
+# (see run_live()'s fires_this_candle collect-then-sort, which only ever
+# breaks a genuine SAME-boundary tie by rank, never reaches across
+# different times). Confirmed by v5.4's own §5.1: "a live system never
+# has the 'which 2 of many' problem... implementing this live is simpler
+# than the backtest, not harder." No code change was needed for CHRONO
+# itself -- only the pool width (TOP_N_CANDIDATES) and the gap filter
+# below are new.
+
+GAP_FILTER_PCT = 5.0  # v5.4 §4/§8 -- discard a candidate whose 09:15
+# candle's own OPEN gapped more than this % (either direction) from the
+# previous day's close, checked once before it's even ranked into the
+# day's top-N pool (a gapped-out stock is replaced by the next-best
+# non-gapped one, not just skipped leaving a hole). Tested directly on
+# v5.3's live top-2 rules (§8): win rate, profit factor, and drawdown
+# all improved together (PF 1.53->1.72, DD -10.23%->-9.03%) at a real
+# CAGR cost from fewer trades (13% of candidates discarded).
+
+
+def passes_gap_filter(gap_pct: float | None, threshold: float = GAP_FILTER_PCT) -> bool:
+    """None (the 09:15 candle/prev-close couldn't be resolved) fails
+    closed -- the same "skip it if we can't be sure" discipline the
+    sector gate already uses elsewhere in this codebase, not silently
+    letting an unverifiable candidate through."""
+    return gap_pct is not None and abs(gap_pct) <= threshold
 
 # Spec v2 §2.2 day-bias ratio gate -- CHANGED from v1's strict 2.0/0.5
 # to this more moderate threshold (§9.4's sweep: neither the strict v1
