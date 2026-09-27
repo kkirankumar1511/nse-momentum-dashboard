@@ -27,15 +27,24 @@ import xbrl_parser
 VALUE_SCORE_CACHE = os.path.join("cache", "fno_value_scores.pkl")
 
 
+_KNOWN_TAXONOMIES = ("banking", "nbfc", "general_insurance", "life_insurance", "general")
+
+
 def fno_value_scan(symbols: list[str] | None = None, n_years: int = 3,
                    use_live_price: bool = True, pause: float = 0.3,
-                   progress_cb=None) -> pd.DataFrame:
+                   progress_cb=None, include_quarterly: bool = True) -> pd.DataFrame:
     """Run the sector-appropriate xbrl_parser score across the F&O universe
     (or a given symbol list).
 
     use_live_price: fetch LTPs via kite_client (one batched call) to enable
     the PEG sub-score (general rubric only). Needs an active Kite session;
     falls back to leaving PEG unavailable (not faked) if that fails.
+
+    include_quarterly: folds xbrl_parser.quarterly_momentum_pillar() (latest
+    quarter's PAT/revenue YoY, half-weighted -- see add_quarterly_pillar)
+    into the annual-only score, so the score doesn't go up to ~11 months
+    stale between annual filings. On by default; costs one extra XBRL
+    fetch per symbol (quarterly_financials), same politeness `pause`.
     """
     symbols = symbols if symbols is not None else config.UNIVERSE
 
@@ -52,6 +61,7 @@ def fno_value_scan(symbols: list[str] | None = None, n_years: int = 3,
     for i, sym in enumerate(symbols):
         if progress_cb:
             progress_cb(f"{sym} ({i + 1}/{len(symbols)})...", (i + 1) / len(symbols))
+        taxonomy = None
         try:
             taxonomy = nse_api.filing_taxonomy(sym)
             bs = xbrl_parser.annual_balance_sheet(sym, n_years=n_years)
@@ -72,6 +82,16 @@ def fno_value_scan(symbols: list[str] | None = None, n_years: int = 3,
             print(f"[fno_value_scan] {sym}: failed: {e}", flush=True)
             score = {"total_score": None, "rubric": "error",
                     "missing_pillars": ["error"]}
+
+        if include_quarterly and taxonomy in _KNOWN_TAXONOMIES:
+            try:
+                qdf = xbrl_parser.quarterly_financials(sym)
+                q_sub, _ = xbrl_parser.quarterly_momentum_pillar(qdf)
+                score = xbrl_parser.add_quarterly_pillar(score, q_sub)
+            except Exception as e:
+                print(f"[fno_value_scan] {sym}: quarterly pillar failed "
+                     f"(keeping annual-only score): {e}", flush=True)
+
         score["symbol"] = sym
         rows.append(score)
         time.sleep(pause)  # be polite to NSE
@@ -89,7 +109,8 @@ def fno_value_scan(symbols: list[str] | None = None, n_years: int = 3,
 
 
 def build_fundamentals_history(symbols: list[str] | None = None, n_years: int = 5,
-                               pause: float = 0.3, progress_cb=None) -> dict:
+                               pause: float = 0.3, progress_cb=None,
+                               include_quarterly: bool = True) -> dict:
     """Fetches each symbol's FULL annual history once (same underlying calls
     as fno_value_scan) and keeps the raw bs_years rows -- each already tagged
     with known_as_of by xbrl_parser -- instead of collapsing to a single
@@ -97,7 +118,18 @@ def build_fundamentals_history(symbols: list[str] | None = None, n_years: int = 
     step for point-in-time backtesting: score_asof() then does the actual
     per-date scoring purely in memory against this, with zero network calls.
 
-    Returns {symbol: {"taxonomy": str, "bs_years": list[dict]}}.
+    include_quarterly: also fetches quarterly_financials() once per symbol
+    (own known_as_of tagging) so score_asof() can fold in the quarterly-
+    momentum pillar per backtest date via xbrl_parser.quarterly_asof --
+    same as-of, no-lookahead discipline as the annual bs_years, and same
+    one-time-fetch-then-reuse-in-memory shape. NOTE: NSE's endpoint only
+    ever exposes each symbol's MOST RECENT ~5-6 quarters (no historical
+    archive), so this pillar can only ever affect the last ~1-1.5 years of
+    a longer backtest -- quarterly_asof correctly returns empty, not a
+    lookahead-safe substitute, for any older backtest date.
+
+    Returns {symbol: {"taxonomy": str, "bs_years": list[dict],
+    "quarterly": pd.DataFrame}}.
     """
     symbols = symbols if symbols is not None else config.UNIVERSE
     history: dict = {}
@@ -110,7 +142,14 @@ def build_fundamentals_history(symbols: list[str] | None = None, n_years: int = 
         except Exception as e:
             print(f"[build_fundamentals_history] {sym}: failed: {e}", flush=True)
             taxonomy, bs = "error", []
-        history[sym] = {"taxonomy": taxonomy, "bs_years": bs}
+        qdf = pd.DataFrame()
+        if include_quarterly and taxonomy in _KNOWN_TAXONOMIES:
+            try:
+                qdf = xbrl_parser.quarterly_financials(sym, max_quarters=12)
+            except Exception as e:
+                print(f"[build_fundamentals_history] {sym}: quarterly fetch "
+                     f"failed (annual-only): {e}", flush=True)
+        history[sym] = {"taxonomy": taxonomy, "bs_years": bs, "quarterly": qdf}
         time.sleep(pause)  # be polite to NSE
     return history
 
@@ -148,7 +187,15 @@ def score_asof(history: dict, date, score_cache: dict | None = None) -> pd.DataF
     rows = []
     for sym, entry in history.items():
         filtered = xbrl_parser.fundamentals_asof(entry["bs_years"], date)
-        key = (sym, tuple(r["qe_date"] for r in filtered))
+        q_filtered = xbrl_parser.quarterly_asof(entry.get("quarterly"), date)
+        q_qe_dates = (tuple(q_filtered["qe_date"]) if q_filtered is not None
+                     and not q_filtered.empty else ())
+        # Cache key includes the quarters actually knowable as of `date`,
+        # not just the annual qe_dates -- annual filings change ~yearly but
+        # quarterly ones change ~quarterly, so keying on annual alone would
+        # return a stale quarterly pillar for every rebalance date within
+        # the same fiscal year.
+        key = (sym, tuple(r["qe_date"] for r in filtered), q_qe_dates)
         if key in score_cache:
             score = score_cache[key]
         else:
@@ -161,6 +208,9 @@ def score_asof(history: dict, date, score_cache: dict | None = None) -> pd.DataF
                 else:
                     score = {"total_score": None, "rubric": taxonomy,
                             "missing_pillars": ["unsupported_taxonomy"]}
+                if taxonomy in _KNOWN_TAXONOMIES:
+                    q_sub, _ = xbrl_parser.quarterly_momentum_pillar(q_filtered)
+                    score = xbrl_parser.add_quarterly_pillar(score, q_sub)
             except Exception as e:
                 print(f"[score_asof] {sym}: failed: {e}", flush=True)
                 score = {"total_score": None, "rubric": "error",

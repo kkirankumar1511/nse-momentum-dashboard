@@ -330,7 +330,7 @@ def quarterly_financials(symbol: str, max_quarters: int = 12,
         qe = f.get("qe_Date")
         basis = f.get("consolidated")
         if qe and basis in ("Consolidated", "Standalone"):
-            by_qe.setdefault(qe, {}).setdefault(basis, f)
+            _pick_filing_slot(by_qe.setdefault(qe, {}), basis, f)
 
     def _qe_key(qe: str):
         try:
@@ -372,6 +372,10 @@ def quarterly_financials(symbol: str, max_quarters: int = 12,
     df = pd.DataFrame(rows)
     df["qe_dt"] = pd.to_datetime(df["qe_date"], format="%d-%b-%Y",
                                  errors="coerce")
+    # Same point-in-time discipline as annual_balance_sheet()'s known_as_of
+    # (see fundamentals_asof) -- needed so a quarterly-momentum pillar can
+    # be backtested without lookahead (see quarterly_asof below).
+    df["known_as_of"] = df["broadcast"].apply(_parse_broadcast)
     return df.sort_values("qe_dt").reset_index(drop=True)
 
 
@@ -478,6 +482,32 @@ def _parse_broadcast(s: str | None) -> dt.datetime | None:
         return None
 
 
+def _pick_filing_slot(slot: dict[str, dict], basis: str, f: dict) -> None:
+    """Fills slot[basis] with `f`, preferring a candidate that actually
+    carries a broadcast_Date over one that doesn't, rather than blind
+    first-wins -- shared by annual_balance_sheet() and quarterly_
+    financials()'s by_qe construction.
+
+    Needed because NSE's "Revision" type_Sub filings systematically omit
+    broadcast_Date (verified across the F&O universe: 152/210 symbols have
+    a same qe_Date+basis Original/Revision pair where the Revision's
+    broadcast_Date is None) -- once "Revision" is accepted alongside
+    "Original"/"Revised" (see the type_Sub filter above this), a same-key
+    Original and Revision can both be present, and plain first-wins would
+    occasionally lock in whichever the feed happened to list first,
+    silently losing known_as_of -- and via fundamentals_asof/
+    quarterly_asof, the ENTIRE year/quarter -- for a filing that had a
+    perfectly good timestamp sitting right next to it. Two candidates
+    that both carry (or both lack) a timestamp still resolve by first-
+    wins, unchanged from before -- this only breaks that tie when it
+    would otherwise throw away real point-in-time information.
+    """
+    existing = slot.get(basis)
+    if existing is None or (existing.get("broadcast_Date") is None
+                            and f.get("broadcast_Date") is not None):
+        slot[basis] = f
+
+
 def annual_balance_sheet(symbol: str, n_years: int = 3) -> list[dict]:
     """Parse the latest N annual (~12-month) filings for balance-sheet,
     cash-flow, and full-year P&L data — only available in Q4/year-end
@@ -529,7 +559,7 @@ def annual_balance_sheet(symbol: str, n_years: int = 3) -> list[dict]:
         qe = f.get("qe_Date")
         basis = f.get("consolidated")
         if qe and basis in ("Consolidated", "Standalone"):
-            by_qe.setdefault(qe, {}).setdefault(basis, f)  # first (newest) wins
+            _pick_filing_slot(by_qe.setdefault(qe, {}), basis, f)
 
     def _try_parse(f: dict) -> dict | None:
         url = f.get("xbrl")
@@ -787,6 +817,31 @@ def fundamentals_asof(bs_years: list[dict], date) -> list[dict]:
            and pd.Timestamp(r["known_as_of"]).normalize() <= cutoff]
 
 
+def quarterly_asof(qdf: pd.DataFrame, date) -> pd.DataFrame:
+    """Same no-lookahead filter as fundamentals_asof(), for quarterly_
+    financials()'s DataFrame shape instead of annual_balance_sheet()'s
+    list-of-dicts -- the quarterly-momentum pillar's own backtest-facing
+    primitive (see quarterly_momentum_pillar). Pure in-memory filtering,
+    no network calls -- fetch qdf ONCE (fundamentals_agent.
+    build_fundamentals_history) and call this many times against it.
+
+    NOTE on backtest coverage: NSE's integrated-filings endpoint only ever
+    exposes each symbol's MOST RECENT ~5-6 quarters as of whenever it's
+    fetched (no historical archive), so qdf itself only ever contains
+    recent quarters -- for any backtest `date` more than ~1.5 years before
+    the fetch, every row's known_as_of will be AFTER cutoff and this
+    correctly returns empty (no quarterly pillar that far back), not a
+    bug -- there is no way to see what NSE's feed would have shown on an
+    old date via this endpoint.
+    """
+    if qdf is None or qdf.empty:
+        return qdf if qdf is not None else pd.DataFrame()
+    cutoff = pd.Timestamp(date).normalize()
+    mask = qdf["known_as_of"].notna() & (
+        pd.to_datetime(qdf["known_as_of"]).dt.normalize() <= cutoff)
+    return qdf[mask].sort_values("qe_dt").reset_index(drop=True)
+
+
 def _bucket(value: float | None, thresholds: list[tuple[float, int]]) -> int | None:
     """thresholds: [(min_value, score), ...] sorted descending by min_value.
     Returns the score for the first threshold value is >= to."""
@@ -815,6 +870,116 @@ def _aggregate_pillars(sub_scores: dict[str, int | None],
     total = (round(sum(pillar_scores.values()) / (5 * len(pillar_scores)) * 100, 1)
              if pillar_scores else None)
     return pillar_scores, missing, total
+
+
+# Quarterly-momentum sub-metric thresholds -- deliberately NOT the same
+# scale as the annual pat_yoy/premium_yoy buckets elsewhere in this file.
+# A single quarter is structurally noisier than a full audited year (base
+# effects, one-off items in the year-ago quarter, no audit requirement),
+# so this grades in gradual steps through mild decline instead of that
+# scale's cliff (any decline at all -> flat 0/5) -- verified against a
+# real local A/B: the annual-style cliff scored a mild -6% quarterly PAT
+# dip identically to a genuine -69% collapse, costing an otherwise
+# fully-scored, 3-year-strong stock (RECLTD) ~20 points and 100+ ranks
+# for one soft quarter. Only a >35% YoY collapse still scores 0 here.
+_QUARTERLY_THRESHOLDS = ((20, 5), (10, 4), (0, 3), (-15, 2), (-35, 1))
+
+# The quarterly pillar counts for HALF an annual pillar's weight in the
+# aggregate (see add_quarterly_pillar) -- same reasoning: noisier, not
+# fully audited, shouldn't move the total as much as a full year's data.
+QUARTERLY_PILLAR_WEIGHT = 0.5
+
+
+def quarterly_momentum_pillar(qdf: "pd.DataFrame | None") -> tuple[dict, dict]:
+    """The quarterly-freshness counterpart to the annual growth pillars
+    elsewhere in this file -- same-quarter-one-year-ago comparison (index
+    -1 vs -5 in an already as-of-filtered/sorted qdf, e.g. from
+    quarterly_financials() or quarterly_asof()), NOT naive quarter-over-
+    quarter, which would be dominated by seasonality for most businesses
+    (same technique earnings_quality() already uses for its own pat_yoy).
+
+    pat_yoy_q works for every rubric ('pat' is tagged everywhere).
+    revenue_yoy_q only populates for the 'general' rubric -- banks/NBFCs/
+    insurers don't tag a 'revenue' concept at all (see quarterly_
+    financials()'s own docstring).
+
+    Needs >=5 quarters to compute either metric (same >=5 guard as
+    earnings_quality(), calibrated against the real ~5-quarter ceiling
+    most F&O symbols hit on NSE's primary endpoint). Returns
+    (sub_scores, extra_facts) -- extra_facts carries the raw pct figures
+    and which quarter this is 'as of', for display/debugging, same shape
+    as the annual scorers' own *_pct extra fields.
+    """
+    if qdf is None or qdf.empty or len(qdf) < 5:
+        return ({"pat_yoy_q": None, "revenue_yoy_q": None},
+                {"quarters_available": 0 if qdf is None or qdf.empty else len(qdf)})
+
+    d = qdf.sort_values("qe_dt").reset_index(drop=True)
+    cur_pat, prior_pat = d["pat"].iloc[-1], d["pat"].iloc[-5]
+    pat_yoy_q = None
+    if pd.notna(cur_pat) and pd.notna(prior_pat) and prior_pat > 0:
+        pat_yoy_q = (cur_pat / prior_pat - 1) * 100
+
+    rev_yoy_q = None
+    if "revenue" in d.columns:
+        cur_rev, prior_rev = d["revenue"].iloc[-1], d["revenue"].iloc[-5]
+        if pd.notna(cur_rev) and pd.notna(prior_rev) and prior_rev > 0:
+            rev_yoy_q = (cur_rev / prior_rev - 1) * 100
+
+    sub_scores = {
+        "pat_yoy_q": _bucket(pat_yoy_q, _QUARTERLY_THRESHOLDS),
+        "revenue_yoy_q": _bucket(rev_yoy_q, _QUARTERLY_THRESHOLDS) if rev_yoy_q is not None else None,
+    }
+    extra = {
+        "pat_yoy_q_pct": pat_yoy_q, "revenue_yoy_q_pct": rev_yoy_q,
+        "quarters_available": len(d), "latest_quarter": d["qe_date"].iloc[-1],
+    }
+    return sub_scores, extra
+
+
+def add_quarterly_pillar(score: dict, q_sub: dict,
+                         weight: float = QUARTERLY_PILLAR_WEIGHT) -> dict:
+    """Folds quarterly_momentum_pillar()'s sub_scores into an already-
+    computed rubric score dict (value_score/bank_score/nbfc_score/
+    general_insurance_score/life_insurance_score's return value),
+    weighted at `weight` relative to the annual pillars already inside
+    it (each counted at 1.0) -- reusing the ORIGINAL pillar_scores as-is
+    rather than re-deriving each rubric's private pillar->keys mapping.
+
+    Returns a NEW dict (doesn't mutate `score`) with pillar_scores/
+    sub_scores/missing_pillars/total_score all updated to include the
+    quarterly pillar, plus a fresh 'quarterly_momentum_pct' extra field.
+    A symbol with no computable quarterly pillar (empty q_sub) is
+    returned with 'quarterly_momentum' appended to missing_pillars,
+    total_score unchanged from the annual-only figure -- exactly the
+    existing 'missing data lowers confidence, not the score' philosophy,
+    just extended to this new pillar.
+    """
+    out = dict(score)
+    q_vals = [v for v in q_sub.values() if v is not None]
+    pillar_scores = dict(score.get("pillar_scores") or {})
+    missing = list(score.get("missing_pillars") or [])
+    sub_scores = dict(score.get("sub_scores") or {})
+    sub_scores.update(q_sub)
+
+    weighted_sum = sum(pillar_scores.values())
+    weight_total = float(len(pillar_scores))
+    if q_vals:
+        q_pillar_score = sum(q_vals) / len(q_vals)
+        pillar_scores["quarterly_momentum"] = q_pillar_score
+        weighted_sum += weight * q_pillar_score
+        weight_total += weight
+    else:
+        missing = missing + ["quarterly_momentum"]
+
+    total = (round(weighted_sum / (5 * weight_total) * 100, 1)
+             if weight_total else score.get("total_score"))
+
+    out["pillar_scores"] = {k: round(v, 2) for k, v in pillar_scores.items()}
+    out["sub_scores"] = sub_scores
+    out["missing_pillars"] = missing
+    out["total_score"] = total
+    return out
 
 
 def value_score(bs_years: list[dict], market_price: float | None = None) -> dict:
