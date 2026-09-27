@@ -86,8 +86,8 @@ def fno_value_scan(symbols: list[str] | None = None, n_years: int = 3,
         if include_quarterly and taxonomy in _KNOWN_TAXONOMIES:
             try:
                 qdf = xbrl_parser.quarterly_financials(sym)
-                q_sub, _ = xbrl_parser.quarterly_momentum_pillar(qdf)
-                score = xbrl_parser.add_quarterly_pillar(score, q_sub)
+                q_sub, q_extra = xbrl_parser.quarterly_momentum_pillar(qdf)
+                score = xbrl_parser.add_quarterly_pillar(score, q_sub, q_extra)
             except Exception as e:
                 print(f"[fno_value_scan] {sym}: quarterly pillar failed "
                      f"(keeping annual-only score): {e}", flush=True)
@@ -103,7 +103,7 @@ def fno_value_scan(symbols: list[str] | None = None, n_years: int = 3,
             "combined_ratio_pct", "incurred_claim_ratio_pct",
             "premium_yoy_pct", "pat_yoy_pct", "loan_yoy_pct", "advances_yoy_pct",
             "solvency_ratio_UNVERIFIED", "persistency_13m_UNVERIFIED",
-            "fiscal_year_end", "missing_pillars", "pillar_scores", "sub_scores"]
+            "fiscal_year_end", "quarterly_as_of", "missing_pillars", "pillar_scores", "sub_scores"]
     return df[[c for c in cols if c in df.columns]].sort_values(
         "total_score", ascending=False)
 
@@ -209,8 +209,8 @@ def score_asof(history: dict, date, score_cache: dict | None = None) -> pd.DataF
                     score = {"total_score": None, "rubric": taxonomy,
                             "missing_pillars": ["unsupported_taxonomy"]}
                 if taxonomy in _KNOWN_TAXONOMIES:
-                    q_sub, _ = xbrl_parser.quarterly_momentum_pillar(q_filtered)
-                    score = xbrl_parser.add_quarterly_pillar(score, q_sub)
+                    q_sub, q_extra = xbrl_parser.quarterly_momentum_pillar(q_filtered)
+                    score = xbrl_parser.add_quarterly_pillar(score, q_sub, q_extra)
             except Exception as e:
                 print(f"[score_asof] {sym}: failed: {e}", flush=True)
                 score = {"total_score": None, "rubric": "error",
@@ -226,7 +226,7 @@ def score_asof(history: dict, date, score_cache: dict | None = None) -> pd.DataF
             "gross_npa_pct", "net_npa_pct", "nim_proxy_pct",
             "combined_ratio_pct", "incurred_claim_ratio_pct",
             "premium_yoy_pct", "pat_yoy_pct", "loan_yoy_pct", "advances_yoy_pct",
-            "fiscal_year_end", "missing_pillars", "pillar_scores", "sub_scores"]
+            "fiscal_year_end", "quarterly_as_of", "missing_pillars", "pillar_scores", "sub_scores"]
     return df[[c for c in cols if c in df.columns]]
 
 

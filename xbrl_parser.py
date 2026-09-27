@@ -946,7 +946,7 @@ def quarterly_momentum_pillar(qdf: "pd.DataFrame | None") -> tuple[dict, dict]:
     return sub_scores, extra
 
 
-def add_quarterly_pillar(score: dict, q_sub: dict,
+def add_quarterly_pillar(score: dict, q_sub: dict, q_extra: dict | None = None,
                          weight: float = QUARTERLY_PILLAR_WEIGHT) -> dict:
     """Folds quarterly_momentum_pillar()'s sub_scores into an already-
     computed rubric score dict (value_score/bank_score/nbfc_score/
@@ -963,6 +963,14 @@ def add_quarterly_pillar(score: dict, q_sub: dict,
     total_score unchanged from the annual-only figure -- exactly the
     existing 'missing data lowers confidence, not the score' philosophy,
     just extended to this new pillar.
+
+    q_extra (quarterly_momentum_pillar()'s own extra dict): when it has a
+    resolvable 'latest_quarter', that's copied onto the output as
+    'quarterly_as_of' -- 'fiscal_year_end' stays the ANNUAL filing's own
+    period end (unchanged meaning, don't conflate the two), but without
+    this a symbol whose score just moved from a fresher quarter would
+    show the SAME 'As of' date as one that didn't move at all, with no
+    visible reason why the numbers differ.
     """
     out = dict(score)
     q_vals = [v for v in q_sub.values() if v is not None]
@@ -978,6 +986,7 @@ def add_quarterly_pillar(score: dict, q_sub: dict,
         pillar_scores["quarterly_momentum"] = q_pillar_score
         weighted_sum += weight * q_pillar_score
         weight_total += weight
+        out["quarterly_as_of"] = (q_extra or {}).get("latest_quarter")
     else:
         missing = missing + ["quarterly_momentum"]
 

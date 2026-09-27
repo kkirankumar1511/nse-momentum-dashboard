@@ -1070,8 +1070,8 @@ COLUMN_LABELS = {
     "pat_yoy_pct": "Profit growth %", "combined_ratio_pct": "Combined ratio %",
     "incurred_claim_ratio_pct": "Claims ratio %",
     "premium_yoy_pct": "Premium growth %", "loan_yoy_pct": "Loan book growth %",
-    "fiscal_year_end": "As of", "missing_pillars": "Data gaps",
-    "pillar_coverage": "Coverage",
+    "fiscal_year_end": "Annual as of", "missing_pillars": "Data gaps",
+    "pillar_coverage": "Coverage", "quarterly_as_of": "+ Quarter as of",
 
     # Job execution log
     "job_type": "Job", "trigger_type": "Trigger", "started_at": "Started",
@@ -5601,7 +5601,8 @@ def page_fundamentals():
     shown["_incomplete"] = shown["missing_pillars"].apply(bool)
     shown = shown.sort_values(["_incomplete", "total_score"], ascending=[True, False])
 
-    show_cols = ["total_score", "pillar_coverage", "rubric"] + numeric_cols + ["fiscal_year_end"]
+    show_cols = (["total_score", "pillar_coverage", "rubric"] + numeric_cols
+                + ["fiscal_year_end", "quarterly_as_of"])
     show_cols = [c for c in show_cols if c in shown.columns]
 
     with st.container(border=True, key="ov-card-fund-ranked"):
@@ -5667,11 +5668,13 @@ def page_fundamentals():
             if sym_choice:
                 row = shown.loc[sym_choice]
                 with bd3:
+                    _qtr_bit = (f' · +Q {row["quarterly_as_of"]}'
+                               if pd.notna(row.get("quarterly_as_of")) else "")
                     st.markdown(
                         f'<p class="ov-card-meta" style="text-align:right;margin:6px 0 0;'
                         f'font-size:10px;font-weight:700;color:var(--ov-purple-d);">'
                         f'{row.get("rubric")} rubric · score {row.get("total_score")} · '
-                        f'FY {row.get("fiscal_year_end", "—")}</p>', unsafe_allow_html=True)
+                        f'FY {row.get("fiscal_year_end", "—")}{_qtr_bit}</p>', unsafe_allow_html=True)
                 st.markdown(
                     '<p class="ov-muted" style="margin-top:10px;font-size:10px;">Pillar scores (0-5)</p>',
                     unsafe_allow_html=True)
