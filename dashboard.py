@@ -1071,6 +1071,7 @@ COLUMN_LABELS = {
     "incurred_claim_ratio_pct": "Claims ratio %",
     "premium_yoy_pct": "Premium growth %", "loan_yoy_pct": "Loan book growth %",
     "fiscal_year_end": "As of", "missing_pillars": "Data gaps",
+    "pillar_coverage": "Coverage",
 
     # Job execution log
     "job_type": "Job", "trigger_type": "Trigger", "started_at": "Started",
@@ -5569,7 +5570,38 @@ def page_fundamentals():
         shown = vdf[vdf["rubric"] == sector]
         numeric_cols = [c for c in RUBRIC_HEADLINE_COLS.get(sector, [])
                        if c in vdf.columns]
-    show_cols = ["total_score", "rubric"] + numeric_cols + ["fiscal_year_end"]
+
+    def _pillar_coverage(row) -> str:
+        """"3/3", "1/2", etc -- pillars actually scored vs the rubric's
+        full pillar count (scored + missing combined). A row can hit
+        total_score=100 on a single available pillar (see
+        _aggregate_pillars' "missing data lowers confidence, not the
+        score" design) -- this is the caveat that travels with the score
+        itself, not just in the separate incomplete-rows expander below,
+        so a thin 100 can't be mistaken for a fully-graded one at a
+        glance."""
+        mp = row.get("missing_pillars") or []
+        if not isinstance(mp, (list, tuple)):
+            mp = []
+        if "unsupported_taxonomy" in mp:
+            return "Unsupported sector"
+        if "error" in mp:
+            return "Fetch error"
+        ps = row.get("pillar_scores")
+        ok = len(ps) if isinstance(ps, dict) else 0
+        total = ok + len(mp)
+        return f"{ok}/{total}" if total else "—"
+
+    # Incomplete-pillar rows are demoted below every fully-scored row
+    # (never let a thin, few-pillar 100 outrank a genuinely complete
+    # assessment) -- ranked by total_score within each of those two
+    # groups, same as before.
+    shown = shown.copy()
+    shown["pillar_coverage"] = shown.apply(_pillar_coverage, axis=1)
+    shown["_incomplete"] = shown["missing_pillars"].apply(bool)
+    shown = shown.sort_values(["_incomplete", "total_score"], ascending=[True, False])
+
+    show_cols = ["total_score", "pillar_coverage", "rubric"] + numeric_cols + ["fiscal_year_end"]
     show_cols = [c for c in show_cols if c in shown.columns]
 
     with st.container(border=True, key="ov-card-fund-ranked"):
@@ -5587,6 +5619,17 @@ def page_fundamentals():
         def _score_badge_cls(v):
             return "ov-badge-green" if v >= 60 else "ov-badge-amber" if v >= 40 else "ov-badge-red"
 
+        def _coverage_badge_cls(v):
+            if v in ("Unsupported sector", "Fetch error"):
+                return "ov-badge-red"
+            if isinstance(v, str) and "/" in v:
+                try:
+                    ok, total = (int(x) for x in v.split("/"))
+                except ValueError:
+                    return "ov-badge-gray"
+                return "ov-badge-gray" if total == 0 or ok == total else "ov-badge-amber"
+            return "ov-badge-gray"
+
         shown_display = shown[show_cols].copy()
         shown_display.insert(0, "symbol", shown_display.index)
         if "total_score" in shown_display.columns:
@@ -5596,7 +5639,8 @@ def page_fundamentals():
         st.markdown(
             _ov_table_html(
                 shown_page, sym_cols=["symbol"], num_fmt=fmt,
-                badges={"rubric": rubric_badge, "total_score": _score_badge_cls}),
+                badges={"rubric": rubric_badge, "total_score": _score_badge_cls,
+                        "pillar_coverage": _coverage_badge_cls}),
             unsafe_allow_html=True)
         _ov_pagination_controls(shown_display, key="fund_ranked")
 
