@@ -5946,6 +5946,10 @@ _INTRADAY_EVENT_BADGES = {
     # "wash/neutral" statuses, distinct from stop's red and a real exit's
     # green.
     "breakeven": "ov-badge-gray",
+    # v5.4 §5i.3 -- always a losing exit by construction (only ever
+    # checked/fired when the entry candle's own close already breached
+    # the stop), same red as a normal stop.
+    "entry_candle_close": "ov-badge-red",
     "stop": "ov-badge-red", "squareoff": "ov-badge-blue",
 }
 

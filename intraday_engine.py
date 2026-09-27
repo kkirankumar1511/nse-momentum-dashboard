@@ -501,11 +501,21 @@ def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.dateti
        closes by step_position_boundary()) or, if EMA10 doesn't apply,
        book the first half at the fixed target exactly like v5.1.
 
-    No-ops if this tracker has no open position."""
+    No-ops if this tracker has no open position, or while `now` is still
+    inside the position's own ENTRY CANDLE (v5.4 §5i.3 -- ported exactly
+    as specified: no intrabar stop -- or target -- check applies to the
+    entry candle itself, so a dip that recovers before that candle
+    closes survives, deliberately matching the backtest's own blind spot
+    rather than exploiting the live feed's finer information. The only
+    check on the entry candle is its own CLOSE vs the stop, handled
+    separately by check_entry_candle_close() once that candle closes;
+    normal tick-driven checking resumes from the next candle onward)."""
     if tracker.position_id is None:
         return None
     pos = idb.get_position(tracker.position_id)
     if pos is None or pos["status"] != "open":
+        return None
+    if _floor5(now) == _floor5(pd.Timestamp(pos["entry_time"])):
         return None
 
     direction = pos["direction"]
@@ -553,6 +563,47 @@ def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.dateti
          f"deferred, trailing EMA{trail}; original stop still protects the full position.")
     return {"type": "target_touched", "trail_ema": trail, "target": pos["target_price"],
             "ema10": float(e10)}
+
+
+def check_entry_candle_close(tracker: CandidateTracker, boundary: pd.Timestamp, now: dt.datetime,
+                             mode: str) -> dict | None:
+    """v5.4 §5i.3 -- the "entry-candle close" rule, ported EXACTLY as
+    specified: no intrabar stop check applies to the entry candle
+    itself (check_intracandle_exit() suppresses all tick-driven
+    checking for that same window -- see its own docstring); the ONLY
+    check on the entry candle is its own CLOSE versus the stop,
+    evaluated once, the moment that candle actually closes. If breached,
+    the FULL position closes at that CLOSE price (not the stop price) --
+    a deliberate, accepted trade-off: the realized loss can overshoot
+    the position's sized risk budget (spec's own measured bound: mean
+    1.30R, median 1.19R, max 2.40R across the affected trades). Normal
+    intrabar stop/target behavior resumes from the next candle onward,
+    unaffected by this.
+
+    Must be called from the per-boundary loop that processes newly
+    CLOSED candles, once per boundary. No-ops for any boundary other
+    than this position's own entry candle, for a tracker with no open
+    position, or if this isn't a brand-new (nothing booked yet)
+    position -- this rule only ever concerns the very first candle."""
+    if tracker.position_id is None:
+        return None
+    pos = idb.get_position(tracker.position_id)
+    if pos is None or pos["status"] != "open" or pos["qty_remaining"] != pos["qty"]:
+        return None
+    entry_candle_label = _floor5(pd.Timestamp(pos["entry_time"]))
+    if boundary != entry_candle_label:
+        return None
+    if tracker.hist is None:
+        return None
+    row = tracker.hist[tracker.hist.index == boundary]
+    if row.empty:
+        return None
+    close_px = float(row.iloc[0]["close"])
+    direction = pos["direction"]
+    breached = (close_px <= pos["stop_price"]) if direction == strat.LONG else (close_px >= pos["stop_price"])
+    if not breached:
+        return None
+    return _close_leg(tracker, pos, "entry_candle_close", pos["qty_remaining"], close_px, now, mode)
 
 
 def _refresh_position_hist(tracker: CandidateTracker, boundary: pd.Timestamp) -> bool:
@@ -658,10 +709,11 @@ def _close_leg(tracker: CandidateTracker, pos: dict, leg_type: str, qty: int,
     cost = strat.round_trip_cost(pos["entry_price"], exit_price, qty, direction=pos["direction"])
     net = gross - cost
     idb.close_position_leg(tracker.position_id, leg_type, qty, exit_price, str(now), gross, cost, net, order_id)
-    if leg_type in ("stop", "squareoff", "breakeven"):
-        # All three always close the FULL remaining quantity (breakeven
-        # is the §5b runner exit, exactly as full-closing as a stop) --
-        # nothing left for this tracker to do for the rest of the day.
+    if leg_type in ("stop", "squareoff", "breakeven", "entry_candle_close"):
+        # All four always close the FULL remaining quantity (breakeven
+        # is the §5b runner exit, entry_candle_close is §5i.3's own
+        # full-position exit) -- nothing left for this tracker to do for
+        # the rest of the day.
         tracker.done = True
     _push(f"KK Trading — {pos['symbol']} {leg_type} hit ({mode})",
          f"qty {qty} @ ₹{exit_price:.2f} -- net P&L ₹{net:+,.2f}")
@@ -959,6 +1011,15 @@ def run_live(mode: str = "paper") -> None:
                 for t in trackers:
                     if t.position_id is None:
                         continue
+                    # v5.4 s5i.3 -- the entry-candle close rule, checked
+                    # once right as the entry candle itself closes, BEFORE
+                    # the trail-boundary step below (which already no-ops
+                    # for a position that hasn't touched target yet, so
+                    # ordering is not load-bearing, just logical).
+                    _ecev = check_entry_candle_close(t, boundary, dt.datetime.now(), mode)
+                    if _ecev:
+                        print(f"{boundary} {t.symbol}: {_ecev}")
+                        continue  # position just closed -- nothing left to check this boundary
                     _tok = token_by_symbol.get(t.symbol)
                     _px_fn = (lambda _t=t, _k=_tok: _get_live_ltp(ticker, _k, _t.symbol)) \
                         if _tok is not None else (lambda: None)
