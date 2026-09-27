@@ -473,8 +473,17 @@ def _parse_broadcast(s: str | None) -> dt.datetime | None:
     knowable, for point-in-time backtesting (see fundamentals_asof) -- a
     filing for FY24 (year ended 31-Mar-2024) is typically not knowable until
     weeks or months after that date. Returns None on missing/malformed input
-    rather than guessing, since fundamentals_asof treats None as "exclude"."""
-    if not s:
+    rather than guessing, since fundamentals_asof treats None as "exclude".
+
+    Guards with pd.isna(), not `not s` -- a missing value read back through
+    a pandas .apply() (e.g. quarterly_financials()'s df["broadcast"].apply)
+    can surface as float('nan') rather than None depending on the pandas/
+    pyarrow string-backend in use, and `not float('nan')` is FALSE (NaN is
+    truthy) -- verified this reached strptime() as a raw float and crashed
+    with a TypeError on the VPS's pandas build, silently NOT reproducing
+    locally where the same column happened to keep None as an object dtype.
+    pd.isna() catches None, NaN and NaT uniformly regardless of backend."""
+    if pd.isna(s):
         return None
     try:
         return dt.datetime.strptime(s, "%d-%b-%Y %H:%M:%S")
