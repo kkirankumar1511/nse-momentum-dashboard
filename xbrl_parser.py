@@ -323,7 +323,7 @@ def quarterly_financials(symbol: str, max_quarters: int = 12,
     here).
     """
     filings = nse_api.integrated_filings(symbol)
-    filings = [f for f in filings if f.get("type_Sub") in (None, "Original", "Revised")]
+    filings = [f for f in filings if f.get("type_Sub") in (None, "Original", "Revised", "Revision")]
 
     by_qe: dict[str, dict[str, dict]] = {}
     for f in filings:
@@ -522,7 +522,7 @@ def annual_balance_sheet(symbol: str, n_years: int = 3) -> list[dict]:
     """
     filings = nse_api.integrated_filings(symbol)
     filings = [f for f in filings if f.get("type") == "Integrated Filing- Financials"
-              and f.get("type_Sub") in (None, "Original", "Revised")]
+              and f.get("type_Sub") in (None, "Original", "Revised", "Revision")]
 
     by_qe: dict[str, dict[str, dict]] = {}
     for f in filings:
