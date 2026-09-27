@@ -156,8 +156,9 @@ GST_PCT = 0.18
 # §1 -- continuous (non session-reset) indicators
 # ---------------------------------------------------------------------------
 
-TRAIL_EMA_FAST = 5    # v5.2 first-half trail: EMA5 (used ~99% of the time)
-TRAIL_EMA_SLOW = 10   # v5.2 fallback tier: EMA10
+TRAIL_EMA_SLOW = 10   # v5.4 §5i.2 -- the only EMA the first-half trail
+# consults now. EMA5 (formerly TRAIL_EMA_FAST) was removed entirely from
+# the defer/trail decision -- see choose_trail_ema()'s own docstring.
 
 
 def ema_n(close: pd.Series, span: int) -> pd.Series:
@@ -167,33 +168,34 @@ def ema_n(close: pd.Series, span: int) -> pd.Series:
     return close.ewm(span=span, adjust=False, min_periods=span).mean()
 
 
-def choose_trail_ema(direction: str, target: float, ema5: float | None,
-                     ema10: float | None) -> int | None:
-    """v5.2 §1 step 2 -- where the (fixed) 1:2R target sits relative to
-    EMA5/EMA10 decides whether the first-half booking is deferred and
-    which EMA is trailed. Returns 5, 10, or None (= book at the fixed
-    target immediately, exactly like v5.1).
+def choose_trail_ema(direction: str, target: float, ema10: float | None) -> int | None:
+    """v5.4 §5i.2 -- EMA10-ONLY trail, replacing v5.2/v5.3's EMA5/EMA10
+    dual-tier decision (EMA5 is no longer consulted at all). At the 1:2R
+    touch, defer booking and trail EMA10 whenever the target sits on the
+    momentum side of it (above for LONG, below for SHORT); otherwise
+    book at the fixed target immediately, exactly like v5.1.
 
-    LONG: target ABOVE EMA5 -> trail EMA5; else EMA10 < target <= EMA5 ->
-    trail EMA10. SHORT mirrors (target BELOW EMA5 -> EMA5; else
-    EMA5 <= target < EMA10 -> EMA10). Missing/NaN EMAs -> None.
+    Counterintuitive but measured: this makes the trail LOOSER, not
+    tighter, since EMA10 sits further from price than EMA5 did --
+    positions ride longer, a few more get stopped instead of booking
+    early, and the survivors run much further (avg win, best trade, PF,
+    and expectancy all rose together on the reference backtest: CAGR
+    43.50%->47.60%, a real effect, not noise -- §5i.2's own analysis
+    found every touch already deferred under both rules, so the entire
+    change is which EMA gets trailed, not whether deferral happens).
 
-    NO LOOK-AHEAD: callers must pass the EMA5/EMA10 of the most recent
+    Returns 10, or None (book at the fixed target). Missing/NaN EMA10 ->
+    None.
+
+    NO LOOK-AHEAD: callers must pass the EMA10 of the most recent
     COMPLETED candle, never the still-forming touch candle's (whose own
-    close isn't known yet) -- v5.2 §2's own live-implementation note."""
-    if ema5 is None or pd.isna(ema5):
+    close isn't known yet) -- v5.2 §2's own live-implementation note,
+    unchanged by this simplification."""
+    if ema10 is None or pd.isna(ema10):
         return None
     if direction == LONG:
-        if target > ema5:
-            return TRAIL_EMA_FAST
-        if ema10 is not None and pd.notna(ema10) and ema10 < target <= ema5:
-            return TRAIL_EMA_SLOW
-        return None
-    if target < ema5:
-        return TRAIL_EMA_FAST
-    if ema10 is not None and pd.notna(ema10) and ema5 <= target < ema10:
-        return TRAIL_EMA_SLOW
-    return None
+        return TRAIL_EMA_SLOW if target > ema10 else None
+    return TRAIL_EMA_SLOW if target < ema10 else None
 
 
 def trail_crossed(direction: str, close: float, ema: float | None) -> bool:
@@ -285,9 +287,45 @@ def select_candidates(fno_ret_first15: pd.Series, bias: str, n: int = TOP_N_CAND
 # §3-§5 -- signal detection, entry/stop, target/exit management
 # ---------------------------------------------------------------------------
 
+def signal_in_range(direction: str, open_: float, close: float,
+                    sig_range_low: float | None, sig_range_high: float | None) -> bool:
+    """v5.4 §5i.1 -- the "one-sided signal gate": a candle may only
+    become a FRESH signal candle if its BODY (open/close -- wicks
+    ignored) has not broken the reference range on the trade's own
+    side. sig_range_low/high are the day's fixed 09:20+09:25-candle
+    range (min low / max high of those two specific candles, captured
+    once per day -- NOT the day's very first (09:15) candle used by the
+    separate EMA21/first-candle invalidation gate).
+
+    LONG: min(open, close) >= sig_range_low (the pullback hasn't
+    cracked the opening range's floor). SHORT: max(open, close) <=
+    sig_range_high (the bounce hasn't cleared its ceiling). The
+    OPPOSITE side is unconstrained -- a LONG signal may sit freely
+    above sig_range_high.
+
+    Only ever applied to a FRESH signal candle -- never to a re-signal
+    (the reference implementation this was ported from never calls
+    this in its re-signal branch; re-signal already has its own,
+    separate "extends the pullback further" condition).
+
+    Fails CLOSED if the range couldn't be resolved (e.g. a data gap
+    around 09:20/09:25) -- same discipline as the sector gate elsewhere
+    in this codebase: no candle can become a signal candle that day for
+    this candidate, rather than silently letting an unverifiable one
+    through."""
+    if sig_range_low is None or sig_range_high is None:
+        return False
+    body_hi = max(open_, close)
+    body_lo = min(open_, close)
+    if direction == LONG:
+        return body_lo >= sig_range_low
+    return body_hi <= sig_range_high
+
+
 def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
                atr14_series: pd.Series, first_candle_low: float,
-               first_candle_high: float) -> dict | None:
+               first_candle_high: float, sig_range_low: float | None = None,
+               sig_range_high: float | None = None) -> dict | None:
     """Spec v2 §3.2's walk-forward loop, for one candidate on one day.
 
     `day`: that symbol's 5-min OHLCV candles for the day, indexed by
@@ -297,6 +335,10 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
     `first_candle_low`/`first_candle_high`: the day's very first (09:15)
     candle's own low/high, captured once before this loop runs (§3.2 v2
     step 1b) -- a fixed value for the whole day, not looked up per candle.
+    `sig_range_low`/`sig_range_high`: v5.4 §5i.1's one-sided signal gate
+    reference range (09:20+09:25 candles), also fixed for the whole day.
+    None disables signal formation entirely for this call (fail-closed,
+    see signal_in_range()) -- pass real values once the range is known.
 
     Returns {"signal_time", "entry_time", "entry_price", "stop_price"}
     on a triggered entry, else None (day invalidated, or no signal ever
@@ -410,7 +452,9 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
         wants_color = is_red if direction == LONG else is_green
         vol_min_so_far = vol_so_far_full.loc[:ts].min()
         is_lowest_volume = row["volume"] <= vol_min_so_far * (1 + VOL_THRESHOLD_PCT)
-        if wants_color and is_lowest_volume and pd.notna(sig_atr) and sig_atr > 0:
+        in_range = signal_in_range(direction, float(row["open"]), float(row["close"]),
+                                   sig_range_low, sig_range_high)
+        if wants_color and is_lowest_volume and in_range and pd.notna(sig_atr) and sig_atr > 0:
             active_signal = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
                              "volume": row["volume"], "signal_close": row["close"]}
             breakout_counter = 0
@@ -437,7 +481,9 @@ def new_signal_state() -> dict:
 
 def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | None,
                 sig_atr: float | None, vol_min_so_far: float,
-                first_candle_low: float, first_candle_high: float) -> tuple[dict, dict | None]:
+                first_candle_low: float, first_candle_high: float,
+                sig_range_low: float | None = None,
+                sig_range_high: float | None = None) -> tuple[dict, dict | None]:
     """One incremental step of the §3.2 walk-forward loop. Does NOT
     mutate `state` -- returns a new state dict (caller keeps its own
     running copy, e.g. one per candidate per day).
@@ -451,6 +497,9 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     `first_candle_low`/`first_candle_high`: the day's 09:15 candle's own
     low/high (v2 §3.2 step 1b) -- fixed for the whole day, the caller
     captures it once and passes the same value on every call.
+    `sig_range_low`/`sig_range_high`: v5.4 §5i.1's one-sided signal gate
+    reference range (09:20+09:25 candles), also fixed for the whole day.
+    None fails closed -- see signal_in_range().
 
     Returns (new_state, event) -- event is None (nothing happened this
     candle) or one of:
@@ -573,7 +622,9 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     is_green = row["close"] > row["open"]
     wants_color = is_red if direction == LONG else is_green
     is_lowest_volume = row["volume"] <= vol_min_so_far * (1 + VOL_THRESHOLD_PCT)
-    if wants_color and is_lowest_volume and pd.notna(sig_atr) and sig_atr > 0:
+    in_range = signal_in_range(direction, float(row["open"]), float(row["close"]),
+                               sig_range_low, sig_range_high)
+    if wants_color and is_lowest_volume and in_range and pd.notna(sig_atr) and sig_atr > 0:
         state["active_signal"] = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
                                   "volume": row["volume"], "signal_close": row["close"]}
         state["breakout_counter"] = 0

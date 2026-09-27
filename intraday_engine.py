@@ -235,7 +235,8 @@ class CandidateTracker:
                 ema21_series: pd.Series, atr14_series: pd.Series,
                 first_candle_low: float, first_candle_high: float,
                 rank: int, sector: str | None = None, sector_ratio: float | None = None,
-                sector_gate_pass: bool = False):
+                sector_gate_pass: bool = False, sig_range_low: float | None = None,
+                sig_range_high: float | None = None):
         self.date = date
         self.symbol = symbol
         self.direction = direction
@@ -250,6 +251,12 @@ class CandidateTracker:
         # atr14_series which need the newest candle appended each boundary).
         self.first_candle_low = first_candle_low
         self.first_candle_high = first_candle_high
+        # v5.4 §5i.1 -- the one-sided signal gate's own fixed reference
+        # range (09:20+09:25 candles' low/high), separate from the 09:15
+        # first-candle values above. None fails closed -- see
+        # intraday_strategy.signal_in_range().
+        self.sig_range_low = sig_range_low
+        self.sig_range_high = sig_range_high
         # v2 Spec §6 -- resolved once at 09:30 (resolve_sector_gates()),
         # looked up (not recomputed) the moment a breakout triggers.
         self.sector = sector
@@ -313,7 +320,8 @@ def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series) 
     sig_atr = tracker.atr14_series.get(ts)
     new_state, event = strat.step_candle(
         tracker.signal_state, ts, row, tracker.direction, e21, sig_atr, tracker.vol_min_so_far,
-        tracker.first_candle_low, tracker.first_candle_high)
+        tracker.first_candle_low, tracker.first_candle_high,
+        tracker.sig_range_low, tracker.sig_range_high)
     tracker.signal_state = new_state
 
     if event is None:
@@ -470,24 +478,28 @@ def _floor5(ts: pd.Timestamp) -> pd.Timestamp:
 
 def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.datetime,
                            mode: str) -> dict | None:
-    """v5.2 exit, tick-driven part (spec §1 steps 1-2). Between candle
+    """v5.4 exit, tick-driven part (§2.2/§5b/§5i.2). Between candle
     closes, watch LTP against the open position's stop/target:
 
-    1. STOP first, always -- the original stop protects the WHOLE
-       remaining quantity at every point: before the target, while the
-       first-half booking is deferred (full size), and the runner half
-       afterwards. (The v5 spec's prose said the runner rides with no
-       stop; the validated backtest code and v5.2's own exit-path table,
-       e.g. "EMA5-trail -> stop: 89 positions", say otherwise -- the
-       stop applies to the runner. Corrected here.)
+    1. STOP/BREAKEVEN first, always. Before the first half books, the
+       ORIGINAL stop protects the full remaining quantity (the v5
+       spec's prose said the runner rides with no stop at all; the
+       validated backtest code and v5.2's own exit-path table, e.g.
+       "EMA5-trail -> stop: 89 positions", said otherwise -- corrected
+       here). Once the first half IS booked (fixed target or the EMA
+       trail), §5b's breakeven rule shifts the level protecting the
+       runner from the original stop up (LONG) / down (SHORT) to the
+       ENTRY PRICE -- checked here, before the target/touch block below,
+       so it can only ever take effect from the tick after the booking
+       confirmed, never the same tick.
     2. TARGET, only until first touched: price reaching the 1:2R target
        no longer books the first half there by default. Where the target
-       sits vs EMA5/EMA10 of the last COMPLETED candle (never the
-       still-forming touch candle -- no look-ahead) decides whether to
-       DEFER (persist target_touch_time + trail_ema, sell nothing; the
-       trail itself is checked at candle closes by
-       step_position_boundary()) or, if neither EMA tier applies, book
-       the first half at the fixed target exactly like v5.1.
+       sits vs EMA10 (§5i.2 -- EMA5 is no longer consulted at all) of the
+       last COMPLETED candle (never the still-forming touch candle -- no
+       look-ahead) decides whether to DEFER (persist target_touch_time +
+       trail_ema, sell nothing; the trail itself is checked at candle
+       closes by step_position_boundary()) or, if EMA10 doesn't apply,
+       book the first half at the fixed target exactly like v5.1.
 
     No-ops if this tracker has no open position."""
     if tracker.position_id is None:
@@ -497,26 +509,30 @@ def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.dateti
         return None
 
     direction = pos["direction"]
-    hit_stop = ltp <= pos["stop_price"] if direction == strat.LONG else ltp >= pos["stop_price"]
+    already_took_target = pos["qty_remaining"] < pos["qty"]
+    active_stop = pos["entry_price"] if already_took_target else pos["stop_price"]
+    hit_stop = ltp <= active_stop if direction == strat.LONG else ltp >= active_stop
     if hit_stop:
-        return _close_leg(tracker, pos, "stop", pos["qty_remaining"], pos["stop_price"], now, mode)
+        leg_type = "breakeven" if already_took_target else "stop"
+        return _close_leg(tracker, pos, leg_type, pos["qty_remaining"], active_stop, now, mode)
+    if already_took_target:
+        return None  # runner survives this tick; nothing else to check until squareoff
 
-    # Target logic applies only once: not yet touched, first half not yet booked.
-    if pos.get("target_touch_time") is not None or pos["qty_remaining"] < pos["qty"]:
+    # Target logic applies only once: not yet touched.
+    if pos.get("target_touch_time") is not None:
         return None
     hit_target = ltp >= pos["target_price"] if direction == strat.LONG else ltp <= pos["target_price"]
     if not hit_target:
         return None
 
     half = pos["qty"] // 2
-    # EMAs from the last COMPLETED candle only.
+    # EMA10 from the last COMPLETED candle only (§5i.2).
     last_closed = _last_closed_candle_label(now)
     closed = _closed_only(getattr(tracker, "hist", None), last_closed)
-    e5 = e10 = None
+    e10 = None
     if closed is not None and not closed.empty:
-        e5 = strat.ema_n(closed["close"], strat.TRAIL_EMA_FAST).iloc[-1]
         e10 = strat.ema_n(closed["close"], strat.TRAIL_EMA_SLOW).iloc[-1]
-    trail = strat.choose_trail_ema(direction, pos["target_price"], e5, e10)
+    trail = strat.choose_trail_ema(direction, pos["target_price"], e10)
 
     if half <= 0:
         # A 1-share position can't be split -- mark touched (so this isn't
@@ -525,8 +541,9 @@ def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.dateti
         idb.mark_target_touched(tracker.position_id, str(now), None)
         return None
     if trail is None:
-        # Neither EMA tier applies -> v5.1 behavior: book the first half
-        # at the fixed target price right now.
+        # EMA10 doesn't apply -> v5.1 behavior: book the first half at
+        # the fixed target price right now (runner's stop becomes
+        # breakeven starting the NEXT tick, via already_took_target above).
         idb.mark_target_touched(tracker.position_id, str(now), None)
         return _close_leg(tracker, pos, "target", half, pos["target_price"], now, mode)
 
@@ -535,7 +552,7 @@ def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.dateti
          f"1:2R target {pos['target_price']:.2f} reached -- first-half booking "
          f"deferred, trailing EMA{trail}; original stop still protects the full position.")
     return {"type": "target_touched", "trail_ema": trail, "target": pos["target_price"],
-            "ema5": None if e5 is None else float(e5), "ema10": None if e10 is None else float(e10)}
+            "ema10": float(e10)}
 
 
 def _refresh_position_hist(tracker: CandidateTracker, boundary: pd.Timestamp) -> bool:
@@ -641,7 +658,10 @@ def _close_leg(tracker: CandidateTracker, pos: dict, leg_type: str, qty: int,
     cost = strat.round_trip_cost(pos["entry_price"], exit_price, qty, direction=pos["direction"])
     net = gross - cost
     idb.close_position_leg(tracker.position_id, leg_type, qty, exit_price, str(now), gross, cost, net, order_id)
-    if leg_type in ("stop", "squareoff"):
+    if leg_type in ("stop", "squareoff", "breakeven"):
+        # All three always close the FULL remaining quantity (breakeven
+        # is the §5b runner exit, exactly as full-closing as a stop) --
+        # nothing left for this tracker to do for the rest of the day.
         tracker.done = True
     _push(f"KK Trading — {pos['symbol']} {leg_type} hit ({mode})",
          f"qty {qty} @ ₹{exit_price:.2f} -- net P&L ₹{net:+,.2f}")
@@ -851,10 +871,26 @@ def run_live(mode: str = "paper") -> None:
             continue
         first_candle_low = float(first_candle.iloc[0]["low"])
         first_candle_high = float(first_candle.iloc[0]["high"])
+        # v5.4 §5i.1 -- the one-sided signal gate's own fixed reference
+        # range, from the 09:20 AND 09:25 candles specifically (distinct
+        # from the 09:15 first_candle above). Both are already-closed
+        # history by the time this runs (09:30+), same timing guarantee
+        # as the 09:15 candle. Missing either -> fail closed (None),
+        # matching signal_in_range()'s own fail-closed contract.
+        c20 = today_so_far.loc[today_so_far.index == pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=20)]
+        c25 = today_so_far.loc[today_so_far.index == pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=25)]
+        if not c20.empty and not c25.empty:
+            sig_range_low = min(float(c20.iloc[0]["low"]), float(c25.iloc[0]["low"]))
+            sig_range_high = max(float(c20.iloc[0]["high"]), float(c25.iloc[0]["high"]))
+        else:
+            print(f"[intraday_engine] {sym}: 09:20/09:25 candle missing -- one-sided "
+                 f"signal gate fails closed, no fresh signal can form for this candidate today.")
+            sig_range_low, sig_range_high = None, None
         t = CandidateTracker(date_str, sym, c["direction"], ema21_series, atr14_series,
                             first_candle_low, first_candle_high, c["rank"],
                             sector=c.get("sector"), sector_ratio=c.get("sector_ratio"),
-                            sector_gate_pass=c.get("sector_gate_pass", False))
+                            sector_gate_pass=c.get("sector_gate_pass", False),
+                            sig_range_low=sig_range_low, sig_range_high=sig_range_high)
         t.hist = hist
         # Seed the running vol-min from today's pre-window candles (09:15-
         # 09:30) -- see step_candle()'s docstring; the running min starts

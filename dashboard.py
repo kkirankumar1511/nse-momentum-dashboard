@@ -5937,7 +5937,15 @@ _INTRADAY_EVENT_BADGES = {
     "signal_formed": "ov-badge-amber", "expired": "ov-badge-gray",
     "re_signaled": "ov-badge-amber", "invalidated": "ov-badge-gray",
     "triggered": "ov-badge-green", "target": "ov-badge-green",
+    # ema5_trail_exit: kept for historical legs recorded before v5.4's
+    # §5i.2 removed EMA5 from the trail decision -- no new leg will ever
+    # be this type again, but old ones must still render correctly.
     "ema5_trail_exit": "ov-badge-green", "ema10_trail_exit": "ov-badge-green",
+    # v5.4 §5b -- the runner's breakeven exit is neither a real win nor a
+    # real loss (fills at entry, costs-only P&L) -- gray like the other
+    # "wash/neutral" statuses, distinct from stop's red and a real exit's
+    # green.
+    "breakeven": "ov-badge-gray",
     "stop": "ov-badge-red", "squareoff": "ov-badge-blue",
 }
 
@@ -6216,22 +6224,26 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
 def page_intraday_dashboard():
     _mode = "live" if config.STRATEGY.get("intraday_live_enabled", False) else "paper"
     _tip = html_lib.escape(
-        "The DaysLowVolumnBreakout intraday strategy (v5.4, paper-trading "
+        "The DaysLowVolumnBreakout intraday strategy (v5.4 §5i, paper-trading "
         "trial of the disputed top-5 finding -- see the v5.4 spec §0) -- "
         "day-bias from NIFTY 50 breadth, a top-5 F&O momentum candidate pool "
-        "(only 2 trade slots/day) with a new 09:15 overnight-gap filter "
+        "(only 2 trade slots/day) with a 09:15 overnight-gap filter "
         "(candidates gapping >5% from prior close are skipped, backfilled from "
         "the next-best ranked candidate), a low-volume pullback signal (09:25 "
-        "window), a genuinely real-time gated-2-candle breakout entry (only a "
-        "price-cross fires entry; color/volume/range only ever gate whether an "
-        "already-closed candle gets a 2nd chance), a lower-volume re-signal "
-        "that can happen at most once per signal, sector confirmation gate. "
-        "Exit: the original stop protects the whole position throughout; on "
-        "touching the 1:2R target the first half is not sold there but "
-        "trailed on EMA5 (EMA10 fallback) and sold on the first candle closing "
-        "through it (filled at the next candle's open); the rest squares off "
-        "at 15:10. Paper mode simulates every fill with zero real orders; "
-        "switching to live is a separate, deliberate step (Admin).")
+        "window) gated one-sided (§5i.1: the signal candle's own body must not "
+        "have broken the 09:20/09:25 range on the trade's own side), a "
+        "genuinely real-time gated-2-candle breakout entry (only a price-cross "
+        "fires entry; color/volume/range only ever gate whether an already-"
+        "closed candle gets a 2nd chance), a lower-volume re-signal that can "
+        "happen at most once per signal, sector confirmation gate. Exit: the "
+        "original stop protects the whole position until the first half books; "
+        "on touching the 1:2R target the first half is not sold there but "
+        "deferred and trailed on EMA10 (§5i.2 -- EMA5 is no longer consulted), "
+        "sold on the first candle closing through it (filled at the next "
+        "candle's open); once that half books, the runner's stop moves to "
+        "breakeven (§5b, entry price) instead of the original stop; the rest "
+        "squares off at 15:10. Paper mode simulates every fill with zero real "
+        "orders; switching to live is a separate, deliberate step (Admin).")
     _mode_badge = ('<span class="ov-badge ov-badge-red">🔴 LIVE</span>' if _mode == "live"
                   else '<span class="ov-badge ov-badge-blue">📝 PAPER</span>')
     st.markdown(
