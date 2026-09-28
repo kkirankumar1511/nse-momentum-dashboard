@@ -340,21 +340,15 @@ def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series) 
         return event
 
     if event["type"] == "signal_formed":
-        tracker.signal_db_id = idb.create_signal(
-            tracker.date, tracker.symbol, str(event["time"]), event["high"], event["low"], event["atr"])
-        return event
-
-    if event["type"] == "re_signaled":
-        # v5.1 "re-signal on close" -- a window candle that failed to
-        # keep the old signal's window open became a brand-new signal
-        # candle in its own right instead of dying outright. Retire the
-        # OLD signal row (a distinct status from "expired" so the
-        # Dashboard/tradebook can tell "this line of signals eventually
-        # got replaced" apart from "this signal just died") and create a
-        # fresh row for the new one, exactly like signal_formed does --
-        # can chain, so this may fire more than once per candidate/day.
-        if tracker.signal_db_id is not None:
-            idb.update_signal_status(tracker.signal_db_id, "re_signaled")
+        # §5l -- re-signal removed: "replaced_expired" is True when this
+        # same candle just killed a DIFFERENT signal (the old continuation
+        # gate/window exhausted) before qualifying as an ordinary fresh
+        # signal in its own right, all within the same step_candle() call
+        # -- retire that old row as "expired" (step_candle() never emits
+        # a separate signal_expired event for it) before creating the new
+        # one, so the Dashboard/tradebook still shows both lines.
+        if event.get("replaced_expired") and tracker.signal_db_id is not None:
+            idb.update_signal_status(tracker.signal_db_id, "expired")
         tracker.signal_db_id = idb.create_signal(
             tracker.date, tracker.symbol, str(event["time"]), event["high"], event["low"], event["atr"])
         return event

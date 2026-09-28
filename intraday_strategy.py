@@ -357,11 +357,10 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
     invalidated = False
     active_signal = None  # {"time", "hi", "lo", "atr", "volume", "signal_close"}
     breakout_counter = 0
-    chain_len = 0  # v5.3: 0 = active signal is a fresh one; 1 = it's itself a re-signal
 
     for ts, row in win.iterrows():
         sig_atr = atr14_series.get(ts)  # this candle's own ATR -- needed both
-        # for a fresh signal formation below AND for a re-signal check while
+        # for a fresh signal formation below AND for the continuation gate while
         # an existing signal is active, computed once here either way.
         # 1. EMA21 day-invalidation gate -- checked every candle,
         # regardless of any active signal (Spec §3.2 step 1, §9.5).
@@ -410,15 +409,6 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
             # waiting out the remaining window candle(s) (Spec v3 §6
             # point 1, extended). See step_candle()'s own comment for the
             # live-vs-backtest rationale, kept identical here.
-            # v5.1/v5.3 -- "re-signal on close", tightened in v5.3: see
-            # step_candle()'s own comment for the full rationale. A candle
-            # that fails to keep the window open -- candle #1 failing this
-            # gate, or candle #2 exhausting the window -- gets one more
-            # chance to become a brand-new signal candle if ALL of: its
-            # own close extended the pullback beyond the CURRENT active
-            # signal's close, its volume is strictly LOWER than that
-            # signal's, and the active signal is a FRESH one (chain_len
-            # == 0 -- a re-signaled candle can never re-signal again).
             gate_ok = False
             if breakout_counter < BREAKOUT_WINDOW:
                 confirm_is_green = row["close"] > row["open"]
@@ -429,35 +419,42 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
                 gate_ok = wants_confirm_color and volume_ok and range_ok
             if gate_ok:
                 continue
-            resig_ok = (row["close"] < active_signal["signal_close"] if direction == LONG
-                       else row["close"] > active_signal["signal_close"])
-            if (resig_ok and chain_len == 0 and row["volume"] < active_signal["volume"]
-                    and pd.notna(sig_atr) and sig_atr > 0):
+            # §5l -- v5.1/v5.3's "re-signal on close" is REMOVED entirely
+            # (no close-extension test, no volume-vs-signal test, no
+            # chain_len cap). The dying signal's own candle -- candle #1
+            # that just failed the continuation gate above, or candle #2
+            # that exhausted the window -- falls straight through to
+            # step 3 below and is re-tested as an ORDINARY fresh signal
+            # candle: same day's-lowest-volume/color/one-sided-gate bar
+            # as any other candle, nothing special carried over from the
+            # dying signal. If it doesn't qualify, nothing is active and
+            # the scan just continues from the next candle. Verified
+            # worth +1.83 CAGR / -0.88pp drawdown over the old re-signal
+            # rule (Spec §5l.1) -- the old rule only required volume
+            # lower than the signal it replaced, not the day's actual
+            # running minimum, so it manufactured weaker setups from
+            # already-failing ones.
+            active_signal = None
+            breakout_counter = 0
+            # falls through to step 3 -- deliberately no `continue` here
+
+        # 3. No active signal (either never had one this candle, or it
+        # just died above) -- check whether THIS candle is a fresh
+        # signal candle (only before NEW_SIGNAL_CUTOFF).
+        if active_signal is None:
+            if ts.time() > NEW_SIGNAL_CUTOFF:
+                continue
+            is_red = row["close"] < row["open"]
+            is_green = row["close"] > row["open"]
+            wants_color = is_red if direction == LONG else is_green
+            vol_min_so_far = vol_so_far_full.loc[:ts].min()
+            is_lowest_volume = row["volume"] <= vol_min_so_far * (1 + VOL_THRESHOLD_PCT)
+            in_range = signal_in_range(direction, float(row["open"]), float(row["close"]),
+                                       sig_range_low, sig_range_high)
+            if wants_color and is_lowest_volume and in_range and pd.notna(sig_atr) and sig_atr > 0:
                 active_signal = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
                                  "volume": row["volume"], "signal_close": row["close"]}
                 breakout_counter = 0
-                chain_len += 1
-            else:
-                active_signal = None
-                breakout_counter = 0
-                chain_len = 0
-            continue
-
-        # 3. No active signal -- check whether THIS candle is a fresh
-        # signal candle (only before NEW_SIGNAL_CUTOFF).
-        if ts.time() > NEW_SIGNAL_CUTOFF:
-            continue
-        is_red = row["close"] < row["open"]
-        is_green = row["close"] > row["open"]
-        wants_color = is_red if direction == LONG else is_green
-        vol_min_so_far = vol_so_far_full.loc[:ts].min()
-        is_lowest_volume = row["volume"] <= vol_min_so_far * (1 + VOL_THRESHOLD_PCT)
-        in_range = signal_in_range(direction, float(row["open"]), float(row["close"]),
-                                   sig_range_low, sig_range_high)
-        if wants_color and is_lowest_volume and in_range and pd.notna(sig_atr) and sig_atr > 0:
-            active_signal = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
-                             "volume": row["volume"], "signal_close": row["close"]}
-            breakout_counter = 0
             chain_len = 0
 
     return None
@@ -475,8 +472,7 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
 
 def new_signal_state() -> dict:
     """A fresh per-candidate-per-day state for step_candle()."""
-    return {"invalidated": False, "active_signal": None, "breakout_counter": 0,
-            "chain_len": 0}
+    return {"invalidated": False, "active_signal": None, "breakout_counter": 0}
 
 
 def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | None,
@@ -504,9 +500,16 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     Returns (new_state, event) -- event is None (nothing happened this
     candle) or one of:
       {"type": "invalidated"}
-      {"type": "signal_formed", "time", "high", "low", "atr"}
+      {"type": "signal_formed", "time", "high", "low", "atr", "replaced_expired"}
       {"type": "signal_expired"}
       {"type": "triggered", "signal_time", "entry_time", "entry_price", "stop_price"}
+
+    "signal_formed"'s "replaced_expired" is True when this same candle
+    just killed a DIFFERENT signal before qualifying as a fresh one
+    itself (§5l) -- the caller (intraday_engine.process_candle) needs
+    this to know to retire the OLD signal_db_id as "expired" before
+    creating a row for the new one, since step_candle() itself never
+    emits a separate signal_expired event for that intermediate death.
     """
     if state["invalidated"]:
         return state, None
@@ -568,29 +571,10 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
         # tick during its own formation -- process_candle()'s own
         # tracker.done guard skips calling this entirely once a tick has
         # already triggered.
-        # v5.1 -- "re-signal on close", tightened in v5.3: rather than
-        # being the final word, a candle that fails to keep the window
-        # open (either candle #1 failing the color/volume/range gate, or
-        # candle #2 exhausting the window) gets ONE more chance to
-        # become a brand-new signal candle in its own right, if ALL of:
-        #   - its own close extended the pullback beyond the CURRENT
-        #     active signal's close (a deeper low for LONG, a higher
-        #     high for SHORT -- still fading, just further);
-        #   - v5.3: its volume is strictly LOWER than the signal candle
-        #     it replaces (otherwise a heavy-volume selling candle could
-        #     become a "low-volume pullback" signal -- ASIANPAINT
-        #     2021-10-27's 4-hop chain ended on a 122,767-share candle);
-        #   - v5.3: the active signal is a FRESH one (chain_len == 0) --
-        #     a re-signaled candle still gets its normal 2-candle window
-        #     and can trigger, but can never re-signal again.
-        # Only ever uses this candle's own already-closed facts vs an
-        # already-known fixed signal, so it's exactly as real-time-safe
-        # as everything else here. Verified (single run, 2026-09-19,
-        # scratch_..._resigvol_nochain.py): drawdown -10.23%, PF 1.53.
         gate_ok = False
         if state["breakout_counter"] < BREAKOUT_WINDOW:
             # Candle #1 only -- same continuation gate as before decides
-            # whether candle #2 gets a look BEFORE trying a re-signal.
+            # whether candle #2 gets a look.
             confirm_is_green = row["close"] > row["open"]
             confirm_is_red = row["close"] < row["open"]
             wants_confirm_color = confirm_is_green if direction == LONG else confirm_is_red
@@ -599,25 +583,26 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
             gate_ok = wants_confirm_color and volume_ok and range_ok
         if gate_ok:
             return state, None
-        # Gate failed (candle #1) or window exhausted (candle #2) --
-        # try a re-signal before giving up entirely.
-        resig_ok = (row["close"] < active["signal_close"] if direction == LONG
-                   else row["close"] > active["signal_close"])
-        if (resig_ok and state.get("chain_len", 0) == 0 and row["volume"] < active["volume"]
-                and pd.notna(sig_atr) and sig_atr > 0):
-            state["active_signal"] = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
-                                      "volume": row["volume"], "signal_close": row["close"]}
-            state["breakout_counter"] = 0
-            state["chain_len"] = state.get("chain_len", 0) + 1
-            return state, {"type": "re_signaled", "time": ts, "high": row["high"],
-                           "low": row["low"], "atr": sig_atr}
+        # §5l -- v5.1/v5.3's "re-signal on close" is REMOVED entirely (no
+        # close-extension test, no volume-vs-signal test, no chain_len
+        # cap). The dying signal's own candle -- candle #1 that just
+        # failed the continuation gate above, or candle #2 that
+        # exhausted the window -- falls straight through below and is
+        # re-tested as an ORDINARY fresh signal candle: same day's-
+        # lowest-volume/color/one-sided-gate bar as any other candle,
+        # nothing carried over from the dying signal. Verified worth
+        # +1.83 CAGR / -0.88pp drawdown over the old re-signal rule
+        # (Spec §5l.1) -- the old rule only required volume lower than
+        # the signal it replaced, not the day's actual running minimum,
+        # so it manufactured weaker setups from already-failing ones.
         state["active_signal"] = None
         state["breakout_counter"] = 0
-        state["chain_len"] = 0
-        return state, {"type": "signal_expired"}
+        replaced_expired = True
+    else:
+        replaced_expired = False
 
     if ts.time() > NEW_SIGNAL_CUTOFF:
-        return state, None
+        return state, ({"type": "signal_expired"} if replaced_expired else None)
     is_red = row["close"] < row["open"]
     is_green = row["close"] > row["open"]
     wants_color = is_red if direction == LONG else is_green
@@ -628,10 +613,9 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
         state["active_signal"] = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
                                   "volume": row["volume"], "signal_close": row["close"]}
         state["breakout_counter"] = 0
-        state["chain_len"] = 0
         return state, {"type": "signal_formed", "time": ts, "high": row["high"],
-                       "low": row["low"], "atr": sig_atr}
-    return state, None
+                       "low": row["low"], "atr": sig_atr, "replaced_expired": replaced_expired}
+    return state, ({"type": "signal_expired"} if replaced_expired else None)
 
 
 def check_tick_trigger(state: dict, direction: str, ltp: float, ts) -> dict | None:
