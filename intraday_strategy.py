@@ -455,7 +455,6 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
                 active_signal = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
                                  "volume": row["volume"], "signal_close": row["close"]}
                 breakout_counter = 0
-            chain_len = 0
 
     return None
 

@@ -5982,6 +5982,10 @@ _EXIT_TYPE_BADGES = {
 
 _INTRADAY_EVENT_BADGES = {
     "signal_formed": "ov-badge-amber", "expired": "ov-badge-gray",
+    # re_signaled: kept for historical rows recorded before v5.4 §5l
+    # removed the re-signal mechanism entirely (2026-09-28) -- no new
+    # signal will ever get this status again, but old ones must still
+    # render correctly. Same treatment as ema5_trail_exit just below.
     "re_signaled": "ov-badge-amber", "invalidated": "ov-badge-gray",
     "triggered": "ov-badge-green", "target": "ov-badge-green",
     # ema5_trail_exit: kept for historical legs recorded before v5.4's
@@ -6761,8 +6765,9 @@ def page_intraday_dashboard():
     events = []
     # "active" has no event badge of its own -- falls back to
     # "signal_formed" (a signal record simply exists, still being
-    # watched). Every other status (expired / re_signaled / triggered /
-    # invalidated) is shown as itself.
+    # watched). Every other status (expired / triggered / invalidated,
+    # plus re_signaled on rows from before v5.4 §5l removed that
+    # mechanism, 2026-09-28) is shown as itself.
     _sig_status_to_event = {"expired": "expired", "re_signaled": "re_signaled",
                             "triggered": "triggered", "invalidated": "invalidated"}
     for _, s in sigs.iterrows():
