@@ -6931,9 +6931,38 @@ def page_tradebook():
             filtered = filtered[filtered["exit_reason"].map(_exit_type_label).isin(reason_filter)]
 
         st.caption(f"Showing {len(filtered)} of {len(trades)} trades")
+
+        # Open rows carry no realized_pnl/realized_ret_pct (only ever set
+        # on exit) and no holding_days either (only computed at close) --
+        # fill in the OPEN equivalents from real current data:
+        # merged_holdings() is the same live Kite positions+holdings merge
+        # the Overview page's own unrealized P&L already reads, so this
+        # matches what you'd see there rather than being a separate
+        # approximation. Closed rows are untouched.
+        filtered = filtered.copy()
+        filtered["unrealized_pnl"] = float("nan")
+        filtered["unrealized_ret_pct"] = float("nan")
+        _open_mask = filtered["status"] == "open"
+        if _open_mask.any():
+            _live = merged_holdings()
+            _live_by_sym = _live.set_index("symbol") if not _live.empty else _live
+            for idx in filtered[_open_mask].index:
+                sym = filtered.at[idx, "symbol"]
+                if not _live.empty and sym in _live_by_sym.index:
+                    lrow = _live_by_sym.loc[sym]
+                    cost = float(lrow["avg_price"]) * float(lrow["qty"])
+                    filtered.at[idx, "unrealized_pnl"] = float(lrow["pnl"])
+                    filtered.at[idx, "unrealized_ret_pct"] = (
+                        float(lrow["pnl"]) / cost * 100 if cost else float("nan"))
+            filtered.loc[_open_mask, "holding_days"] = (
+                pd.Timestamp(dt.date.today())
+                - pd.to_datetime(filtered.loc[_open_mask, "entry_date"])
+            ).dt.days
+
         _priority_cols = ["symbol", "entry_date", "entry_price", "qty", "initial_stop",
                          "latest_recommended_stop", "exit_date", "exit_type", "exit_price",
-                         "realized_pnl", "realized_ret_pct", "holding_days"]
+                         "realized_pnl", "realized_ret_pct", "unrealized_pnl",
+                         "unrealized_ret_pct", "holding_days"]
         display_df = filtered.copy()
         if "exit_reason" in display_df.columns:
             display_df["exit_type"] = display_df["exit_reason"].map(_exit_type_label)
@@ -6944,7 +6973,7 @@ def page_tradebook():
         st.markdown(
             _ov_table_html(
                 display_df[display_cols], sym_cols=["symbol"],
-                pnl_cols=["realized_pnl", "realized_ret_pct"],
+                pnl_cols=["realized_pnl", "realized_ret_pct", "unrealized_pnl", "unrealized_ret_pct"],
                 num_fmt={"entry_price": "₹{:.2f}", "exit_price": "₹{:.2f}",
                         "initial_stop": "₹{:.2f}", "latest_recommended_stop": "₹{:.2f}",
                         "entry_score": "{:.2f}", "entry_rsi": "{:.1f}",
