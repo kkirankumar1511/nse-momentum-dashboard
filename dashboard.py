@@ -6845,9 +6845,11 @@ def page_intraday_logs():
         "the live engine recorded at the time -- ground truth, never "
         "reconstructed. For 'watching' (no signal ever formed) and "
         "'invalidated' rows, which don't have a persisted reason of their "
-        "own, the candle-by-candle trace below is RECONSTRUCTED after the "
-        "fact from historical candle data, replaying the exact same rules "
-        "the live engine used. Rare caveat: the data provider can settle "
+        "own, the one-line verdict shown is RECONSTRUCTED after the fact "
+        "from historical candle data, replaying the exact same rules the "
+        "live engine used -- nothing is persisted to the DB for this, "
+        "recomputed fresh each time you view the page. Rare caveat: the "
+        "data provider can settle a very recent candle's own values "
         "a very recent candle's own values (closing price, volume) "
         "slightly differently than what the live engine saw in real "
         "time -- for a value that sat right at a pass/fail threshold, "
@@ -6954,21 +6956,16 @@ def page_intraday_logs():
             # status is 'watching' (no signal ever formed, still open as of
             # the selected date) or 'invalidated' with no reason of its own
             # persisted anywhere -- reconstruct from historical candles.
+            # End-of-day summary only (diag["trace"]'s full candle-by-candle
+            # detail is still computed internally to derive this verdict,
+            # but deliberately not rendered -- nothing here is persisted to
+            # the DB either way, this is purely keeping the page itself
+            # uncluttered).
             diag = _diagnose_candidate(sym, date_str, direction)
             if diag is None:
                 st.caption("Couldn't fetch candle data to reconstruct this one right now.")
                 continue
             st.markdown(f"**Reconstructed verdict:** {diag['outcome']['detail']}")
-            if diag["trace"]:
-                with st.expander(f"Candle-by-candle trace ({len(diag['trace'])}) — reconstructed"):
-                    trace_df = pd.DataFrame(diag["trace"])
-                    trace_df["time"] = trace_df["time"].apply(lambda t: t.strftime("%H:%M"))
-                    st.markdown(
-                        _ov_table_html(
-                            trace_df, columns=["time", "stage", "result", "reason"],
-                            badges={"result": {"ok": "ov-badge-green", "triggered": "ov-badge-green",
-                                              "fail": "ov-badge-gray"}}),
-                        unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
