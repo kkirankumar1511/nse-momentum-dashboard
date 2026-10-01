@@ -6793,6 +6793,185 @@ def page_intraday_dashboard():
 
 
 # ---------------------------------------------------------------------------
+# Page: Intraday Logs -- per-candidate, per-day "why did/didn't this
+# qualify" record.
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _diagnose_candidate(symbol: str, date_str: str, direction: str) -> dict | None:
+    """Reconstructs istrat.diagnose_day()'s candle-by-candle trace for one
+    symbol/day, fetching the same inputs intraday_engine.py's own tracker
+    construction does (see run_live()) -- EMA21/ATR14 continuous series,
+    the day's 09:15 candle, the 09:20+09:25 one-sided-gate reference
+    range. Uses _INTRADAY_CHART_WARMUP_DAYS (45), not the live engine's
+    full EMA_WARMUP_DAYS=120 -- same display-only tradeoff already made
+    for the chart above (EMA21 is well-converged well before 45 days),
+    traded for responsiveness here since this can run once per candidate
+    per page view. Cached 60s so flipping between candidates/re-viewing
+    the same date doesn't refetch Kite every rerun.
+
+    Returns None if the candle data couldn't be fetched (e.g. a genuine
+    API hiccup) -- the caller shows a plain "couldn't reconstruct" note
+    rather than a wrong/empty trace."""
+    try:
+        hist = kite_client.fetch_intraday_candles(symbol, days=_INTRADAY_CHART_WARMUP_DAYS,
+                                                   interval="5minute")
+        ema21_series = istrat.ema21(hist["close"])
+        atr14_series = istrat.atr14(hist)
+        date = pd.Timestamp(date_str).date()
+        today_so_far = hist[hist.index.normalize() == pd.Timestamp(date)]
+        if today_so_far.empty:
+            return None
+        fc = today_so_far.iloc[0]
+        c20 = today_so_far.loc[today_so_far.index == pd.Timestamp(date) + pd.Timedelta(hours=9, minutes=20)]
+        c25 = today_so_far.loc[today_so_far.index == pd.Timestamp(date) + pd.Timedelta(hours=9, minutes=25)]
+        if c20.empty or c25.empty:
+            sig_range_low, sig_range_high = None, None
+        else:
+            sig_range_low = min(float(c20.iloc[0]["low"]), float(c25.iloc[0]["low"]))
+            sig_range_high = max(float(c20.iloc[0]["high"]), float(c25.iloc[0]["high"]))
+        return istrat.diagnose_day(today_so_far, direction, ema21_series, atr14_series,
+                                   float(fc["low"]), float(fc["high"]), sig_range_low, sig_range_high)
+    except Exception as e:
+        print(f"[_diagnose_candidate] {symbol}/{date_str}: {e}", flush=True)
+        return None
+
+
+def page_intraday_logs():
+    _tip = html_lib.escape(
+        "Per-candidate, per-day record of why each symbol did or didn't "
+        "qualify for a signal/entry. The status badge and its detail for "
+        "'traded' and 'sector_gate_failed' rows is always the REAL outcome "
+        "the live engine recorded at the time -- ground truth, never "
+        "reconstructed. For 'watching' (no signal ever formed) and "
+        "'invalidated' rows, which don't have a persisted reason of their "
+        "own, the candle-by-candle trace below is RECONSTRUCTED after the "
+        "fact from historical candle data, replaying the exact same rules "
+        "the live engine used. Rare caveat: the data provider can settle "
+        "a very recent candle's own values (closing price, volume) "
+        "slightly differently than what the live engine saw in real "
+        "time -- for a value that sat right at a pass/fail threshold, "
+        "this reconstruction can occasionally show a different verdict "
+        "than what actually happened live. Everything else here matches.")
+    st.markdown(
+        '<div class="ov-header"><div><span class="ov-h1">🧾 Intraday Logs</span>'
+        f'<span class="ov-info-icon" title="{_tip}">ℹ️</span></div></div>',
+        unsafe_allow_html=True)
+
+    picked_date = st.date_input("Date", value=dt.date.today(), key="intraday_logs_date")
+    date_str = picked_date.isoformat()
+
+    day = idb.get_day(date_str)
+    if day is None:
+        st.info(f"No scan recorded for {date_str} -- a non-trading day, or the engine "
+               "hasn't run for it (yet, or at all).")
+        return
+
+    st.markdown(
+        '<div class="ov-grid-metrics">'
+        + _ov_metric_html("Day bias", day["day_bias"] or "No trade", f"NIFTY ratio {day['nifty_ratio']:.2f}",
+                         "", "blue")
+        + _ov_metric_html("NIFTY 50 breadth", f"{day['advancers']} / {day['decliners']}",
+                         "advancers / decliners", "", "teal")
+        + '</div>', unsafe_allow_html=True)
+
+    if not day["day_bias"]:
+        st.info("Day bias was None (ratio gate skipped the day entirely) -- no candidates, "
+               "no trades possible.")
+        return
+
+    candidates = idb.get_candidates(date_str)
+    if candidates.empty:
+        st.info("No candidates recorded for this date.")
+        return
+
+    direction = istrat.LONG if day["day_bias"] == "LONG" else istrat.SHORT
+    signals = idb.get_signals(date_str)
+    positions = idb.get_positions(date=date_str)
+    legs = idb.get_legs(date=date_str)
+
+    _status_badge = {"watching": "ov-badge-amber", "invalidated": "ov-badge-gray",
+                     "sector_gate_failed": "ov-badge-red", "day_slots_filled": "ov-badge-gray",
+                     "traded": "ov-badge-green"}
+
+    for _, c in candidates.iterrows():
+        sym = c["symbol"]
+        sym_signals = signals[signals["symbol"] == sym] if not signals.empty else signals
+        sym_positions = positions[positions["symbol"] == sym] if not positions.empty else positions
+        sym_legs = (legs[legs["symbol"] == sym] if not legs.empty and "symbol" in legs.columns
+                   else pd.DataFrame())
+        # intraday_daily_selection's own status column is never actually
+        # written as "traded" (mark_candidate_status()'s real call sites
+        # are only invalidated/sector_gate_failed/day_slots_filled -- a
+        # candidate that opens a real position just stays "watching"
+        # there forever). A real position record is the actual ground
+        # truth for "did this trade", independent of that column's text.
+        status = "traded" if not sym_positions.empty else c["status"]
+
+        # Ground-truth detail for the statuses the real records already
+        # fully explain -- never reconstructed.
+        detail = None
+        if status == "traded":
+            p = sym_positions.iloc[0]
+            leg_bits = [
+                f"{l['leg_type']} {int(l['qty'])}@₹{l['exit_price']:.2f} ({l['net_pnl']:+,.2f})"
+                for _, l in sym_legs.sort_values("exit_time").iterrows()] if not sym_legs.empty else []
+            detail = (f"{p['direction']} qty {int(p['qty'])} @ ₹{p['entry_price']:.2f} "
+                     f"(signal {pd.Timestamp(p['signal_time']):%H:%M}, "
+                     f"entry {pd.Timestamp(p['entry_time']):%H:%M}) — "
+                     + (" · ".join(leg_bits) if leg_bits else "still open"))
+        elif status == "sector_gate_failed":
+            ratio_txt = f"{c['sector_ratio']:.2f}" if pd.notna(c["sector_ratio"]) else "no data"
+            detail = (f"{c['sector'] or 'unresolved sector'}, ratio {ratio_txt} "
+                     f"didn't confirm {direction} (needs ≥2.0 for LONG / ≤0.5 for SHORT)")
+        elif status == "day_slots_filled":
+            detail = (f"Breakout triggered, but MAX_TRADES_PER_DAY ({istrat.MAX_TRADES_PER_DAY}) "
+                     "was already used by other candidates ranked ahead of this one that day.")
+
+        with st.container(border=True, key=f"ov-card-ilog-{sym}"):
+            h1, h2 = st.columns([3, 5])
+            with h1:
+                st.markdown(
+                    f'<p class="ov-card-title" style="border-bottom:0;margin-bottom:4px;">'
+                    f'<span class="ov-sym">#{int(c["rank"])} {sym}</span> '
+                    f'<span class="ov-badge {_status_badge.get(status, "ov-badge-gray")}">{status}</span>'
+                    f'</p>', unsafe_allow_html=True)
+            with h2:
+                if detail:
+                    st.caption(detail)
+
+            if detail is not None:
+                if not sym_signals.empty:
+                    with st.expander(f"Signal history ({len(sym_signals)}) — real recorded events"):
+                        st.markdown(
+                            _ov_table_html(sym_signals, sym_cols=["symbol"],
+                                          num_fmt={"signal_high": "₹{:.2f}", "signal_low": "₹{:.2f}",
+                                                  "signal_atr": "{:.2f}"},
+                                          badges={"status": _INTRADAY_EVENT_BADGES}),
+                            unsafe_allow_html=True)
+                continue
+
+            # status is 'watching' (no signal ever formed, still open as of
+            # the selected date) or 'invalidated' with no reason of its own
+            # persisted anywhere -- reconstruct from historical candles.
+            diag = _diagnose_candidate(sym, date_str, direction)
+            if diag is None:
+                st.caption("Couldn't fetch candle data to reconstruct this one right now.")
+                continue
+            st.markdown(f"**Reconstructed verdict:** {diag['outcome']['detail']}")
+            if diag["trace"]:
+                with st.expander(f"Candle-by-candle trace ({len(diag['trace'])}) — reconstructed"):
+                    trace_df = pd.DataFrame(diag["trace"])
+                    trace_df["time"] = trace_df["time"].apply(lambda t: t.strftime("%H:%M"))
+                    st.markdown(
+                        _ov_table_html(
+                            trace_df, columns=["time", "stage", "result", "reason"],
+                            badges={"result": {"ok": "ov-badge-green", "triggered": "ov-badge-green",
+                                              "fail": "ov-badge-gray"}}),
+                        unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
 # Page: Intraday Tradebook
 # ---------------------------------------------------------------------------
 
@@ -7607,6 +7786,7 @@ page_admin_p = st.Page(page_admin, title="Admin", icon="⚙️")
 page_guide_p = st.Page(page_guide, title="Guide", icon="📘")
 page_intraday_dashboard_p = st.Page(page_intraday_dashboard, title="Intraday Dashboard", icon="⚡", default=True)
 page_intraday_tradebook_p = st.Page(page_intraday_tradebook, title="Intraday Tradebook", icon="📒")
+page_intraday_logs_p = st.Page(page_intraday_logs, title="Intraday Logs", icon="🧾")
 
 # Injected before the sidebar (not per-page) so every page -- not just
 # Overview, where this design system started -- gets the same compact
@@ -7638,6 +7818,7 @@ with st.sidebar:
     st.markdown('<p class="ov-side-label">Audit Trail</p>', unsafe_allow_html=True)
     st.page_link(page_tradebook_p)
     st.page_link(page_intraday_tradebook_p)
+    st.page_link(page_intraday_logs_p)
     st.page_link(page_job_log_p)
     st.page_link(page_rebalance_history_p)
 
@@ -7763,5 +7944,6 @@ nav = st.navigation([page_cockpit_p, page_live_rebalance_p, page_positions_trade
                     page_screener_p, page_fundamentals_p, page_tradebook_p,
                     page_job_log_p, page_rebalance_history_p, page_backtest_p,
                     page_admin_p, page_ledger_p, page_guide_p,
-                    page_intraday_dashboard_p, page_intraday_tradebook_p], position="hidden")
+                    page_intraday_dashboard_p, page_intraday_tradebook_p,
+                    page_intraday_logs_p], position="hidden")
 nav.run()

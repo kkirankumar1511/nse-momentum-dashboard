@@ -467,6 +467,178 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
     return None
 
 
+def diagnose_day(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
+                 atr14_series: pd.Series, first_candle_low: float,
+                 first_candle_high: float, sig_range_low: float | None = None,
+                 sig_range_high: float | None = None) -> dict:
+    """Read-only diagnostic twin of find_entry() -- walks the IDENTICAL
+    §3.2/§5l loop, candle-by-candle-for-candle, but instead of stopping at
+    the first trigger, records WHY every candle that didn't advance the
+    state machine failed to, and ends with a synthesized plain-English
+    final outcome. Built for the Intraday Logs page's "why didn't/did
+    this candidate trade today" view -- pure reconstruction from the same
+    real candle data + rules find_entry()/step_candle() themselves use,
+    no DB writes, no effect on the live engine or its state.
+
+    Deliberately kept as a SEPARATE function rather than adding a
+    trace-collecting flag to find_entry() -- that function is the one
+    backtest.py actually calls for real P&L, and every added branch here
+    is a branch that function doesn't need to carry just to explain
+    itself after the fact.
+
+    Returns {"trace": [...], "outcome": {...}}:
+      trace: one dict per evaluated candle, {"time", "stage", "result"
+        ("ok"/"fail"/"triggered"), "reason", plus the raw OHLCV/checks
+        that produced it} -- "stage" is "invalidation", "continuation"
+        (checking an active signal's window candle), or "fresh" (checking
+        whether this candle becomes a new signal).
+      outcome: {"type", "detail", ...} where type is one of:
+        "invalidated", "triggered", "expired_no_retrigger" (a signal
+        formed and died, nothing else ever qualified after it),
+        "no_signal_all_day" (not invalidated, but nothing EVER passed
+        the fresh-signal checks), "empty" (no candles in the window at
+        all, e.g. a holiday/data gap).
+    """
+    win = day.between_time(SIGNAL_WINDOW_START, SIGNAL_WINDOW_END)
+    trace: list[dict] = []
+    if win.empty:
+        return {"trace": trace, "outcome": {"type": "empty", "detail": "No candles in the signal window."}}
+
+    day_open_ts = win.index[0].normalize() + pd.Timedelta(hours=9, minutes=15)
+    vol_so_far_full = day.loc[day.index >= day_open_ts, "volume"]
+
+    active_signal = None
+    breakout_counter = 0
+    any_signal_ever = False
+    last_signal_death: dict | None = None  # {"time", "reason"} of the most recent expiry
+
+    for ts, row in win.iterrows():
+        sig_atr = atr14_series.get(ts)
+        e21 = ema21_series.get(ts)
+        invalidated_now = False
+        inval_reason = None
+        if pd.notna(e21):
+            if direction == LONG and row["close"] < e21:
+                invalidated_now, inval_reason = True, f"closed {row['close']:.2f} below EMA21 {e21:.2f}"
+            elif direction == SHORT and row["close"] > e21:
+                invalidated_now, inval_reason = True, f"closed {row['close']:.2f} above EMA21 {e21:.2f}"
+        if not invalidated_now:
+            if direction == LONG and row["close"] < first_candle_low:
+                invalidated_now = True
+                inval_reason = f"closed {row['close']:.2f} below the day's 09:15 low {first_candle_low:.2f}"
+            elif direction == SHORT and row["close"] > first_candle_high:
+                invalidated_now = True
+                inval_reason = f"closed {row['close']:.2f} above the day's 09:15 high {first_candle_high:.2f}"
+        if invalidated_now:
+            trace.append({"time": ts, "stage": "invalidation", "result": "fail", "reason": inval_reason})
+            return {"trace": trace, "outcome": {"type": "invalidated", "time": ts, "detail": inval_reason}}
+
+        if active_signal is not None:
+            breakout_counter += 1
+            buf = active_signal["atr"] * ATR_PCT_BUFFER
+            if direction == LONG:
+                trigger_level = active_signal["hi"] + buf
+                triggered = row["high"] >= trigger_level
+            else:
+                trigger_level = active_signal["lo"] - buf
+                triggered = row["low"] <= trigger_level
+            if triggered:
+                stop_price = ((active_signal["lo"] - buf) if direction == LONG
+                             else (active_signal["hi"] + buf))
+                reason = (f"triggered on window candle #{breakout_counter} -- "
+                         f"{'high' if direction == LONG else 'low'} crossed "
+                         f"{trigger_level:.2f} (signal from {active_signal['time']:%H:%M})")
+                trace.append({"time": ts, "stage": "continuation", "result": "triggered", "reason": reason})
+                return {"trace": trace, "outcome": {
+                    "type": "triggered", "signal_time": active_signal["time"], "entry_time": ts,
+                    "entry_price": trigger_level, "stop_price": stop_price, "detail": reason}}
+
+            confirm_is_green = row["close"] > row["open"]
+            confirm_is_red = row["close"] < row["open"]
+            wants_confirm_color = confirm_is_green if direction == LONG else confirm_is_red
+            volume_ok = row["volume"] < active_signal["volume"]
+            range_ok = row["high"] <= active_signal["hi"] and row["low"] >= active_signal["lo"]
+            gate_ok = (breakout_counter < BREAKOUT_WINDOW
+                      and wants_confirm_color and volume_ok and range_ok)
+            if gate_ok:
+                trace.append({"time": ts, "stage": "continuation", "result": "ok",
+                            "reason": f"window candle #{breakout_counter} kept the "
+                                     f"{active_signal['time']:%H:%M} signal alive"})
+                continue
+
+            fails = []
+            if breakout_counter >= BREAKOUT_WINDOW:
+                fails.append(f"{BREAKOUT_WINDOW}-candle breakout window exhausted")
+            else:
+                if not wants_confirm_color:
+                    fails.append("wrong confirming color")
+                if not volume_ok:
+                    fails.append(f"volume {row['volume']:,.0f} not below signal's "
+                                f"{active_signal['volume']:,.0f}")
+                if not range_ok:
+                    fails.append("high/low broke outside the signal candle's own range")
+            dead_reason = (f"{active_signal['time']:%H:%M} signal died: " + "; ".join(fails))
+            trace.append({"time": ts, "stage": "continuation", "result": "fail", "reason": dead_reason})
+            last_signal_death = {"time": ts, "reason": dead_reason}
+            active_signal = None
+            breakout_counter = 0
+            # falls through to the fresh check below -- §5l, no re-signal
+
+        if active_signal is None:
+            if ts.time() > NEW_SIGNAL_CUTOFF:
+                trace.append({"time": ts, "stage": "fresh", "result": "fail",
+                            "reason": f"past the {NEW_SIGNAL_CUTOFF:%H:%M} new-signal cutoff"})
+                continue
+            is_red = row["close"] < row["open"]
+            is_green = row["close"] > row["open"]
+            wants_color = is_red if direction == LONG else is_green
+            vol_min_so_far = vol_so_far_full.loc[:ts].min()
+            is_lowest_volume = row["volume"] <= vol_min_so_far * (1 + VOL_THRESHOLD_PCT)
+            in_range = signal_in_range(direction, float(row["open"]), float(row["close"]),
+                                       sig_range_low, sig_range_high)
+            atr_ok = pd.notna(sig_atr) and sig_atr > 0
+            if wants_color and is_lowest_volume and in_range and atr_ok:
+                any_signal_ever = True
+                active_signal = {"time": ts, "hi": float(row["high"]), "lo": float(row["low"]),
+                                 "atr": sig_atr, "volume": float(row["volume"]),
+                                 "signal_close": float(row["close"])}
+                breakout_counter = 0
+                trace.append({"time": ts, "stage": "fresh", "result": "ok",
+                            "reason": f"new {'LONG' if direction == LONG else 'SHORT'} "
+                                     f"signal candle (H {row['high']:.2f} / L {row['low']:.2f})"})
+                continue
+
+            fails = []
+            if not wants_color:
+                fails.append(f"wrong color (need {'red' if direction == LONG else 'green'})")
+            if not is_lowest_volume:
+                fails.append(f"volume {row['volume']:,.0f} not the day's lowest "
+                            f"(so-far min {vol_min_so_far:,.0f})")
+            if not in_range:
+                if sig_range_low is None or sig_range_high is None:
+                    fails.append("one-sided gate reference range unavailable (fails closed)")
+                elif direction == LONG:
+                    body_lo = min(row["open"], row["close"])
+                    fails.append(f"body low {body_lo:.2f} dipped below the one-sided gate's "
+                                f"floor {sig_range_low:.2f} (09:20/09:25 reference)")
+                else:
+                    body_hi = max(row["open"], row["close"])
+                    fails.append(f"body high {body_hi:.2f} rose above the one-sided gate's "
+                                f"ceiling {sig_range_high:.2f} (09:20/09:25 reference)")
+            if not atr_ok:
+                fails.append("ATR unavailable")
+            trace.append({"time": ts, "stage": "fresh", "result": "fail", "reason": "; ".join(fails)})
+
+    if any_signal_ever:
+        outcome = {"type": "expired_no_retrigger",
+                  "detail": (last_signal_death["reason"] if last_signal_death
+                            else "Signal(s) formed but none ever triggered.")}
+    else:
+        outcome = {"type": "no_signal_all_day",
+                  "detail": "No candle today ever qualified as a fresh signal candle."}
+    return {"trace": trace, "outcome": outcome}
+
+
 # ---------------------------------------------------------------------------
 # Incremental (candle-by-candle) version of find_entry()'s walk-forward
 # loop -- for live/paper use, where candles arrive one at a time rather
