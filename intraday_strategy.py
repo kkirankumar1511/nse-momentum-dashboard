@@ -198,6 +198,20 @@ def choose_trail_ema(direction: str, target: float, ema10: float | None) -> int 
     return TRAIL_EMA_SLOW if target < ema10 else None
 
 
+def signal_trend_ok(direction: str, close: float, ema50: float | None) -> bool:
+    """v5.4 §5m -- the signal candle must close on the trend side of
+    EMA50 (5-min, continuous, span=50, min_periods=50): LONG needs
+    close > EMA50, SHORT needs close < EMA50. A symbol with fewer than
+    50 candles of history (NaN EMA50) fails closed -- REJECTS the
+    signal rather than passing it, same fail-closed convention as
+    signal_in_range(). Supersedes §5l as the adopted configuration --
+    6-year-consistent but a light touch (spec's own measured bound: 69
+    of ~5,900 evaluated signals skipped, 6 fewer positions overall)."""
+    if ema50 is None or pd.isna(ema50):
+        return False
+    return close > ema50 if direction == LONG else close < ema50
+
+
 def trail_crossed(direction: str, close: float, ema: float | None) -> bool:
     """v5.2 §1 step 3 -- a candle's own close vs that same candle's own
     EMA (both known simultaneously at candle close): LONG crosses when
@@ -325,7 +339,8 @@ def signal_in_range(direction: str, open_: float, close: float,
 def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
                atr14_series: pd.Series, first_candle_low: float,
                first_candle_high: float, sig_range_low: float | None = None,
-               sig_range_high: float | None = None) -> dict | None:
+               sig_range_high: float | None = None,
+               ema50_series: pd.Series | None = None) -> dict | None:
     """Spec v2 §3.2's walk-forward loop, for one candidate on one day.
 
     `day`: that symbol's 5-min OHLCV candles for the day, indexed by
@@ -335,6 +350,12 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
     `first_candle_low`/`first_candle_high`: the day's very first (09:15)
     candle's own low/high, captured once before this loop runs (§3.2 v2
     step 1b) -- a fixed value for the whole day, not looked up per candle.
+    `ema50_series`: v5.4 §5m's trend filter on the signal candle, same
+    continuous-series/lookup-by-timestamp convention as ema21_series.
+    None disables the filter entirely (pre-§5m behavior) -- pass a real
+    series (strat.ema_n(close, 50)) to turn it on; a real series with a
+    NaN value at a given timestamp (not enough history yet) still fails
+    that candle closed, same as a missing sig_range.
     `sig_range_low`/`sig_range_high`: v5.4 §5i.1's one-sided signal gate
     reference range (09:20+09:25 candles), also fixed for the whole day.
     None disables signal formation entirely for this call (fail-closed,
@@ -451,7 +472,14 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
             is_lowest_volume = row["volume"] <= vol_min_so_far * (1 + VOL_THRESHOLD_PCT)
             in_range = signal_in_range(direction, float(row["open"]), float(row["close"]),
                                        sig_range_low, sig_range_high)
-            if wants_color and is_lowest_volume and in_range and pd.notna(sig_atr) and sig_atr > 0:
+            # v5.4 §5m -- trend_ok defaults to True (filter off) when no
+            # ema50_series is given at all, matching the spec's own
+            # --trend-filter=off toggle; once a series IS given, a NaN
+            # value (not enough history) fails this candle closed.
+            trend_ok = (signal_trend_ok(direction, float(row["close"]), ema50_series.get(ts))
+                       if ema50_series is not None else True)
+            if (wants_color and is_lowest_volume and in_range and trend_ok
+                    and pd.notna(sig_atr) and sig_atr > 0):
                 # float(...) on every field here, not just open/close above --
                 # a candle whose OHLCV all happen to be whole numbers (no
                 # paise) gets fetched as an int64 dtype column, and a raw
@@ -470,9 +498,10 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
 def diagnose_day(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
                  atr14_series: pd.Series, first_candle_low: float,
                  first_candle_high: float, sig_range_low: float | None = None,
-                 sig_range_high: float | None = None) -> dict:
+                 sig_range_high: float | None = None,
+                 ema50_series: pd.Series | None = None) -> dict:
     """Read-only diagnostic twin of find_entry() -- walks the IDENTICAL
-    §3.2/§5l loop, candle-by-candle-for-candle, but instead of stopping at
+    §3.2/§5l/§5m loop, candle-by-candle-for-candle, but instead of stopping at
     the first trigger, records WHY every candle that didn't advance the
     state machine failed to, and ends with a synthesized plain-English
     final outcome. Built for the Intraday Logs page's "why didn't/did
@@ -597,7 +626,9 @@ def diagnose_day(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
             in_range = signal_in_range(direction, float(row["open"]), float(row["close"]),
                                        sig_range_low, sig_range_high)
             atr_ok = pd.notna(sig_atr) and sig_atr > 0
-            if wants_color and is_lowest_volume and in_range and atr_ok:
+            e50 = ema50_series.get(ts) if ema50_series is not None else None
+            trend_ok = True if e50 is None else signal_trend_ok(direction, float(row["close"]), e50)
+            if wants_color and is_lowest_volume and in_range and trend_ok and atr_ok:
                 any_signal_ever = True
                 active_signal = {"time": ts, "hi": float(row["high"]), "lo": float(row["low"]),
                                  "atr": sig_atr, "volume": float(row["volume"]),
@@ -625,6 +656,12 @@ def diagnose_day(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
                     body_hi = max(row["open"], row["close"])
                     fails.append(f"body high {body_hi:.2f} rose above the one-sided gate's "
                                 f"ceiling {sig_range_high:.2f} (09:20/09:25 reference)")
+            if not trend_ok:
+                if ema50_series is not None and pd.isna(e50):
+                    fails.append("EMA50 unavailable (fewer than 50 candles of history)")
+                else:
+                    fails.append(f"close {row['close']:.2f} on the wrong side of EMA50 "
+                                f"{e50:.2f} (§5m trend filter)")
             if not atr_ok:
                 fails.append("ATR unavailable")
             trace.append({"time": ts, "stage": "fresh", "result": "fail", "reason": "; ".join(fails)})
@@ -658,7 +695,8 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
                 sig_atr: float | None, vol_min_so_far: float,
                 first_candle_low: float, first_candle_high: float,
                 sig_range_low: float | None = None,
-                sig_range_high: float | None = None) -> tuple[dict, dict | None]:
+                sig_range_high: float | None = None,
+                e50: float | None = None) -> tuple[dict, dict | None]:
     """One incremental step of the §3.2 walk-forward loop. Does NOT
     mutate `state` -- returns a new state dict (caller keeps its own
     running copy, e.g. one per candidate per day).
@@ -672,6 +710,14 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     `first_candle_low`/`first_candle_high`: the day's 09:15 candle's own
     low/high (v2 §3.2 step 1b) -- fixed for the whole day, the caller
     captures it once and passes the same value on every call.
+    `e50`: v5.4 §5m's trend filter on the signal candle -- this candle's
+    own EMA50 value. Python `None` (the default) means the filter is OFF
+    entirely (pre-§5m behavior, matching find_entry()'s own ema50_series
+    =None convention); a real NaN (e.g. `float("nan")`, what a pandas
+    lookup actually returns for a timestamp before 50 candles of history
+    exist) means the filter IS on but unavailable for this candle, which
+    fails it closed -- `None` and NaN are deliberately distinguishable
+    here (`x is None` vs `pd.isna(x)`), not the same "missing" bucket.
     `sig_range_low`/`sig_range_high`: v5.4 §5i.1's one-sided signal gate
     reference range (09:20+09:25 candles), also fixed for the whole day.
     None fails closed -- see signal_in_range().
@@ -788,7 +834,11 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     is_lowest_volume = row["volume"] <= vol_min_so_far * (1 + VOL_THRESHOLD_PCT)
     in_range = signal_in_range(direction, float(row["open"]), float(row["close"]),
                                sig_range_low, sig_range_high)
-    if wants_color and is_lowest_volume and in_range and pd.notna(sig_atr) and sig_atr > 0:
+    # v5.4 §5m -- e50=None means the filter is off entirely; a real NaN
+    # (filter on, not enough history yet) fails this candle closed. See
+    # this function's own docstring for the None-vs-NaN distinction.
+    trend_ok = True if e50 is None else signal_trend_ok(direction, float(row["close"]), e50)
+    if wants_color and is_lowest_volume and in_range and trend_ok and pd.notna(sig_atr) and sig_atr > 0:
         # float(...) throughout -- see find_entry()'s matching comment:
         # an all-whole-number OHLCV candle (int64 dtype) silently
         # serializes to a BLOB instead of a number if a raw numpy.int64

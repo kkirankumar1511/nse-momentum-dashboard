@@ -6818,6 +6818,13 @@ def _diagnose_candidate(symbol: str, date_str: str, direction: str) -> dict | No
                                                    interval="5minute")
         ema21_series = istrat.ema21(hist["close"])
         atr14_series = istrat.atr14(hist)
+        # v5.4 §5m -- must match intraday_engine.py's own tracker
+        # construction (same strat.ema_n(hist["close"], 50) call) so this
+        # reconstruction's verdict reflects the SAME rule the live engine
+        # actually traded under -- an un-filtered reconstruction would
+        # claim some invalidated/no-signal days should have formed a
+        # signal when the real §5m-aware engine correctly blocked it.
+        ema50_series = istrat.ema_n(hist["close"], 50)
         date = pd.Timestamp(date_str).date()
         today_so_far = hist[hist.index.normalize() == pd.Timestamp(date)]
         if today_so_far.empty:
@@ -6831,7 +6838,8 @@ def _diagnose_candidate(symbol: str, date_str: str, direction: str) -> dict | No
             sig_range_low = min(float(c20.iloc[0]["low"]), float(c25.iloc[0]["low"]))
             sig_range_high = max(float(c20.iloc[0]["high"]), float(c25.iloc[0]["high"]))
         return istrat.diagnose_day(today_so_far, direction, ema21_series, atr14_series,
-                                   float(fc["low"]), float(fc["high"]), sig_range_low, sig_range_high)
+                                   float(fc["low"]), float(fc["high"]), sig_range_low, sig_range_high,
+                                   ema50_series=ema50_series)
     except Exception as e:
         print(f"[_diagnose_candidate] {symbol}/{date_str}: {e}", flush=True)
         return None

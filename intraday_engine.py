@@ -236,12 +236,19 @@ class CandidateTracker:
                 first_candle_low: float, first_candle_high: float,
                 rank: int, sector: str | None = None, sector_ratio: float | None = None,
                 sector_gate_pass: bool = False, sig_range_low: float | None = None,
-                sig_range_high: float | None = None):
+                sig_range_high: float | None = None, ema50_series: pd.Series | None = None):
         self.date = date
         self.symbol = symbol
         self.direction = direction
         self.ema21_series = ema21_series
         self.atr14_series = atr14_series
+        # v5.4 §5m -- the signal candle's own trend filter. None (not
+        # just an all-NaN series) would mean "filter off" to step_candle()
+        # -- run_live() always builds a real series (see tracker
+        # construction below), so this is adopted/on for every live
+        # tracker; kept as a constructor default only so other callers
+        # (tests) aren't forced to supply one.
+        self.ema50_series = ema50_series
         # v3 Spec §4 -- this candidate's rank in the day's top-5 pool,
         # used ONLY to break ties when two-or-more candidates confirm a
         # breakout at the exact same candle timestamp (lower rank wins).
@@ -318,10 +325,11 @@ def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series) 
         return None
     e21 = tracker.ema21_series.get(ts)
     sig_atr = tracker.atr14_series.get(ts)
+    e50 = tracker.ema50_series.get(ts) if tracker.ema50_series is not None else None
     new_state, event = strat.step_candle(
         tracker.signal_state, ts, row, tracker.direction, e21, sig_atr, tracker.vol_min_so_far,
         tracker.first_candle_low, tracker.first_candle_high,
-        tracker.sig_range_low, tracker.sig_range_high)
+        tracker.sig_range_low, tracker.sig_range_high, e50=e50)
     tracker.signal_state = new_state
 
     if event is None:
@@ -906,6 +914,13 @@ def run_live(mode: str = "paper") -> None:
         hist = kite_client.fetch_intraday_candles(sym, days=EMA_WARMUP_DAYS, interval="5minute")
         ema21_series = strat.ema21(hist["close"])
         atr14_series = strat.atr14(hist)
+        # v5.4 §5m (adopted, supersedes §5l) -- the signal candle must
+        # also close on the trend side of EMA50. EMA_WARMUP_DAYS=120 is
+        # ~9,000 5-min candles, comfortably past the 50-candle min_periods
+        # for any symbol with at least a few hours of trading history, so
+        # this only ever fails closed (NaN) in a genuinely new listing's
+        # first day or two.
+        ema50_series = strat.ema_n(hist["close"], 50)
         today_so_far = hist[hist.index.normalize() == pd.Timestamp(today)]
         # v2 Spec §3.2 step 1b -- the day's very first (09:15) candle's
         # own low/high, captured once, fixed for the whole day.
@@ -936,7 +951,8 @@ def run_live(mode: str = "paper") -> None:
                             first_candle_low, first_candle_high, c["rank"],
                             sector=c.get("sector"), sector_ratio=c.get("sector_ratio"),
                             sector_gate_pass=c.get("sector_gate_pass", False),
-                            sig_range_low=sig_range_low, sig_range_high=sig_range_high)
+                            sig_range_low=sig_range_low, sig_range_high=sig_range_high,
+                            ema50_series=ema50_series)
         t.hist = hist
         # Seed the running vol-min from today's pre-window candles (09:15-
         # 09:30) -- see step_candle()'s docstring; the running min starts
@@ -1085,6 +1101,15 @@ def run_live(mode: str = "paper") -> None:
                     t.hist = _closed_only(t.hist, boundary)  # no look-ahead: never a forming candle
                     t.ema21_series = strat.ema21(t.hist["close"])
                     t.atr14_series = strat.atr14(t.hist)
+                    # v5.4 §5m -- same frozen-snapshot bug class as the
+                    # ema21/atr14 refresh above (2026-09-16 YESBANK fix):
+                    # without refreshing this too, ema50_series would stay
+                    # pinned to its 09:15-ish initial snapshot all day,
+                    # silently going stale (though its own NaN-fails-closed
+                    # behavior means staleness here would block signals
+                    # rather than wrongly admit them -- still wrong, just a
+                    # safer failure direction than the original bug).
+                    t.ema50_series = strat.ema_n(t.hist["close"], 50)
                     row = row_df.iloc[0]
                     t.vol_min_so_far = (row["volume"] if t.vol_min_so_far is None
                                        else min(t.vol_min_so_far, row["volume"]))
