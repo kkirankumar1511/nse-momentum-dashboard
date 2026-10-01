@@ -277,11 +277,20 @@ def update_candidate_sector_gate(date: str, symbol: str, sector: str | None,
 
 def create_signal(date: str, symbol: str, signal_time: str, signal_high: float,
                   signal_low: float, signal_atr: float) -> int:
+    # Defense-in-depth float() cast, on top of the callers already casting
+    # their own candle-derived values: a raw numpy.int64 (unlike
+    # numpy.float64) silently serializes to a BLOB instead of a REAL via
+    # sqlite3's bind parameters rather than erroring -- hit live
+    # (2026-10-01, BAJAJ-AUTO: that day's OHLCV all happened to be whole
+    # numbers, fetched as an int64 dtype column) and corrupted
+    # signal_high/signal_low until the next read crashed the dashboard.
+    # float() on a plain Python float is a no-op, so this is free for
+    # every normal (already-float) call.
     conn = get_conn()
     cur = conn.execute(
         "INSERT INTO intraday_signals (date, symbol, signal_time, signal_high, "
         "signal_low, signal_atr) VALUES (?, ?, ?, ?, ?, ?)",
-        (date, symbol, signal_time, signal_high, signal_low, signal_atr))
+        (date, symbol, signal_time, float(signal_high), float(signal_low), float(signal_atr)))
     signal_id = cur.lastrowid
     conn.commit()
     conn.close()

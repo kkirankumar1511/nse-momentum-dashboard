@@ -452,8 +452,16 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
             in_range = signal_in_range(direction, float(row["open"]), float(row["close"]),
                                        sig_range_low, sig_range_high)
             if wants_color and is_lowest_volume and in_range and pd.notna(sig_atr) and sig_atr > 0:
-                active_signal = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
-                                 "volume": row["volume"], "signal_close": row["close"]}
+                # float(...) on every field here, not just open/close above --
+                # a candle whose OHLCV all happen to be whole numbers (no
+                # paise) gets fetched as an int64 dtype column, and a raw
+                # numpy.int64 (unlike numpy.float64) silently serializes to
+                # a BLOB instead of a number if this dict's values ever
+                # reach sqlite3 unwrapped (verified live: BAJAJ-AUTO,
+                # 2026-10-01, every OHLC value a round number that day).
+                active_signal = {"time": ts, "hi": float(row["high"]), "lo": float(row["low"]),
+                                 "atr": sig_atr, "volume": float(row["volume"]),
+                                 "signal_close": float(row["close"])}
                 breakout_counter = 0
 
     return None
@@ -609,11 +617,17 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     in_range = signal_in_range(direction, float(row["open"]), float(row["close"]),
                                sig_range_low, sig_range_high)
     if wants_color and is_lowest_volume and in_range and pd.notna(sig_atr) and sig_atr > 0:
-        state["active_signal"] = {"time": ts, "hi": row["high"], "lo": row["low"], "atr": sig_atr,
-                                  "volume": row["volume"], "signal_close": row["close"]}
+        # float(...) throughout -- see find_entry()'s matching comment:
+        # an all-whole-number OHLCV candle (int64 dtype) silently
+        # serializes to a BLOB instead of a number if a raw numpy.int64
+        # ever reaches sqlite3 unwrapped (verified live: BAJAJ-AUTO,
+        # 2026-10-01 -- crashed _render_live_section() downstream).
+        hi, lo = float(row["high"]), float(row["low"])
+        state["active_signal"] = {"time": ts, "hi": hi, "lo": lo, "atr": sig_atr,
+                                  "volume": float(row["volume"]), "signal_close": float(row["close"])}
         state["breakout_counter"] = 0
-        return state, {"type": "signal_formed", "time": ts, "high": row["high"],
-                       "low": row["low"], "atr": sig_atr, "replaced_expired": replaced_expired}
+        return state, {"type": "signal_formed", "time": ts, "high": hi,
+                       "low": lo, "atr": sig_atr, "replaced_expired": replaced_expired}
     return state, ({"type": "signal_expired"} if replaced_expired else None)
 
 
