@@ -444,7 +444,7 @@ def get_legs(position_id: int | None = None, date: str | None = None,
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     df = pd.read_sql(
         f"SELECT l.*, p.date, p.symbol, p.direction, p.entry_price, p.entry_time, "
-        f"p.mode AS position_mode FROM intraday_legs l "
+        f"p.qty AS position_qty, p.mode AS position_mode FROM intraday_legs l "
         f"JOIN intraday_positions p ON p.id = l.position_id {clause} ORDER BY l.id",
         conn, params=params)
     conn.close()

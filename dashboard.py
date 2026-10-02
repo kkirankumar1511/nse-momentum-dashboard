@@ -1033,6 +1033,7 @@ COLUMN_LABELS = {
     "pnl": "P&L", "pnl_pct": "P&L %",
     "entry_date": "Entry date", "exit_date": "Exit date",
     "entry_price": "Entry price", "exit_price": "Exit price",
+    "capital_used": "Capital used",
     "current_price": "Current price",
     "current_stop": "Current stop", "recommended_stop": "Recommended stop",
     "suggested_stop": "Suggested stop", "stop": "Stop",
@@ -6467,9 +6468,11 @@ def page_intraday_dashboard():
                 state, detail = "No signal yet", ""
                 if _p is not None:
                     state = "Position open"
+                    _capital_used = _p["entry_price"] * _p["qty"]
                     detail = (f"Entry ₹{_p['entry_price']:.2f} / Stop ₹{_p['stop_price']:.2f} / "
                              f"Target ₹{_p['target_price']:.2f} / Qty "
-                             f"{int(_p['qty_remaining'])}/{int(_p['qty'])}")
+                             f"{int(_p['qty_remaining'])}/{int(_p['qty'])} / "
+                             f"Capital used ₹{_capital_used:,.2f}")
                     # v5.2 EMA-trail: once the 1:2R target is touched the
                     # first-half booking is deferred and trailed -- surface
                     # that instead of leaving "Target" looking untouched.
@@ -6777,6 +6780,7 @@ def page_intraday_dashboard():
     for _, p in poss.iterrows():
         events.append({"time": p["entry_time"], "symbol": p["symbol"], "event": "triggered",
                       "detail": f"{p['direction']} qty {int(p['qty'])} @ ₹{p['entry_price']:.2f} "
+                                f"(₹{p['entry_price'] * p['qty']:,.2f} used) "
                                 f"-- stop ₹{p['stop_price']:.2f}, target ₹{p['target_price']:.2f}"})
     for _, l in legs.iterrows():
         events.append({"time": l["exit_time"], "symbol": l["symbol"], "event": l["leg_type"],
@@ -6936,7 +6940,8 @@ def page_intraday_logs():
                 f"{l['leg_type']} {int(l['qty'])}@₹{l['exit_price']:.2f} ({l['net_pnl']:+,.2f})"
                 for _, l in sym_legs.sort_values("exit_time").iterrows()] if not sym_legs.empty else []
             detail = (f"{p['direction']} qty {int(p['qty'])} @ ₹{p['entry_price']:.2f} "
-                     f"(signal {pd.Timestamp(p['signal_time']):%H:%M}, "
+                     f"(₹{p['entry_price'] * p['qty']:,.2f} used; "
+                     f"signal {pd.Timestamp(p['signal_time']):%H:%M}, "
                      f"entry {pd.Timestamp(p['entry_time']):%H:%M}) — "
                      + (" · ".join(leg_bits) if leg_bits else "still open"))
         elif status == "sector_gate_failed":
@@ -7037,7 +7042,13 @@ def page_intraday_tradebook():
         st.info("No legs recorded in this window.")
         return
     display = display.sort_values("exit_time", ascending=False)
-    show_cols = ["date", "symbol", "direction", "entry_time", "entry_price",
+    # Capital used is a POSITION-level fact (entry_price x the position's
+    # FULL original qty, not this leg's own partial-fill qty) -- same
+    # value repeats across a position's legs, consistent with
+    # entry_price/entry_time/direction already being repeated per leg.
+    if "position_qty" in display.columns:
+        display["capital_used"] = display["entry_price"] * display["position_qty"]
+    show_cols = ["date", "symbol", "direction", "entry_time", "entry_price", "capital_used",
                 "leg_type", "qty", "exit_time", "exit_price", "gross_pnl", "costs", "net_pnl"]
     show_cols = [c for c in show_cols if c in display.columns]
     page = _ov_page_slice(display, key="intraday_tb", page_size=20)
@@ -7045,6 +7056,7 @@ def page_intraday_tradebook():
         _ov_table_html(page, columns=show_cols, sym_cols=["symbol"],
                       pnl_cols=["gross_pnl", "net_pnl"], num_fmt={
                           "entry_price": "₹{:,.2f}", "exit_price": "₹{:,.2f}",
+                          "capital_used": "₹{:,.2f}",
                           "gross_pnl": "₹{:+,.2f}", "costs": "₹{:,.2f}", "qty": "{:.0f}"},
                       badges={"leg_type": _INTRADAY_EVENT_BADGES,
                              "direction": {"LONG": "ov-badge-green", "SHORT": "ov-badge-red"}}),

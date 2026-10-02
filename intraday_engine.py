@@ -428,11 +428,13 @@ def _open_position_from_trigger(tracker: CandidateTracker, event: dict,
         tracker.date, tracker.symbol, tracker.direction, str(event["entry_time"]),
         entry_price, stop_price, target, qty, mode,
         signal_time=str(event["signal_time"]), order_id=order_id)
+    capital_used = qty * entry_price  # notional deployed -- qty x fill price, not margin/leverage
     _push(f"KK Trading — {tracker.symbol} position opened ({mode})",
-         f"{tracker.direction} qty {qty} @ ₹{entry_price:.2f} -- "
+         f"{tracker.direction} qty {qty} @ ₹{entry_price:.2f} (₹{capital_used:,.2f} deployed) -- "
          f"stop ₹{stop_price:.2f}, target ₹{target:.2f}")
     return {"type": "position_opened", "position_id": tracker.position_id,
-           "qty": qty, "entry_price": entry_price, "stop_price": stop_price, "target": target}
+           "qty": qty, "entry_price": entry_price, "stop_price": stop_price, "target": target,
+           "capital_used": capital_used}
 
 
 def check_tick_entry(tracker: CandidateTracker, ltp: float, now: dt.datetime,
