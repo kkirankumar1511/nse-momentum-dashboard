@@ -336,11 +336,46 @@ def signal_in_range(direction: str, open_: float, close: float,
     return body_hi <= sig_range_high
 
 
+def fair_value_gap(candle0_high: float, candle0_low: float,
+                   candle2_high: float, candle2_low: float) -> tuple[float | None, float | None]:
+    """v5.4 §5n -- the day's fixed fair-value-gap zone, from the 1st
+    (09:15, index 0) and 3rd (09:25, index 2) candles' own high/low --
+    a price zone that traded only once that morning. Returns (fvg_lo,
+    fvg_hi), or (None, None) if the two candles overlap (no gap that
+    day -- the veto below is then inert, NOT fail-closed, since "no
+    gap" is a normal, common outcome, not a data problem):
+
+      bullish gap  candle0_high < candle2_low   -> [candle0_high, candle2_low]
+      bearish gap  candle0_low  > candle2_high  -> [candle2_high, candle0_low]
+      no gap       the two candles overlap      -> (None, None), filter inert
+    """
+    if candle0_high < candle2_low:
+        return candle0_high, candle2_low
+    if candle0_low > candle2_high:
+        return candle2_high, candle0_low
+    return None, None
+
+
+def fvg_vetoed(close: float, fvg_lo: float | None, fvg_hi: float | None) -> bool:
+    """v5.4 §5n -- True if a signal candle's own CLOSE falls inside the
+    day's fair-value-gap zone (bounds INCLUSIVE -- a close landing
+    exactly on a zone edge counts as inside, per the spec's own
+    measured choice). A day with no gap (fvg_lo/hi both None) never
+    vetoes anything -- this is the opposite fail-direction from
+    signal_in_range()'s fail-closed-on-missing-data convention,
+    deliberately, since "no gap" isn't missing data, it's the normal
+    case for most days."""
+    if fvg_lo is None or fvg_hi is None:
+        return False
+    return fvg_lo <= close <= fvg_hi
+
+
 def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
                atr14_series: pd.Series, first_candle_low: float,
                first_candle_high: float, sig_range_low: float | None = None,
                sig_range_high: float | None = None,
-               ema50_series: pd.Series | None = None) -> dict | None:
+               ema50_series: pd.Series | None = None,
+               fvg_lo: float | None = None, fvg_hi: float | None = None) -> dict | None:
     """Spec v2 §3.2's walk-forward loop, for one candidate on one day.
 
     `day`: that symbol's 5-min OHLCV candles for the day, indexed by
@@ -360,6 +395,11 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
     reference range (09:20+09:25 candles), also fixed for the whole day.
     None disables signal formation entirely for this call (fail-closed,
     see signal_in_range()) -- pass real values once the range is known.
+    `fvg_lo`/`fvg_hi`: v5.4 §5n's fair-value-gap veto zone (see
+    fair_value_gap()), also fixed for the whole day. None (the default,
+    either because the caller didn't wire this in, or because
+    fair_value_gap() itself found no gap that day) means the veto is
+    simply INERT -- opposite fail-direction from sig_range above.
 
     Returns {"signal_time", "entry_time", "entry_price", "stop_price"}
     on a triggered entry, else None (day invalidated, or no signal ever
@@ -478,7 +518,8 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
             # value (not enough history) fails this candle closed.
             trend_ok = (signal_trend_ok(direction, float(row["close"]), ema50_series.get(ts))
                        if ema50_series is not None else True)
-            if (wants_color and is_lowest_volume and in_range and trend_ok
+            fvg_ok = not fvg_vetoed(float(row["close"]), fvg_lo, fvg_hi)
+            if (wants_color and is_lowest_volume and in_range and trend_ok and fvg_ok
                     and pd.notna(sig_atr) and sig_atr > 0):
                 # float(...) on every field here, not just open/close above --
                 # a candle whose OHLCV all happen to be whole numbers (no
@@ -499,9 +540,10 @@ def diagnose_day(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
                  atr14_series: pd.Series, first_candle_low: float,
                  first_candle_high: float, sig_range_low: float | None = None,
                  sig_range_high: float | None = None,
-                 ema50_series: pd.Series | None = None) -> dict:
+                 ema50_series: pd.Series | None = None,
+                 fvg_lo: float | None = None, fvg_hi: float | None = None) -> dict:
     """Read-only diagnostic twin of find_entry() -- walks the IDENTICAL
-    §3.2/§5l/§5m loop, candle-by-candle-for-candle, but instead of stopping at
+    §3.2/§5l/§5m/§5n loop, candle-by-candle-for-candle, but instead of stopping at
     the first trigger, records WHY every candle that didn't advance the
     state machine failed to, and ends with a synthesized plain-English
     final outcome. Built for the Intraday Logs page's "why didn't/did
@@ -628,7 +670,8 @@ def diagnose_day(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
             atr_ok = pd.notna(sig_atr) and sig_atr > 0
             e50 = ema50_series.get(ts) if ema50_series is not None else None
             trend_ok = True if e50 is None else signal_trend_ok(direction, float(row["close"]), e50)
-            if wants_color and is_lowest_volume and in_range and trend_ok and atr_ok:
+            fvg_ok = not fvg_vetoed(float(row["close"]), fvg_lo, fvg_hi)
+            if wants_color and is_lowest_volume and in_range and trend_ok and fvg_ok and atr_ok:
                 any_signal_ever = True
                 active_signal = {"time": ts, "hi": float(row["high"]), "lo": float(row["low"]),
                                  "atr": sig_atr, "volume": float(row["volume"]),
@@ -662,6 +705,9 @@ def diagnose_day(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
                 else:
                     fails.append(f"close {row['close']:.2f} on the wrong side of EMA50 "
                                 f"{e50:.2f} (§5m trend filter)")
+            if not fvg_ok:
+                fails.append(f"close {row['close']:.2f} sits inside the fair-value-gap zone "
+                            f"[{fvg_lo:.2f}, {fvg_hi:.2f}] (§5n veto)")
             if not atr_ok:
                 fails.append("ATR unavailable")
             trace.append({"time": ts, "stage": "fresh", "result": "fail", "reason": "; ".join(fails)})
@@ -696,7 +742,8 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
                 first_candle_low: float, first_candle_high: float,
                 sig_range_low: float | None = None,
                 sig_range_high: float | None = None,
-                e50: float | None = None) -> tuple[dict, dict | None]:
+                e50: float | None = None,
+                fvg_lo: float | None = None, fvg_hi: float | None = None) -> tuple[dict, dict | None]:
     """One incremental step of the §3.2 walk-forward loop. Does NOT
     mutate `state` -- returns a new state dict (caller keeps its own
     running copy, e.g. one per candidate per day).
@@ -721,6 +768,9 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     `sig_range_low`/`sig_range_high`: v5.4 §5i.1's one-sided signal gate
     reference range (09:20+09:25 candles), also fixed for the whole day.
     None fails closed -- see signal_in_range().
+    `fvg_lo`/`fvg_hi`: v5.4 §5n's fair-value-gap veto zone (see
+    fair_value_gap()), fixed for the whole day. None means inert (no
+    veto) -- either no gap that day, or the caller didn't wire this in.
 
     Returns (new_state, event) -- event is None (nothing happened this
     candle) or one of:
@@ -838,7 +888,9 @@ def step_candle(state: dict, ts, row: pd.Series, direction: str, e21: float | No
     # (filter on, not enough history yet) fails this candle closed. See
     # this function's own docstring for the None-vs-NaN distinction.
     trend_ok = True if e50 is None else signal_trend_ok(direction, float(row["close"]), e50)
-    if wants_color and is_lowest_volume and in_range and trend_ok and pd.notna(sig_atr) and sig_atr > 0:
+    fvg_ok = not fvg_vetoed(float(row["close"]), fvg_lo, fvg_hi)
+    if (wants_color and is_lowest_volume and in_range and trend_ok and fvg_ok
+            and pd.notna(sig_atr) and sig_atr > 0):
         # float(...) throughout -- see find_entry()'s matching comment:
         # an all-whole-number OHLCV candle (int64 dtype) silently
         # serializes to a BLOB instead of a number if a raw numpy.int64

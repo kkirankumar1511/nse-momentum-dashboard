@@ -6801,9 +6801,10 @@ def page_intraday_dashboard():
 def _diagnose_candidate(symbol: str, date_str: str, direction: str) -> dict | None:
     """Reconstructs istrat.diagnose_day()'s candle-by-candle trace for one
     symbol/day, fetching the same inputs intraday_engine.py's own tracker
-    construction does (see run_live()) -- EMA21/ATR14 continuous series,
-    the day's 09:15 candle, the 09:20+09:25 one-sided-gate reference
-    range. Uses _INTRADAY_CHART_WARMUP_DAYS (45), not the live engine's
+    construction does (see run_live()) -- EMA21/ATR14/EMA50 continuous
+    series, the day's 09:15 candle, the 09:20+09:25 one-sided-gate
+    reference range, and the §5n fair-value-gap zone (also from the
+    09:15+09:25 candles). Uses _INTRADAY_CHART_WARMUP_DAYS (45), not the live engine's
     full EMA_WARMUP_DAYS=120 -- same display-only tradeoff already made
     for the chart above (EMA21 is well-converged well before 45 days),
     traded for responsiveness here since this can run once per candidate
@@ -6837,9 +6838,17 @@ def _diagnose_candidate(symbol: str, date_str: str, direction: str) -> dict | No
         else:
             sig_range_low = min(float(c20.iloc[0]["low"]), float(c25.iloc[0]["low"]))
             sig_range_high = max(float(c20.iloc[0]["high"]), float(c25.iloc[0]["high"]))
+        # v5.4 §5n -- same fair-value-gap zone intraday_engine.py's own
+        # tracker construction computes, from the SAME 09:15/09:25
+        # candles already fetched above.
+        if c25.empty:
+            fvg_lo, fvg_hi = None, None
+        else:
+            fvg_lo, fvg_hi = istrat.fair_value_gap(float(fc["high"]), float(fc["low"]),
+                                                   float(c25.iloc[0]["high"]), float(c25.iloc[0]["low"]))
         return istrat.diagnose_day(today_so_far, direction, ema21_series, atr14_series,
                                    float(fc["low"]), float(fc["high"]), sig_range_low, sig_range_high,
-                                   ema50_series=ema50_series)
+                                   ema50_series=ema50_series, fvg_lo=fvg_lo, fvg_hi=fvg_hi)
     except Exception as e:
         print(f"[_diagnose_candidate] {symbol}/{date_str}: {e}", flush=True)
         return None

@@ -236,12 +236,19 @@ class CandidateTracker:
                 first_candle_low: float, first_candle_high: float,
                 rank: int, sector: str | None = None, sector_ratio: float | None = None,
                 sector_gate_pass: bool = False, sig_range_low: float | None = None,
-                sig_range_high: float | None = None, ema50_series: pd.Series | None = None):
+                sig_range_high: float | None = None, ema50_series: pd.Series | None = None,
+                fvg_lo: float | None = None, fvg_hi: float | None = None):
         self.date = date
         self.symbol = symbol
         self.direction = direction
         self.ema21_series = ema21_series
         self.atr14_series = atr14_series
+        # v5.4 §5n -- the fair-value-gap veto zone, from the day's 09:15
+        # and 09:25 candles -- fixed for the whole day like sig_range_low/
+        # high, no mid-day refresh needed (both source candles are fully
+        # known and unchanging well before this tracker is even built).
+        self.fvg_lo = fvg_lo
+        self.fvg_hi = fvg_hi
         # v5.4 §5m -- the signal candle's own trend filter. None (not
         # just an all-NaN series) would mean "filter off" to step_candle()
         # -- run_live() always builds a real series (see tracker
@@ -329,7 +336,8 @@ def process_candle(tracker: CandidateTracker, ts: pd.Timestamp, row: pd.Series) 
     new_state, event = strat.step_candle(
         tracker.signal_state, ts, row, tracker.direction, e21, sig_atr, tracker.vol_min_so_far,
         tracker.first_candle_low, tracker.first_candle_high,
-        tracker.sig_range_low, tracker.sig_range_high, e50=e50)
+        tracker.sig_range_low, tracker.sig_range_high, e50=e50,
+        fvg_lo=tracker.fvg_lo, fvg_hi=tracker.fvg_hi)
     tracker.signal_state = new_state
 
     if event is None:
@@ -947,12 +955,22 @@ def run_live(mode: str = "paper") -> None:
             print(f"[intraday_engine] {sym}: 09:20/09:25 candle missing -- one-sided "
                  f"signal gate fails closed, no fresh signal can form for this candidate today.")
             sig_range_low, sig_range_high = None, None
+        # v5.4 §5n (adopted, supersedes §5m) -- the fair-value-gap veto
+        # zone, from the SAME 09:15 (first_candle) and 09:25 (c25)
+        # candles already fetched above -- no new data needed. (None,
+        # None) when c25 is missing or there's genuinely no gap that day
+        # -- both correctly leave the veto inert (see fvg_vetoed()).
+        if not c25.empty:
+            fvg_lo, fvg_hi = strat.fair_value_gap(first_candle_high, first_candle_low,
+                                                  float(c25.iloc[0]["high"]), float(c25.iloc[0]["low"]))
+        else:
+            fvg_lo, fvg_hi = None, None
         t = CandidateTracker(date_str, sym, c["direction"], ema21_series, atr14_series,
                             first_candle_low, first_candle_high, c["rank"],
                             sector=c.get("sector"), sector_ratio=c.get("sector_ratio"),
                             sector_gate_pass=c.get("sector_gate_pass", False),
                             sig_range_low=sig_range_low, sig_range_high=sig_range_high,
-                            ema50_series=ema50_series)
+                            ema50_series=ema50_series, fvg_lo=fvg_lo, fvg_hi=fvg_hi)
         t.hist = hist
         # Seed the running vol-min from today's pre-window candles (09:15-
         # 09:30) -- see step_candle()'s docstring; the running min starts
