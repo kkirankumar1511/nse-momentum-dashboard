@@ -225,6 +225,17 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
                 "symbol": sym, "direction": bias, "rank": rank, "dsub": dsub,
                 "entry": entry, "risk": risk})
 
+        # A day can clear day_bias and produce candidates (recorded in
+        # candidate_rows above, visible in the "Daily candidates"
+        # expander) yet still vanish from every OTHER output with no
+        # explanation -- find_entry() returning None for every one of
+        # them (no candle ever qualified as a signal, or none broke out)
+        # is a perfectly normal, common outcome, not a bug, but leaving
+        # it unrecorded here is exactly what made a legitimately quiet
+        # stretch of days look like a mystery gap in the UI.
+        if day not in by_day:
+            skipped_days.append({"date": day, "reason": "no_entry_triggered", "nifty_ratio": nifty_ratio})
+
     n_pre_sector = sum(len(v) for v in by_day.values())
     _progress(f"{n_pre_sector} signal(s) across {len(by_day)} day(s) before the sector gate", 0.85)
 
@@ -283,6 +294,13 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
                 n_dropped_sector_fail += 1
         if kept:
             gated_by_day[day] = kept
+        else:
+            # Same visibility gap as Phase C's no_entry_triggered above --
+            # this day DID produce a triggered signal, but every one of
+            # them lost the sector-confirmation gate, so it would
+            # otherwise disappear from daily/trades/skipped_days alike.
+            skipped_days.append({"date": day, "reason": "all_sector_gate_failed",
+                                "nifty_ratio": None})
 
     by_day = gated_by_day
     n_signals = sum(len(v) for v in by_day.values())
