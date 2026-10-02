@@ -40,6 +40,7 @@ import backtest_report
 import config
 import fundamentals_agent as fa
 import indicators
+import intraday_backtest as ibt
 import intraday_db as idb
 import intraday_market as imkt
 import intraday_strategy as istrat
@@ -276,6 +277,7 @@ except Exception as e:
 SCREEN_CACHE = os.path.join("cache", "screen.pkl")
 VALUE_SCORE_CACHE = os.path.join("cache", "fno_value_scores.pkl")
 BACKTEST_CACHE = os.path.join("cache", "backtest_result.pkl")
+INTRADAY_BACKTEST_CACHE = os.path.join("cache", "intraday_backtest_result.pkl")
 FUNDAMENTALS_HISTORY_CACHE = os.path.join("cache", "fundamentals_history.pkl")
 
 
@@ -5443,6 +5445,280 @@ def page_backtest():
 
 
 # ---------------------------------------------------------------------------
+# Page: Intraday Backtest
+# ---------------------------------------------------------------------------
+
+def _run_intraday_backtest_job(start_date, end_date, capital, progress_cb=None):
+    result = ibt.run_backtest(start_date, end_date, capital, progress_cb=progress_cb)
+    run_time = dt.datetime.now()
+    os.makedirs("cache", exist_ok=True)
+    cached = {"result": result, "run_time": run_time}
+    pd.to_pickle(cached, INTRADAY_BACKTEST_CACHE)
+    return cached
+
+
+def page_intraday_backtest():
+    backtest_job = get_background_job("intraday_backtest_run")
+    backtest_running = backtest_job is not None and not backtest_job["done"]
+
+    # Same session-survival pattern as page_backtest()'s own _bt_val --
+    # this run can take several minutes (one Kite historical-data call
+    # per F&O/NIFTY50 symbol), long enough to outlive a browser tab, so
+    # the form reads back what was ACTUALLY submitted from the job's
+    # own meta rather than reverting to a fresh default while locked.
+    _ibt_snapshot = (backtest_job.get("meta") or {}) if backtest_job else {}
+    _ibt_locked = backtest_running and bool(_ibt_snapshot)
+
+    def _ibt_val(key, default):
+        return _ibt_snapshot.get(key, default) if _ibt_locked else default
+
+    _ibt_tip = html_lib.escape(
+        "Replays the CURRENTLY DEPLOYED DaysLowVolumnBreakout rule set "
+        "(day bias, candidate selection, overnight-gap filter, sector "
+        "confirmation gate, signal detection incl. the EMA50 trend and "
+        "fair-value-gap filters, CHRONO slot-filling, position sizing, "
+        "and the full breakeven/EMA10-trail exit management) against "
+        "real recent Kite 5-minute candles -- NOT a reproduction of the "
+        "v5.4 spec's published 5-year numbers (those come from the "
+        "strategy project's own local disk cache of 5-min history; "
+        "Kite's historical API caps a single 5-minute request at 100 "
+        "days and there's no cheap way to backfill years across the "
+        "whole F&O universe from live Kite calls). Keep the date range "
+        "short (weeks, not years) -- a wide range re-fetches 5-min "
+        "history for ~200+ symbols and can take several minutes.")
+    st.markdown(
+        '<div class="ov-header" style="margin-bottom:0;">'
+        '<div><span class="ov-h1">🧪 Intraday Backtest</span> '
+        '<span class="ov-sub">DaysLowVolumnBreakout, real recent Kite data</span>'
+        f'<span class="ov-info-icon" title="{_ibt_tip}">ℹ️</span></div></div>',
+        unsafe_allow_html=True)
+
+    if "ibt_result" not in st.session_state and os.path.exists(INTRADAY_BACKTEST_CACHE):
+        _cached_ibt = pd.read_pickle(INTRADAY_BACKTEST_CACHE)
+        st.session_state["ibt_result"] = _cached_ibt["result"]
+        st.session_state["ibt_run_time"] = _cached_ibt["run_time"]
+        st.session_state["ibt_is_cached"] = True
+
+    _ibt_run_time_hdr = st.session_state.get("ibt_run_time")
+    if _ibt_run_time_hdr is not None:
+        _ibt_cached_note = (" 📁 (from cache — click 'Run backtest' to refresh)"
+                           if st.session_state.get("ibt_is_cached") else "")
+        _ibt_run_meta_txt = f"Last run: {_ibt_run_time_hdr:%d %b %Y %H:%M}{_ibt_cached_note}"
+    else:
+        _ibt_run_meta_txt = "Not run yet"
+
+    with st.container(border=True, key="ov-card-ibt-config"):
+        st.markdown(
+            '<p class="ov-card-title"><span class="ov-dot" '
+            'style="background:var(--ov-blue);"></span>Run configuration'
+            f'<span class="ov-card-meta" style="font-weight:400;margin-left:auto;">'
+            f'{_ibt_run_meta_txt}</span></p>', unsafe_allow_html=True)
+
+        if "ibt_start_date_saved" not in st.session_state:
+            st.session_state["ibt_start_date_saved"] = dt.date.today() - dt.timedelta(days=30)
+        if "ibt_end_date_saved" not in st.session_state:
+            st.session_state["ibt_end_date_saved"] = dt.date.today() - dt.timedelta(days=1)
+
+        rc1, rc2, rc3, rc4 = st.columns([1.1, 1.1, 1.1, 1.3])
+        with rc1:
+            start_date = st.date_input(
+                "Start date", value=_ibt_val("start_date", st.session_state["ibt_start_date_saved"]),
+                max_value=dt.date.today(), key="ibt_start_date", disabled=_ibt_locked)
+        with rc2:
+            end_date = st.date_input(
+                "End date", value=_ibt_val("end_date", st.session_state["ibt_end_date_saved"]),
+                max_value=dt.date.today(), key="ibt_end_date", disabled=_ibt_locked)
+        if not _ibt_locked:
+            st.session_state["ibt_start_date_saved"] = start_date
+            st.session_state["ibt_end_date_saved"] = end_date
+        with rc3:
+            ibt_capital = st.number_input(
+                "Starting capital (₹)",
+                value=_ibt_val("capital", float(config.STRATEGY.get("intraday_paper_capital", 1_000_000.0))),
+                step=50000.0, disabled=_ibt_locked)
+        with rc4:
+            _span_days = (end_date - start_date).days + 1 if (end_date and start_date) else 0
+            _span_warn = _span_days > 180
+            _span_color = "var(--ov-red-d)" if _span_warn else "var(--ov-muted)"
+            st.markdown(
+                f'<p class="ov-card-meta" style="margin-top:28px;color:{_span_color};">'
+                f'{_span_days} calendar day(s) selected'
+                f'{" — this will be slow and rate-limit-heavy" if _span_warn else ""}'
+                '</p>', unsafe_allow_html=True)
+
+        _ibt_hdr_spacer, _ibt_hdr_r1, _ibt_hdr_r2 = st.columns([3, 1.2, 1.2])
+        _run_clicked = _ibt_hdr_r1.button("Run backtest", type="primary", key="ibt_run_btn",
+                                          disabled=backtest_running)
+        _stop_clicked = _ibt_hdr_r2.button("⏹️ Stop backtest", key="ibt_stop_btn",
+                                           disabled=not backtest_running)
+        if _stop_clicked:
+            cancel_background_job("intraday_backtest_run")
+            st.toast("Stopping backtest — this can take a few seconds to take effect.", icon="⏹️")
+
+        if _run_clicked:
+            if not (start_date and end_date and start_date <= end_date):
+                st.warning("Pick a valid start/end date range first.")
+            else:
+                ibt_meta = {"start_date": start_date, "end_date": end_date, "capital": ibt_capital}
+                start_background_job(
+                    "intraday_backtest_run", _run_intraday_backtest_job,
+                    start_date, end_date, ibt_capital,
+                    job_type="intraday_backtest_run", meta=ibt_meta,
+                    summarize_fn=lambda r: (
+                        f"{r['result']['trades']['position_id'].nunique() if not r['result']['trades'].empty else 0} "
+                        f"position(s), capital {r['result']['capital_start']:,.0f} -> "
+                        f"{r['result']['capital_end']:,.0f}"))
+                st.rerun()
+
+    if backtest_running:
+        st.info(f"⏳ Backtest running since {backtest_job['started_at']:%H:%M:%S} "
+                "— safe to switch tabs or close the browser, it keeps running "
+                "server-side; come back to this page any time to see progress.")
+
+    @st.fragment(run_every="1s" if backtest_running else None)
+    def _ibt_job_status():
+        job = get_background_job("intraday_backtest_run")
+        if job is None:
+            return
+        if not job["done"]:
+            frac, stage = job["progress"]
+            st.progress(frac, text=f"{stage} — started {job['started_at']:%H:%M:%S}")
+            return
+        if job.get("cancelled"):
+            st.warning("⏹️ Backtest stopped.")
+        elif job["error"]:
+            st.error(f"Backtest failed: {job['error']}")
+        else:
+            cached_ibt = job["result"]
+            st.session_state["ibt_result"] = cached_ibt["result"]
+            st.session_state["ibt_run_time"] = cached_ibt["run_time"]
+            st.session_state["ibt_is_cached"] = False
+        for _k in ("ibt_start_date", "ibt_end_date"):
+            st.session_state.pop(_k, None)
+        clear_background_job("intraday_backtest_run")
+        st.rerun()
+
+    _ibt_job_status()
+
+    if "ibt_result" not in st.session_state:
+        st.info("Click **Run backtest** to simulate the current intraday rule set on real Kite data.")
+        return
+
+    res = st.session_state["ibt_result"]
+    trades = res["trades"]
+    daily = res["daily"]
+    candidates = res["candidates"]
+    skipped = res["skipped_days"]
+
+    if daily.empty:
+        st.warning("No trading day in this range produced a sector-gate-confirmed signal "
+                  "— see 'Skipped days' and 'Daily candidates' below for why.")
+    else:
+        with st.container(border=True, key="ov-card-ibt-equity"):
+            eq_fig = go.Figure()
+            eq_fig.add_trace(go.Scatter(
+                x=pd.to_datetime(daily["date"]), y=daily["capital"], name="Capital",
+                mode="lines+markers", line=dict(color="#16a34a", width=2),
+                hovertemplate="₹%{y:,.0f}<extra>Capital</extra>"))
+            eq_fig.update_layout(
+                title=dict(text="Intraday backtest — capital over time", x=0, xanchor="left"),
+                height=380, margin=dict(l=10, r=10, t=60, b=10), hovermode="x unified",
+                yaxis=dict(title="Capital (₹)"), showlegend=False)
+            st.plotly_chart(eq_fig, width="stretch")
+
+    _total_ret = ((res["capital_end"] / res["capital_start"] - 1) * 100
+                 if res["capital_start"] else 0.0)
+    _n_positions = trades["position_id"].nunique() if not trades.empty else 0
+    _win_positions = _loss_positions = 0
+    if not trades.empty:
+        _pos_pnl = trades.groupby("position_id")["net_pnl"].sum()
+        _win_positions = int((_pos_pnl > 0).sum())
+        _loss_positions = int((_pos_pnl <= 0).sum())
+    _win_rate = (_win_positions / _n_positions * 100) if _n_positions else None
+    _gross_profit = trades.loc[trades["net_pnl"] > 0, "net_pnl"].sum() if not trades.empty else 0.0
+    _gross_loss = -trades.loc[trades["net_pnl"] <= 0, "net_pnl"].sum() if not trades.empty else 0.0
+    _profit_factor = ((_gross_profit / _gross_loss) if _gross_loss > 0
+                      else (float("inf") if _gross_profit > 0 else None))
+    _pf_text = ("∞" if _profit_factor == float("inf")
+               else f"{_profit_factor:.2f}" if _profit_factor is not None else "—")
+
+    st.markdown(
+        '<div class="ov-grid-metrics">'
+        + _ov_metric_html("Final capital", f"₹{res['capital_end']:,.0f}",
+                         f"{_total_ret:+.1f}% total", "ov-pos" if _total_ret >= 0 else "ov-neg", "green")
+        + _ov_metric_html("Positions", str(_n_positions),
+                         f"{len(daily)} trading day(s) with a signal", "", "blue")
+        + _ov_metric_html("Win rate", f"{_win_rate:.1f}%" if _win_rate is not None else "—",
+                         f"{_win_positions}W / {_loss_positions}L", "", "purple")
+        + _ov_metric_html("Profit factor", _pf_text, "gross win/loss (by leg)", "", "teal")
+        + _ov_metric_html("Days skipped", str(len(skipped)),
+                         "no day bias / no candidates", "", "amber")
+        + '</div>', unsafe_allow_html=True)
+
+    if not candidates.empty:
+        with st.expander(f"Daily candidates ({len(candidates)})", expanded=False):
+            st.markdown(
+                _ov_table_html(
+                    candidates.sort_values(["date", "rank"]),
+                    sym_cols=["symbol"],
+                    num_fmt={"ret_first15_pct": "{:+.2f}", "gap_pct": "{:+.2f}"}),
+                unsafe_allow_html=True)
+
+    if not skipped.empty:
+        with st.expander(f"Skipped days ({len(skipped)})", expanded=False):
+            st.caption("Days the NIFTY 50 first-15m ratio didn't clear the LONG/SHORT "
+                      "day-bias threshold, or no F&O candidate survived the "
+                      "overnight-gap filter.")
+            st.markdown(_ov_table_html(skipped, num_fmt={"nifty_ratio": "{:.2f}"}),
+                       unsafe_allow_html=True)
+
+    if not trades.empty:
+        with st.container(border=True, key="ov-card-ibt-trades"):
+            st.markdown(
+                '<p class="ov-card-title"><span class="ov-dot" '
+                'style="background:var(--ov-coral);"></span>Simulated trades</p>',
+                unsafe_allow_html=True)
+            tf1, tf2, tf3 = st.columns(3)
+            with tf1:
+                sym_filter = st.multiselect("Symbol", sorted(trades["symbol"].unique()),
+                                            key="ibt_sym_filter")
+            with tf2:
+                reason_filter = st.multiselect("Exit reason", sorted(trades["reason"].unique()),
+                                               key="ibt_reason_filter")
+            with tf3:
+                outcome_filter = st.selectbox("Outcome", ["All", "Wins only", "Losses only"],
+                                              key="ibt_outcome_filter")
+
+            filtered = trades
+            if sym_filter:
+                filtered = filtered[filtered["symbol"].isin(sym_filter)]
+            if reason_filter:
+                filtered = filtered[filtered["reason"].isin(reason_filter)]
+            if outcome_filter == "Wins only":
+                filtered = filtered[filtered["net_pnl"] > 0]
+            elif outcome_filter == "Losses only":
+                filtered = filtered[filtered["net_pnl"] <= 0]
+
+            st.caption(f"Showing {len(filtered)} of {len(trades)} leg(s)")
+            filtered_sorted = filtered.sort_values(["date", "entry_time"], ascending=[False, False])
+            filtered_page = _ov_page_slice(filtered_sorted, key="ibt_trades", page_size=20)
+            st.markdown(
+                _ov_table_html(
+                    filtered_page,
+                    sym_cols=["symbol"], pnl_cols=["gross_pnl", "cost", "net_pnl"],
+                    num_fmt={"entry_price": "₹{:.2f}", "stop_price": "₹{:.2f}", "exit_price": "₹{:.2f}"},
+                    badges={"reason": lambda v: (
+                        "ov-badge-red" if v in ("stop", "entry_candle_close")
+                        else "ov-badge-green" if v in ("target", "ema10_trail_exit")
+                        else "ov-badge-gray")}),
+                unsafe_allow_html=True)
+            _ov_pagination_controls(filtered_sorted, key="ibt_trades", page_size=20)
+            st.download_button("Download trades CSV (filtered view)",
+                              filtered.to_csv(index=False),
+                              "intraday_backtest_trades.csv")
+
+
+# ---------------------------------------------------------------------------
 # Page: Fundamentals (Value Score)
 # ---------------------------------------------------------------------------
 
@@ -5736,13 +6012,14 @@ def page_fundamentals():
 # ---------------------------------------------------------------------------
 
 JOB_TYPES = ["rebalance_scan", "gap_check", "fundamentals_refresh", "screen_run",
-            "backtest_run"]
+            "backtest_run", "intraday_backtest_run"]
 
 # Mirrors deploy/vps/systemd/*.timer's OnCalendar schedules -- kept in sync
 # by hand, not read from systemd itself (this dashboard process has no
 # visibility into the VPS's timer state). weekdays: 0=Mon..6=Sun.
-# screen_run/backtest_run have no entry -- both are manual-only buttons
-# (Screener's "Run screen", Backtest's "Run backtest"), never scheduled.
+# screen_run/backtest_run/intraday_backtest_run have no entry -- all three
+# are manual-only buttons (Screener's "Run screen", Backtest's "Run
+# backtest", Intraday Backtest's "Run backtest"), never scheduled.
 _JOB_SCHEDULES = {
     "rebalance_scan": ([0, 1, 2, 3, 4], 14, 45),
     "gap_check": ([0, 1, 2, 3, 4], 9, 16),
@@ -7813,6 +8090,7 @@ page_guide_p = st.Page(page_guide, title="Guide", icon="📘")
 page_intraday_dashboard_p = st.Page(page_intraday_dashboard, title="Intraday Dashboard", icon="⚡", default=True)
 page_intraday_tradebook_p = st.Page(page_intraday_tradebook, title="Intraday Tradebook", icon="📒")
 page_intraday_logs_p = st.Page(page_intraday_logs, title="Intraday Logs", icon="🧾")
+page_intraday_backtest_p = st.Page(page_intraday_backtest, title="Intraday Backtest", icon="🧪")
 
 # Injected before the sidebar (not per-page) so every page -- not just
 # Overview, where this design system started -- gets the same compact
@@ -7850,6 +8128,7 @@ with st.sidebar:
 
     st.markdown('<p class="ov-side-label">Testing</p>', unsafe_allow_html=True)
     st.page_link(page_backtest_p)
+    st.page_link(page_intraday_backtest_p)
 
     # Streamlit gives the current page's link no stable DOM marker (just an
     # unstable emotion class with a faint default tint), so CSS alone can't
@@ -7971,5 +8250,5 @@ nav = st.navigation([page_cockpit_p, page_live_rebalance_p, page_positions_trade
                     page_job_log_p, page_rebalance_history_p, page_backtest_p,
                     page_admin_p, page_ledger_p, page_guide_p,
                     page_intraday_dashboard_p, page_intraday_tradebook_p,
-                    page_intraday_logs_p], position="hidden")
+                    page_intraday_logs_p, page_intraday_backtest_p], position="hidden")
 nav.run()

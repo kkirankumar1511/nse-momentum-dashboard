@@ -993,6 +993,112 @@ def simulate_exit(day: pd.DataFrame, entry_time: pd.Timestamp, entry: float,
     return legs
 
 
+def simulate_exit_v54(day: pd.DataFrame, entry_time: pd.Timestamp, entry: float,
+                      stop: float, direction: str, ema10_series: pd.Series,
+                      reward_risk: float = REWARD_RISK,
+                      squareoff_time: str = SQUAREOFF_TIME) -> list[dict]:
+    """Batch/backtest equivalent of the LIVE engine's actual adopted exit
+    management -- intraday_engine.py's check_entry_candle_close() +
+    check_intracandle_exit() + step_position_boundary() + force_squareoff()
+    combined into one candle-by-candle walk, instead of live's tick-driven
+    version of the same rules. Unlike simulate_exit() above (the older,
+    pre-§5b/§5i.2 v5.1 rule -- no breakeven, no EMA10 trail -- kept only
+    for history/comparison, not what the live engine runs today), this is
+    what intraday_backtest.py uses, since it's the only pure-logic version
+    of the CURRENT live rule set:
+
+      1. Entry-candle-close rule (§5i.3): if the entry candle's own CLOSE
+         already breaches the stop, exit the FULL position at that close.
+      2. Stop/breakeven (§5b): the original stop protects the full
+         position until the first half books (fixed target or EMA10
+         trail); from the candle AFTER that booking, the stop protecting
+         the runner is the ENTRY price instead.
+      3. Target touch -> EMA10 trail decision (§5i.2, choose_trail_ema()):
+         at the 1:2R touch, defer and trail EMA10 if the target sits on
+         its momentum side, else book the half at the fixed target
+         immediately. ema10_series must be ema_n(close, TRAIL_EMA_SLOW)
+         computed over the SAME continuous multi-day series find_entry()'s
+         caller already built (never cold-started per day).
+      4. Trail-crossed exit (step_position_boundary()): the first candle
+         AFTER the touch candle whose own close crosses back through
+         EMA10 books the half at the NEXT candle's open (or, if there is
+         no next candle in `day`, that crossing candle's own close -- the
+         closest batch equivalent of live's "fall back to the current
+         price" case).
+      5. Squareoff at the "15:10"-labeled candle's own CLOSE (Spec v3 §9 --
+         NOT force_squareoff()'s real-time-LTP convention, which only
+         exists because live can't achieve this exact price).
+
+    Deliberate batch-vs-tick approximation: the touch candle's own EMA10
+    (not the prior COMPLETED candle's) decides the trail, since a 5-min
+    candle walk has no tick-level "still forming" distinction once that
+    candle's full OHLC is already known -- the same convention the
+    strategy's reference backtest uses, and what the spec's published
+    CAGR/DD numbers are measured against."""
+    target = target_price(entry, stop, direction, reward_risk)
+    sq = day.between_time(squareoff_time, squareoff_time).index
+    squareoff_ts = sq[0] if len(sq) else None
+
+    if entry_time in day.index:
+        ec = day.loc[entry_time]
+        breached = (float(ec["close"]) <= stop) if direction == LONG else (float(ec["close"]) >= stop)
+        if breached:
+            return [{"exit_time": entry_time, "exit_price": float(ec["close"]),
+                    "reason": "entry_candle_close", "qty_frac": 1.0}]
+
+    legs: list[dict] = []
+    target_touched = False
+    target_taken = False
+    trailing = False
+    remaining_frac = 1.0
+    active_stop = stop
+
+    rows_after = list(day[day.index > entry_time].iterrows())
+    for k, (ts, row) in enumerate(rows_after):
+        hit_stop = row["low"] <= active_stop if direction == LONG else row["high"] >= active_stop
+        if hit_stop:
+            reason = "breakeven" if target_taken else "stop"
+            legs.append({"exit_time": ts, "exit_price": active_stop, "reason": reason,
+                        "qty_frac": remaining_frac})
+            return legs
+
+        if not target_touched:
+            hit_target = row["high"] >= target if direction == LONG else row["low"] <= target
+            if hit_target:
+                target_touched = True
+                trail_span = choose_trail_ema(direction, target, ema10_series.get(ts))
+                if trail_span is None:
+                    legs.append({"exit_time": ts, "exit_price": target, "reason": "target",
+                                "qty_frac": 0.5})
+                    remaining_frac = 0.5
+                    target_taken = True
+                    active_stop = entry
+                else:
+                    trailing = True
+        elif trailing and not target_taken:
+            if trail_crossed(direction, float(row["close"]), ema10_series.get(ts)):
+                fill_ts, fill_px = ts, float(row["close"])
+                if k + 1 < len(rows_after):
+                    nts, nrow = rows_after[k + 1]
+                    if squareoff_ts is None or nts <= squareoff_ts:
+                        fill_ts, fill_px = nts, float(nrow["open"])
+                legs.append({"exit_time": fill_ts, "exit_price": fill_px,
+                            "reason": f"ema{TRAIL_EMA_SLOW}_trail_exit", "qty_frac": 0.5})
+                remaining_frac = 0.5
+                target_taken = True
+                active_stop = entry
+
+        if squareoff_ts is not None and ts >= squareoff_ts:
+            legs.append({"exit_time": ts, "exit_price": float(row["close"]),
+                        "reason": "squareoff", "qty_frac": remaining_frac})
+            return legs
+
+    last = day.iloc[-1]
+    legs.append({"exit_time": day.index[-1], "exit_price": float(last["close"]),
+                "reason": "eod_data_end", "qty_frac": remaining_frac})
+    return legs
+
+
 # ---------------------------------------------------------------------------
 # §7 -- position sizing
 # ---------------------------------------------------------------------------
