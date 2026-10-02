@@ -21,11 +21,23 @@ writing backtest rows there would corrupt it). Returns a plain dict of
 DataFrames; the caller is responsible for caching/displaying the
 result, exactly like backtest.py's own run_backtest() for the
 positional strategy.
+
+Candle data is cached to disk (cache/intraday_backtest/{5min,daily}/
+{SYMBOL}.csv), mirroring backtest.py's own load_candles_cached() --
+a past trading day's candles never change once that day has closed, so
+re-fetching the whole F&O+NIFTY50 universe (~200+ symbols) from Kite on
+every single run (including two runs over overlapping date ranges)
+would pay the same slow, rate-limited cost for data already on disk.
+Only the genuinely missing portion of a requested range is ever
+fetched (extending the cache earlier, later, or both); the most recent
+cached day is always treated as possibly incomplete and re-fetched, in
+case today was still live when it was last written.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import os
 
 import pandas as pd
 
@@ -37,6 +49,7 @@ import nse_holidays
 import sector_universe as su
 
 EMA_WARMUP_DAYS = 120  # same depth as intraday_engine.py's EMA_WARMUP_DAYS
+CACHE_DIR = os.path.join("cache", "intraday_backtest")
 
 
 def _trading_days(start_date: dt.date, end_date: dt.date) -> list[dt.date]:
@@ -66,22 +79,114 @@ def _prev_close(daily: dict[str, pd.DataFrame], sym: str, day_ts: pd.Timestamp) 
     return float(prior["close"].iloc[-1]) if not prior.empty else None
 
 
+def _cache_path(kind: str, symbol: str) -> str:
+    return os.path.join(CACHE_DIR, kind, f"{symbol}.csv")
+
+
+def _read_cache(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, index_col=0, parse_dates=True)
+    except Exception as e:
+        print(f"[intraday_backtest] {path}: cache read failed, ignoring -- {e}")
+        return pd.DataFrame()
+
+
+def _write_cache(path: str, df: pd.DataFrame) -> None:
+    if df.empty:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    df.to_csv(path)
+
+
+def _load_or_fetch_5min(symbol: str, warmup_from: dt.date, fetch_to: dt.date) -> pd.DataFrame:
+    """5-min candles for `symbol` over [warmup_from, fetch_to], cached to
+    disk across runs. Only fetches the piece(s) actually missing from
+    the cache -- extending it earlier (if a new run's warmup reaches
+    further back), later (if fetch_to moved forward), or both -- and
+    always re-fetches from the cache's own last cached day onward
+    whenever that day is today or later, since that day may have been
+    cached while still mid-session and incomplete."""
+    path = _cache_path("5min", symbol)
+    cached = _read_cache(path)
+    today = dt.date.today()
+
+    if cached.empty:
+        fresh = kite_client.fetch_intraday_candles_range(symbol, warmup_from, fetch_to)
+        _write_cache(path, fresh)
+        return fresh
+
+    cached_min, cached_max = cached.index.min().date(), cached.index.max().date()
+    pieces = [cached]
+
+    if warmup_from < cached_min:
+        back = kite_client.fetch_intraday_candles_range(
+            symbol, warmup_from, cached_min - dt.timedelta(days=1))
+        if not back.empty:
+            pieces.append(back)
+
+    if cached_max < fetch_to:
+        fwd = kite_client.fetch_intraday_candles_range(
+            symbol, cached_max + dt.timedelta(days=1), fetch_to)
+        if not fwd.empty:
+            pieces.append(fwd)
+    elif cached_max >= today:
+        # Last cached day is today (or later, if the clock rolled over
+        # since) -- it may have been written mid-session, so refresh it
+        # rather than trust a stale partial day.
+        refresh = kite_client.fetch_intraday_candles_range(symbol, cached_max, max(fetch_to, today))
+        if not refresh.empty:
+            pieces.append(refresh)
+
+    merged = pd.concat(pieces) if len(pieces) > 1 else cached
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    _write_cache(path, merged)
+    return merged[(merged.index.normalize() >= pd.Timestamp(warmup_from))
+                 & (merged.index.normalize() <= pd.Timestamp(fetch_to))]
+
+
+def _load_or_fetch_daily(symbol: str, warmup_from: dt.date, fetch_to: dt.date) -> pd.DataFrame:
+    """Daily candles for `symbol`, cached to disk. A cache whose range
+    already fully covers [warmup_from, fetch_to] -- and whose last
+    cached day is genuinely in the past, not today -- needs no fetch at
+    all; otherwise re-fetches `days` back from today (cheap: daily
+    candles have no 100-day chunk limit) and merges it in."""
+    path = _cache_path("daily", symbol)
+    cached = _read_cache(path)
+    today = dt.date.today()
+
+    if not cached.empty:
+        cached_min, cached_max = cached.index.min().date(), cached.index.max().date()
+        if cached_min <= warmup_from and cached_max >= fetch_to and cached_max < today:
+            return cached
+
+    days = (today - warmup_from).days + 5
+    fresh = kite_client.fetch_daily_candles(symbol, days=days)
+    if fresh.empty:
+        return cached
+    merged = pd.concat([cached, fresh]) if not cached.empty else fresh
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    _write_cache(path, merged)
+    return merged
+
+
 def _fetch_universe(symbols: list[str], candles5: dict, daily: dict,
                     warmup_from: dt.date, fetch_to: dt.date,
                     tick=None, stage: str = "Fetching candles") -> None:
-    """Fetches 5-min + daily candles for every symbol in `symbols` not
-    already present in `candles5`, mutating both dicts in place. `tick`,
-    if given, is called as tick(local_frac) -- a 0..1 fraction of THIS
-    fetch loop's own progress -- once per symbol, both so a UI progress
-    bar moves smoothly across a ~200-symbol fetch and so a background
-    job's cooperative cancellation (raised from inside that callback) is
+    """Loads (from disk cache, fetching only what's missing) 5-min +
+    daily candles for every symbol in `symbols` not already present in
+    `candles5`, mutating both dicts in place. `tick`, if given, is
+    called as tick(local_frac) -- a 0..1 fraction of THIS fetch loop's
+    own progress -- once per symbol, both so a UI progress bar moves
+    smoothly across a ~200-symbol fetch and so a background job's
+    cooperative cancellation (raised from inside that callback) is
     checked often enough to actually feel responsive."""
     todo = [s for s in symbols if s not in candles5]
-    daily_days = (fetch_to - warmup_from).days + 30
     for i, sym in enumerate(todo):
         try:
-            candles5[sym] = kite_client.fetch_intraday_candles_range(sym, warmup_from, fetch_to)
-            daily[sym] = kite_client.fetch_daily_candles(sym, days=daily_days)
+            candles5[sym] = _load_or_fetch_5min(sym, warmup_from, fetch_to)
+            daily[sym] = _load_or_fetch_daily(sym, warmup_from, fetch_to)
         except Exception as e:
             print(f"[intraday_backtest] {sym}: candle fetch failed -- {e}")
             candles5[sym] = pd.DataFrame()
