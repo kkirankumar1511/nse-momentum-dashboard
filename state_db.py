@@ -351,21 +351,52 @@ def get_conn(db_path: str | None = None) -> sqlite3.Connection:
     fix)."""
     db_path = db_path or DB_PATH
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(_SCHEMA)
-    conn.commit()
-    _migrate_equity_log_once(conn)
-    _migrate_fund_state_to_cash_flow(conn)
-    _migrate_positions_schema(conn)
-    _migrate_stop_update_log_schema(conn)
-    _migrate_trades_schema(conn)
-    _migrate_rebalance_buys_schema(conn)
-    _migrate_rebalance_runs_schema(conn)
-    _migrate_rebalance_status_columns(conn)
-    _migrate_equity_log_schema(conn)
-    _migrate_backfill_missing_trades(conn)
-    return conn
+    # timeout=30 (not sqlite3's 5s default): every call here re-runs the
+    # full schema script + 9 migration functions below, and this is a
+    # fresh connection per call (no long-lived shared one) -- under real
+    # concurrency (a multi-minute background job's own state_db.job_run()
+    # writes racing the main UI thread's own get_conn() calls on every
+    # page rerun) that setup cost is enough for two connections to
+    # genuinely collide, and 5s wasn't always enough margin to wait it
+    # out (confirmed live: a multi-minute Intraday Backtest run crashed
+    # the main thread with "database is locked" on ensure_dashboard_auth_
+    # seeded()). WAL mode on top lets readers and the one writer proceed
+    # without blocking each other at all, rather than just waiting longer
+    # for the same rollback-journal exclusive lock -- but switching INTO
+    # WAL mode itself needs a brief exclusive lock and can raise "database
+    # is locked" immediately (doesn't honor timeout=) if another
+    # connection is mid-transaction right then, so it's skipped once a
+    # connection reports it's already in WAL (true for every connection
+    # after the very first one ever succeeds). The retry loop below is
+    # what actually absorbs that one-time race, plus the same-class race
+    # in the migration functions' own check-then-ALTER pattern (confirmed
+    # under a 25-thread stress test against a fresh DB).
+    last_err = None
+    for attempt in range(8):
+        try:
+            conn = sqlite3.connect(db_path, timeout=30)
+            if conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+                conn.execute("PRAGMA journal_mode=WAL")
+            conn.row_factory = sqlite3.Row
+            conn.executescript(_SCHEMA)
+            conn.commit()
+            _migrate_equity_log_once(conn)
+            _migrate_fund_state_to_cash_flow(conn)
+            _migrate_positions_schema(conn)
+            _migrate_stop_update_log_schema(conn)
+            _migrate_trades_schema(conn)
+            _migrate_rebalance_buys_schema(conn)
+            _migrate_rebalance_runs_schema(conn)
+            _migrate_rebalance_status_columns(conn)
+            _migrate_equity_log_schema(conn)
+            _migrate_backfill_missing_trades(conn)
+            return conn
+        except sqlite3.OperationalError as e:
+            last_err = e
+            if "locked" not in str(e).lower() and "duplicate column" not in str(e).lower():
+                raise
+            time.sleep(0.1 * (attempt + 1))
+    raise last_err
 
 
 def _migrate_equity_log_once(conn: sqlite3.Connection) -> None:

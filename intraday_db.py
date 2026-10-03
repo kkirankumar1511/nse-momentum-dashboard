@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import sqlite3
+import time
 
 import pandas as pd
 
@@ -116,12 +117,34 @@ CREATE TABLE IF NOT EXISTS intraday_capital_state (
 def get_conn(db_path: str | None = None) -> sqlite3.Connection:
     db_path = db_path or DB_PATH
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(_SCHEMA)
-    conn.commit()
-    _migrate_daily_selection_schema(conn)
-    return conn
+    # timeout=30 + WAL: this file is hit concurrently from genuinely
+    # separate OS processes (the live/paper intraday_engine.py process
+    # AND the dashboard's own Streamlit process), not just separate
+    # threads -- the same "database is locked" risk state_db.get_conn()
+    # had (fresh connection + full schema/migration cost on every call,
+    # sqlite3's 5s default timeout) applies here too, if anything with
+    # more exposure given the cross-process access. The retry loop
+    # absorbs the brief race switching INTO WAL mode for the very first
+    # connection ever (skipped on every later one, once a connection
+    # reports it's already in WAL) and the same-class race in the
+    # migration function's own check-then-ALTER pattern.
+    last_err = None
+    for attempt in range(8):
+        try:
+            conn = sqlite3.connect(db_path, timeout=30)
+            if conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+                conn.execute("PRAGMA journal_mode=WAL")
+            conn.row_factory = sqlite3.Row
+            conn.executescript(_SCHEMA)
+            conn.commit()
+            _migrate_daily_selection_schema(conn)
+            return conn
+        except sqlite3.OperationalError as e:
+            last_err = e
+            if "locked" not in str(e).lower() and "duplicate column" not in str(e).lower():
+                raise
+            time.sleep(0.1 * (attempt + 1))
+    raise last_err
 
 
 def _migrate_daily_selection_schema(conn: sqlite3.Connection) -> None:
