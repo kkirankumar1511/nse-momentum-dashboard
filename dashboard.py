@@ -33,7 +33,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
-from kiteconnect.exceptions import TokenException
+from kiteconnect.exceptions import InputException, TokenException
 
 import backtest as bt
 import backtest_report
@@ -91,6 +91,43 @@ import trade_chart
 
 st.set_page_config(page_title="KK Trading System", layout="wide",
                    page_icon="assets/logo.png" if os.path.exists("assets/logo.png") else "📈")
+
+def _is_invalid_api_key_error(e: Exception) -> bool:
+    """True for Kite's `{"error_type":"InputException","message":"Invalid
+    `api_key`."}` response -- returned whenever the Kite Connect APP
+    itself (not the day's login session) is rejected outright: most
+    commonly because its paid API subscription has lapsed or the app was
+    deactivated on the developer console, NOT because today's login/2FA
+    needs redoing. Redirecting to Kite's login page in this case would
+    just loop forever (login can succeed, but the token exchange right
+    after it fails the same way every time) while flashing Kite's raw
+    JSON error -- see _show_api_subscription_error()."""
+    return isinstance(e, InputException) and "api_key" in str(e).lower()
+
+
+def _show_api_subscription_error() -> None:
+    """Dedicated, non-looping error page for _is_invalid_api_key_error()
+    -- deliberately does NOT call _redirect_to_kite_login(), since
+    redirecting back to Kite's login page cannot fix this (the app
+    itself is being rejected, not this session's token) and would just
+    bounce the user through Zerodha's login+2FA again for nothing."""
+    st.error("⚠️ Kite Connect API subscription issue")
+    st.markdown(
+        "Zerodha's Kite API rejected this app's `api_key` outright "
+        "(`Invalid api_key`) — this is **not** a login/session problem, "
+        "so signing in again won't fix it. It means the Kite Connect "
+        "**app itself** is inactive, almost always because its paid API "
+        "subscription has lapsed or the app was deactivated.\n\n"
+        "**To fix:** open the Kite Connect developer console (the one "
+        "you registered this app's `api_key`/`api_secret` in, at "
+        "developer.kite.trade), check the app's subscription/billing "
+        "status, and renew or reactivate it there. Once that's active "
+        "again, come back and reload this page — no code or config "
+        "change needed here.")
+    if st.button("I've renewed it — retry"):
+        st.rerun()
+    st.stop()
+
 
 def _redirect_to_kite_login(error: str | None = None) -> None:
     """Auto-redirects the browser to Zerodha's real login + 2FA page --
@@ -172,6 +209,8 @@ if request_token and request_token != st.session_state.get("_kite_token_exchange
         st.rerun()
     except Exception as e:
         st.query_params.clear()
+        if _is_invalid_api_key_error(e):
+            _show_api_subscription_error()
         _redirect_to_kite_login(f"Token exchange failed (request_token is "
                                 f"single-use and may have already been used): {e}")
 elif request_token:
@@ -266,6 +305,8 @@ try:
 except TokenException:
     _redirect_to_kite_login()
 except Exception as e:
+    if _is_invalid_api_key_error(e):
+        _show_api_subscription_error()
     st.error(f"Couldn't reach Kite to check your account: {e}")
     st.caption("This looks like a transient network/API issue, not an "
               "expired session -- your Kite login should still be fine. "
