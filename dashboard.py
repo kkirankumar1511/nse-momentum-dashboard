@@ -5493,7 +5493,8 @@ def _run_intraday_backtest_job(start_date, end_date, capital, progress_cb=None):
     result = ibt.run_backtest(start_date, end_date, capital, progress_cb=progress_cb)
     run_time = dt.datetime.now()
     os.makedirs("cache", exist_ok=True)
-    cached = {"result": result, "run_time": run_time}
+    run_meta = {"start_date": start_date, "end_date": end_date, "capital": capital}
+    cached = {"result": result, "run_time": run_time, "run_meta": run_meta}
     pd.to_pickle(cached, INTRADAY_BACKTEST_CACHE)
     return cached
 
@@ -5538,6 +5539,7 @@ def page_intraday_backtest():
         _cached_ibt = pd.read_pickle(INTRADAY_BACKTEST_CACHE)
         st.session_state["ibt_result"] = _cached_ibt["result"]
         st.session_state["ibt_run_time"] = _cached_ibt["run_time"]
+        st.session_state["ibt_run_meta"] = _cached_ibt.get("run_meta")
         st.session_state["ibt_is_cached"] = True
 
     _ibt_run_time_hdr = st.session_state.get("ibt_run_time")
@@ -5633,6 +5635,7 @@ def page_intraday_backtest():
             cached_ibt = job["result"]
             st.session_state["ibt_result"] = cached_ibt["result"]
             st.session_state["ibt_run_time"] = cached_ibt["run_time"]
+            st.session_state["ibt_run_meta"] = cached_ibt.get("run_meta")
             st.session_state["ibt_is_cached"] = False
         for _k in ("ibt_start_date", "ibt_end_date"):
             st.session_state.pop(_k, None)
@@ -5650,6 +5653,43 @@ def page_intraday_backtest():
     daily = res["daily"]
     candidates = res["candidates"]
     skipped = res["skipped_days"]
+
+    _ibt_run_meta = st.session_state.get("ibt_run_meta") or {}
+    with st.expander("⚙️ Parameters used for this run", expanded=False):
+        if not _ibt_run_meta:
+            st.caption("This result was cached before parameter tracking was "
+                      "added — re-run the backtest to record its inputs.")
+        else:
+            st.caption("Run inputs")
+            ip1, ip2, ip3 = st.columns(3)
+            ip1.metric("Date range", f"{_ibt_run_meta.get('start_date')} → {_ibt_run_meta.get('end_date')}")
+            ip2.metric("Starting capital", f"₹{_ibt_run_meta.get('capital', 0):,.0f}")
+            ip3.metric("Ending capital", f"₹{res.get('capital_end', 0):,.0f}")
+
+        st.caption("Strategy rule set (fixed -- not tunable here; this is the "
+                  "currently DEPLOYED rule set, same as the live engine)")
+        sp1, sp2, sp3, sp4 = st.columns(4)
+        sp1.metric("Day-bias ratio (L/S)",
+                  f">{istrat.BIAS_RATIO_LONG_MIN} / <{istrat.BIAS_RATIO_SHORT_MAX}")
+        sp2.metric("Sector gate ratio (L/S)",
+                  f">{istrat.SECTOR_GATE_RATIO_LONG_MIN} / <{istrat.SECTOR_GATE_RATIO_SHORT_MAX}")
+        sp3.metric("Candidate pool", f"Top {istrat.TOP_N_CANDIDATES}")
+        sp4.metric("Overnight gap filter", f"±{istrat.GAP_FILTER_PCT}%")
+        sp5, sp6, sp7, sp8 = st.columns(4)
+        sp5.metric("Signal window", f"{istrat.SIGNAL_WINDOW_START}–{istrat.SIGNAL_WINDOW_END}")
+        sp6.metric("New-signal cutoff", str(istrat.NEW_SIGNAL_CUTOFF))
+        sp7.metric("Breakout window", f"{istrat.BREAKOUT_WINDOW} candle(s)")
+        sp8.metric("Squareoff", istrat.SQUAREOFF_TIME)
+        sp9, sp10, sp11, sp12 = st.columns(4)
+        sp9.metric("Signal vol tolerance", f"{istrat.VOL_THRESHOLD_PCT:.0%}")
+        sp10.metric("ATR buffer / period", f"{istrat.ATR_PCT_BUFFER:.0%} / {istrat.ATR_PERIOD}")
+        sp11.metric("EMA span (invalidation)", istrat.EMA_SPAN)
+        sp12.metric("Trail EMA span", istrat.TRAIL_EMA_SLOW)
+        sp13, sp14, sp15, sp16 = st.columns(4)
+        sp13.metric("Reward : risk", f"1 : {istrat.REWARD_RISK}")
+        sp14.metric("Max trades/day", istrat.MAX_TRADES_PER_DAY)
+        sp15.metric("Leverage", f"{istrat.LEVERAGE}×")
+        sp16.metric("Risk per trade", f"{istrat.MAX_RISK_PCT_PER_TRADE:.1%}")
 
     if daily.empty:
         st.warning("No trading day in this range produced a sector-gate-confirmed signal "
@@ -5698,20 +5738,61 @@ def page_intraday_backtest():
 
     if not candidates.empty:
         with st.expander(f"Daily candidates ({len(candidates)})", expanded=False):
+            cf1, cf2, cf3 = st.columns(3)
+            with cf1:
+                cand_sym_filter = st.multiselect("Symbol", sorted(candidates["symbol"].unique()),
+                                                 key="ibt_cand_sym_filter")
+            with cf2:
+                cand_dir_filter = st.multiselect("Direction", sorted(candidates["direction"].unique()),
+                                                 key="ibt_cand_dir_filter")
+            with cf3:
+                cand_dates = pd.to_datetime(candidates["date"]).dt.date
+                cand_date_range = st.date_input(
+                    "Date range", value=(cand_dates.min(), cand_dates.max()),
+                    min_value=cand_dates.min(), max_value=cand_dates.max(),
+                    key="ibt_cand_date_filter")
+
+            cand_filtered = candidates
+            if cand_sym_filter:
+                cand_filtered = cand_filtered[cand_filtered["symbol"].isin(cand_sym_filter)]
+            if cand_dir_filter:
+                cand_filtered = cand_filtered[cand_filtered["direction"].isin(cand_dir_filter)]
+            if isinstance(cand_date_range, tuple) and len(cand_date_range) == 2:
+                _cd_lo, _cd_hi = cand_date_range
+                _cd_all = pd.to_datetime(cand_filtered["date"]).dt.date
+                cand_filtered = cand_filtered[(_cd_all >= _cd_lo) & (_cd_all <= _cd_hi)]
+
+            st.caption(f"Showing {len(cand_filtered)} of {len(candidates)} candidate(s)")
+            cand_sorted = cand_filtered.sort_values(["date", "rank"], ascending=[False, True])
+            cand_page = _ov_page_slice(cand_sorted, key="ibt_candidates", page_size=25)
             st.markdown(
                 _ov_table_html(
-                    candidates.sort_values(["date", "rank"]),
-                    sym_cols=["symbol"],
+                    cand_page, sym_cols=["symbol"],
                     num_fmt={"ret_first15_pct": "{:+.2f}", "gap_pct": "{:+.2f}"}),
                 unsafe_allow_html=True)
+            _ov_pagination_controls(cand_sorted, key="ibt_candidates", page_size=25)
+            st.download_button("Download candidates CSV (filtered view)",
+                              cand_filtered.to_csv(index=False),
+                              "intraday_backtest_candidates.csv")
 
     if not skipped.empty:
         with st.expander(f"Skipped days ({len(skipped)})", expanded=False):
             st.caption("Days the NIFTY 50 first-15m ratio didn't clear the LONG/SHORT "
-                      "day-bias threshold, or no F&O candidate survived the "
-                      "overnight-gap filter.")
-            st.markdown(_ov_table_html(skipped, num_fmt={"nifty_ratio": "{:.2f}"}),
+                      "day-bias threshold, no F&O candidate survived the overnight-gap "
+                      "filter, no candidate ever triggered an entry, or every triggered "
+                      "signal lost the sector-confirmation gate.")
+            skip_reason_filter = st.multiselect("Reason", sorted(skipped["reason"].unique()),
+                                                key="ibt_skip_reason_filter")
+            skip_filtered = skipped
+            if skip_reason_filter:
+                skip_filtered = skip_filtered[skip_filtered["reason"].isin(skip_reason_filter)]
+
+            st.caption(f"Showing {len(skip_filtered)} of {len(skipped)} day(s)")
+            skip_sorted = skip_filtered.sort_values("date", ascending=False)
+            skip_page = _ov_page_slice(skip_sorted, key="ibt_skipped", page_size=25)
+            st.markdown(_ov_table_html(skip_page, num_fmt={"nifty_ratio": "{:.2f}"}),
                        unsafe_allow_html=True)
+            _ov_pagination_controls(skip_sorted, key="ibt_skipped", page_size=25)
 
     if not trades.empty:
         with st.container(border=True, key="ov-card-ibt-trades"):
