@@ -5768,7 +5768,9 @@ def page_intraday_backtest():
             st.markdown(
                 _ov_table_html(
                     cand_page, sym_cols=["symbol"],
-                    num_fmt={"ret_first15_pct": "{:+.2f}", "gap_pct": "{:+.2f}"}),
+                    num_fmt={"ret_first15_pct": "{:+.2f}", "gap_pct": "{:+.2f}",
+                            "nifty_ratio": "{:.2f}", "sector_ratio": "{:.2f}"},
+                    badges={"sector_gate_pass": {True: "ov-badge-green", False: "ov-badge-red"}}),
                 unsafe_allow_html=True)
             _ov_pagination_controls(cand_sorted, key="ibt_candidates", page_size=25)
             st.download_button("Download candidates CSV (filtered view)",

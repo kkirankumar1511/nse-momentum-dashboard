@@ -303,7 +303,8 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
 
         for rank, (sym, ret, gap) in enumerate(accepted, start=1):
             candidate_rows.append({"date": day, "symbol": sym, "rank": rank, "direction": bias,
-                                  "ret_first15_pct": round(ret, 3), "gap_pct": gap})
+                                  "ret_first15_pct": round(ret, 3), "gap_pct": gap,
+                                  "nifty_ratio": round(nifty_ratio, 3)})
             df5 = candles5.get(sym)
             if df5 is None or df5.empty or sym not in ema21_cache:
                 continue
@@ -344,17 +345,20 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
     n_pre_sector = sum(len(v) for v in by_day.values())
     _progress(f"{n_pre_sector} signal(s) across {len(by_day)} day(s) before the sector gate", 0.85)
 
-    # -- Phase D: sector confirmation gate (v2 Spec §6), resolved once
-    # per (sector, day) actually touched -- fetches sector-constituent
-    # candle data only for symbols not already covered by the universe
-    # fetch above.
-    touched_symbols = sorted({c["symbol"] for cands in by_day.values() for c in cands})
+    # -- Phase D: sector confirmation gate (v2 Spec §6) + sector-bias
+    # annotation, resolved for EVERY ranked candidate (not just the ones
+    # that went on to form a signal) -- so the "Daily candidates" table
+    # can show each one's sector/sector-ratio/gate verdict, not just the
+    # handful that actually traded. Fetches sector-constituent candle
+    # data only for symbols not already covered by the universe fetch
+    # above.
+    all_cand_symbols = sorted({r["symbol"] for r in candidate_rows})
     sector_map: dict[str, str | None] = {}
-    if touched_symbols:
-        profiles = su.resolve_sector_profiles(touched_symbols)
+    if all_cand_symbols:
+        profiles = su.resolve_sector_profiles(all_cand_symbols)
         sector_map = {s: p.get("primary_sector") for s, p in profiles.items()}
 
-    sectors_touched = {sector_map[s] for s in touched_symbols if sector_map.get(s)}
+    sectors_touched = {sector_map[s] for s in all_cand_symbols if sector_map.get(s)}
     catalog = su.fetch_index_constituents()
     sector_members = {sec: list(catalog.get(sec, {}).keys()) for sec in sectors_touched}
     all_sector_syms = sorted(set().union(*sector_members.values())) if sector_members else []
@@ -364,33 +368,48 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
                                f"symbol(s) for the sector gate")
         _progress(_sector_fetch_stage, 0.86)
         _fetch_universe(new_sector_syms, candles5, daily, warmup_from, fetch_to,
-                        tick=lambda f, s: _progress(s, 0.86 + f * 0.04), stage=_sector_fetch_stage)
+                        tick=lambda f, s: _progress(s, 0.86 + f * 0.03), stage=_sector_fetch_stage)
 
     sector_ratio_cache: dict[tuple[str, dt.date], float] = {}
+
+    def _sector_ratio(sec: str, day: dt.date) -> float:
+        key = (sec, day)
+        if key not in sector_ratio_cache:
+            members = sector_members.get(sec, [])
+            day_ts = pd.Timestamp(day)
+            close_0925, prev_close_map = {}, {}
+            for m in members:
+                row = _candle_at(candles5, m, day_ts, 9, 25)
+                pc = _prev_close(daily, m, day_ts)
+                if row is not None:
+                    close_0925[m] = float(row["close"])
+                if pc is not None:
+                    prev_close_map[m] = pc
+            ratio, _ = mkt.compute_first15_breadth(members, close_0925, prev_close_map)
+            sector_ratio_cache[key] = ratio
+        return sector_ratio_cache[key]
+
+    _progress("Resolving sector bias for every candidate...", 0.89)
+    for row in candidate_rows:
+        sec = sector_map.get(row["symbol"])
+        if sec is None:
+            row["sector"], row["sector_ratio"], row["sector_gate_pass"] = None, None, None
+            continue
+        ratio = _sector_ratio(sec, row["date"])
+        row["sector"] = sec
+        row["sector_ratio"] = round(ratio, 3)
+        row["sector_gate_pass"] = strat.sector_gate_pass(ratio, row["direction"])
+
     gated_by_day: dict[dt.date, list[dict]] = {}
     n_dropped_no_sector = n_dropped_sector_fail = 0
     for day, cands in by_day.items():
-        day_ts = pd.Timestamp(day)
         kept = []
         for c in cands:
             sec = sector_map.get(c["symbol"])
             if sec is None:
                 n_dropped_no_sector += 1
                 continue
-            key = (sec, day)
-            if key not in sector_ratio_cache:
-                members = sector_members.get(sec, [])
-                close_0925, prev_close_map = {}, {}
-                for m in members:
-                    row = _candle_at(candles5, m, day_ts, 9, 25)
-                    pc = _prev_close(daily, m, day_ts)
-                    if row is not None:
-                        close_0925[m] = float(row["close"])
-                    if pc is not None:
-                        prev_close_map[m] = pc
-                ratio, _ = mkt.compute_first15_breadth(members, close_0925, prev_close_map)
-                sector_ratio_cache[key] = ratio
-            ratio = sector_ratio_cache[key]
+            ratio = _sector_ratio(sec, day)  # already cached from the candidate_rows pass above
             if strat.sector_gate_pass(ratio, c["direction"]):
                 c["sector"] = sec
                 c["sector_ratio"] = ratio
