@@ -6582,9 +6582,28 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
         # dotted reference lines at the real price level, since those
         # ARE prices the position is still exposed to for the rest of
         # the day, unlike entry which is a one-time past event.
+        #
+        # pos["entry_time"] is NOT always a 5-min-grid timestamp: a
+        # tick-driven trigger (check_tick_entry()/check_tick_trigger() in
+        # intraday_engine.py -- the fast path that fires the instant a
+        # live tick crosses the trigger level, rather than waiting for
+        # that candle to close) stamps it with the real wall-clock
+        # moment, e.g. 09:37:42, not 09:35:00 -- plotting the arrow at
+        # that exact x lands it visually BETWEEN the 09:35 and 09:40
+        # candles instead of on the one it actually belongs to (confirmed
+        # live 2026-10-05, NYKAA). The candle it belongs to is always the
+        # one whose open-time label is <= entry_time and > entry_time -
+        # 5min -- i.e. floor entry_time to the 5-min grid -- entirely a
+        # display fix for this chart's own x-coordinate, never touching
+        # the stored entry_time/entry_price themselves (still shown
+        # correctly via the hover/annotation values) or anything in the
+        # live trading/order path.
         _is_long = direction == istrat.LONG
+        _entry_ts = pd.Timestamp(pos["entry_time"])
+        _entry_candle_ts = _entry_ts.replace(second=0, microsecond=0) - \
+            pd.Timedelta(minutes=_entry_ts.minute % 5)
         fig.add_annotation(
-            x=pd.Timestamp(pos["entry_time"]), y=float(pos["entry_price"]),
+            x=_entry_candle_ts, y=float(pos["entry_price"]),
             xref="x", yref="y", text="entry", showarrow=True,
             arrowhead=2, arrowsize=1, arrowwidth=1.5, arrowcolor="#2166ac",
             ax=0, ay=28 if _is_long else -28,
