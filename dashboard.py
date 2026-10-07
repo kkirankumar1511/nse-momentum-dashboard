@@ -5824,7 +5824,7 @@ def page_intraday_backtest():
                 filtered = filtered[filtered["net_pnl"] <= 0]
 
             st.caption(f"Showing {len(filtered)} of {len(trades)} leg(s)")
-            filtered_sorted = filtered.sort_values(["date", "entry_time"], ascending=[False, False])
+            filtered_sorted = filtered.sort_values("exit_time", ascending=False)
             filtered_page = _ov_page_slice(filtered_sorted, key="ibt_trades", page_size=20)
             st.markdown(
                 _ov_table_html(
