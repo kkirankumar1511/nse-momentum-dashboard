@@ -7428,7 +7428,7 @@ def page_intraday_tradebook():
     with f1:
         mode_filter = st.selectbox("Mode", ["paper", "live"], key="intraday_tb_mode")
     with f2:
-        since = st.date_input("Since", value=dt.date(2026, 10, 1),
+        since = st.date_input("Since", value=dt.date.today() - dt.timedelta(days=30),
                               key="intraday_tb_since")
 
     positions = idb.get_positions(mode=mode_filter)
