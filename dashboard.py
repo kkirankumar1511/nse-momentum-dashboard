@@ -7447,11 +7447,39 @@ def page_intraday_tradebook():
     metrics = [
         _ov_metric_html("Positions", str(len(positions)), f"{len(closed)} closed"),
         _ov_metric_html("Legs", str(len(legs_all)), "target + stop/squareoff exits"),
-        _ov_metric_html("Net P&L", f"₹{total_pnl:+,.2f}", None,
+        _ov_metric_html("Net P&L", f"₹{total_pnl:+,.2f}", "in selected window",
                        value_cls=("ov-pos" if total_pnl >= 0 else "ov-neg")),
         _ov_metric_html("Win rate (legs)",
                        f"{win_rate:.0f}%" if pd.notna(win_rate) else "—", None),
     ]
+
+    # Final capital / return / CAGR are ACCOUNT-WIDE facts (this mode's
+    # own intraday_capital_state row, and its full position history for
+    # the CAGR span) -- deliberately NOT scoped to the "Since" filter
+    # above, same way the positional Backtest page's own CAGR isn't
+    # affected by a trade-table filter either.
+    cap = idb.get_capital(mode_filter)
+    if cap:
+        starting_capital = float(cap["starting_capital"])
+        final_capital = float(cap["current_capital"])
+        total_return_pct = ((final_capital / starting_capital - 1) * 100
+                           if starting_capital else 0.0)
+        positions_all = idb.get_positions(mode=mode_filter)
+        cagr_pct = None
+        if not positions_all.empty and starting_capital > 0:
+            first_date = pd.to_datetime(positions_all["date"]).min()
+            years = max((pd.Timestamp.today().normalize() - first_date).days / 365.25, 1 / 365.25)
+            cagr_pct = ((final_capital / starting_capital) ** (1 / years) - 1) * 100
+        metrics += [
+            _ov_metric_html("Final capital", f"₹{final_capital:,.2f}",
+                           f"from ₹{starting_capital:,.0f} ({mode_filter})", "", "green"),
+            _ov_metric_html("Return", f"{total_return_pct:+.2f}%", "all-time, this mode",
+                           "ov-pos" if total_return_pct >= 0 else "ov-neg", "green",
+                           "ov-pos" if total_return_pct >= 0 else "ov-neg"),
+            _ov_metric_html("CAGR", f"{cagr_pct:+.2f}%" if cagr_pct is not None else "—",
+                           "annualized", "ov-pos" if (cagr_pct or 0) >= 0 else "ov-neg", "teal",
+                           "ov-pos" if (cagr_pct or 0) >= 0 else "ov-neg"),
+        ]
     st.markdown(f'<div class="ov-grid-metrics">{"".join(metrics)}</div>', unsafe_allow_html=True)
     st.divider()
 
