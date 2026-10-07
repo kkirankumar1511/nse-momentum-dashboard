@@ -746,6 +746,17 @@ _OVERVIEW_CSS = """
    (.ov-tbl-scroll already supports that) instead of wrapping vertically. */
 .ov-table td { padding:5px 8px; border-top:1px solid var(--ov-border); color:var(--ov-text-primary); white-space:nowrap; }
 .ov-table th.r, .ov-table td.r { text-align:right; }
+/* Click-to-sort headers (see _ov_table_html()'s data-ci/data-ty and the
+   single global click-delegation script injected once near the bottom
+   of this file) -- every .ov-table gets this for free, no per-page
+   wiring needed. The indicator span stays reserved-width even when
+   empty so a header's text doesn't shift sideways the moment it
+   becomes the active sort column. */
+.ov-table th[data-ci] { cursor:pointer; user-select:none; }
+.ov-table th[data-ci]:hover { color:var(--ov-text-primary); }
+.ov-sort-ind { display:inline-block; width:10px; text-align:center; opacity:0.6; }
+.ov-table th.ov-sort-asc .ov-sort-ind::after { content:"▲"; }
+.ov-table th.ov-sort-desc .ov-sort-ind::after { content:"▼"; }
 /* Wide tables (e.g. Fundamentals' "Ranked" with ~19 columns) get cut off
    hard at the container's right edge when they need to scroll, while
    narrower tables (e.g. Holdings) end cleanly with nothing to scroll --
@@ -932,9 +943,15 @@ def _ov_table_html(df: pd.DataFrame, columns: list[str] | None = None,
         better = (v > ref) == higher_is_better
         return _ov_arrow(better)
 
+    # data-ci (column index)/data-ty ("num"/"txt") drive the global
+    # click-to-sort script (see its injection site near the bottom of
+    # this file) -- every table built through this function gets
+    # sortable headers for free, nothing per-call-site to wire up.
     header = "".join(
-        f'<th{" class=\"r\"" if c in right_cols else ""}>{html_lib.escape(_label(c))}</th>'
-        for c in columns)
+        f'<th class="{"r" if c in right_cols else ""}" data-ci="{i}" '
+        f'data-ty="{"num" if c in right_cols else "txt"}">'
+        f'{html_lib.escape(_label(c))}<span class="ov-sort-ind"></span></th>'
+        for i, c in enumerate(columns))
 
     rows_html = []
     for _, row in df.iterrows():
@@ -943,8 +960,10 @@ def _ov_table_html(df: pd.DataFrame, columns: list[str] | None = None,
             v = row[c]
             r_attr = ' class="r"' if c in right_cols else ""
             sym_cls = "ov-sym" if c in sym_cols else ""
+            is_numeric_col = c in right_cols
             if pd.isna(v):
-                cells.append(f'<td{r_attr}><span class="{sym_cls}">{na_rep}</span></td>')
+                dv_attr = ' data-v="-Infinity"' if is_numeric_col else ""
+                cells.append(f'<td{r_attr}{dv_attr}><span class="{sym_cls}">{na_rep}</span></td>')
             elif c in badges:
                 mapping = badges[c]
                 css = mapping(v) if callable(mapping) else mapping.get(v, "ov-badge-gray")
@@ -954,10 +973,11 @@ def _ov_table_html(df: pd.DataFrame, columns: list[str] | None = None,
                 fv = float(v)
                 cls = "ov-pos" if fv >= 0 else "ov-neg"
                 fmt = num_fmt.get(c, "{:+,.2f}")
-                cells.append(f'<td{r_attr}>{_arrow_prefix(c, row)}<span class="{cls} ov-sym">'
+                cells.append(f'<td{r_attr} data-v="{fv!r}">{_arrow_prefix(c, row)}<span class="{cls} ov-sym">'
                             f'{fmt.format(fv)}</span></td>')
             elif c in num_fmt:
-                cells.append(f'<td{r_attr}>{_arrow_prefix(c, row)}<span class="{sym_cls}">'
+                fv = float(v)
+                cells.append(f'<td{r_attr} data-v="{fv!r}">{_arrow_prefix(c, row)}<span class="{sym_cls}">'
                             f'{num_fmt[c].format(v)}</span></td>')
             else:
                 cells.append(f'<td>{_arrow_prefix(c, row)}<span class="{sym_cls}">'
@@ -8267,6 +8287,56 @@ page_intraday_backtest_p = st.Page(page_intraday_backtest, title="Intraday Backt
 # Overview, where this design system started -- gets the same compact
 # card/badge/table look, and so the sidebar CSS below applies immediately.
 st.markdown(_OVERVIEW_CSS, unsafe_allow_html=True)
+
+# Click-to-sort for EVERY .ov-table site-wide (Overview, Screener,
+# both Backtest pages, both Tradebooks, Job Log, Rebalance History,
+# Intraday Dashboard/Logs...) -- one single delegated listener on
+# `document`, guarded the same way the sidebar nav-marking script below
+# guards itself (window.__ovTableSort), so it survives every Streamlit
+# rerun without double-registering. Delegation means it needs no
+# per-table setup and keeps working for tables that render later (a
+# filter changing, a new page) without this script re-running --
+# _ov_table_html() is the only other half of this (data-ci/data-ty).
+st.html(
+    """<script>
+    (function(){
+      if (window.__ovTableSort) return;
+      window.__ovTableSort = true;
+      document.addEventListener('click', function(ev){
+        const th = ev.target.closest('.ov-table th[data-ci]');
+        if (!th) return;
+        const table = th.closest('table');
+        if (!table || !table.rows.length) return;
+        const ci = parseInt(th.getAttribute('data-ci'), 10);
+        const ty = th.getAttribute('data-ty') || 'txt';
+        const headerRow = table.rows[0];
+        const dir = th.classList.contains('ov-sort-asc') ? 'desc' : 'asc';
+        Array.from(headerRow.cells).forEach(h => h.classList.remove('ov-sort-asc', 'ov-sort-desc'));
+        th.classList.add(dir === 'asc' ? 'ov-sort-asc' : 'ov-sort-desc');
+        const mul = dir === 'asc' ? 1 : -1;
+        const body = table.tBodies[0] || table;
+        const rows = Array.from(table.rows).slice(1);
+        rows.sort(function(a, b){
+          const ca = a.cells[ci], cb = b.cells[ci];
+          if (!ca || !cb) return 0;
+          if (ty === 'num') {
+            const va = parseFloat(ca.getAttribute('data-v'));
+            const vb = parseFloat(cb.getAttribute('data-v'));
+            const na = isNaN(va) ? -Infinity : va;
+            const nb = isNaN(vb) ? -Infinity : vb;
+            return (na - nb) * mul;
+          }
+          const ta = ca.textContent.trim().toLowerCase();
+          const tb = cb.textContent.trim().toLowerCase();
+          if (ta < tb) return -1 * mul;
+          if (ta > tb) return 1 * mul;
+          return 0;
+        });
+        rows.forEach(r => body.appendChild(r));
+      });
+    })();
+    </script>""",
+    unsafe_allow_javascript=True)
 
 with st.sidebar:
     # Flat, always-visible tabs grouped under a plain small-caps label --
