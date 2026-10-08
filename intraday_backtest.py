@@ -263,20 +263,45 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
     for day_i, day in enumerate(trading_days):
         _progress(f"Scanning {day}...", 0.70 + (day_i / len(trading_days)) * 0.15)
         day_ts = pd.Timestamp(day)
-        close_0925, prev_close_map = {}, {}
-        for sym in all_syms:
-            row = _candle_at(candles5, sym, day_ts, 9, 25)
-            pc = _prev_close(daily, sym, day_ts)
-            if row is not None:
-                close_0925[sym] = float(row["close"])
-            if pc is not None:
-                prev_close_map[sym] = pc
 
+        def _closes_at(hh: int, mm: int) -> tuple[dict, dict]:
+            close_map, prev_map = {}, {}
+            for sym in all_syms:
+                row = _candle_at(candles5, sym, day_ts, hh, mm)
+                pc = _prev_close(daily, sym, day_ts)
+                if row is not None:
+                    close_map[sym] = float(row["close"])
+                if pc is not None:
+                    prev_map[sym] = pc
+            return close_map, prev_map
+
+        close_0925, prev_close_map = _closes_at(9, 25)
         nifty_ratio, _ = mkt.compute_first15_breadth(nifty50, close_0925, prev_close_map)
         bias = strat.day_bias(nifty_ratio)
+        checkpoint = "09:30"
+        window_start = strat.SIGNAL_WINDOW_START
+
         if bias is None:
-            skipped_days.append({"date": day, "reason": "no_day_bias", "nifty_ratio": nifty_ratio})
-            continue
+            # v5.4 §5o -- one retry 15 minutes later before skipping the
+            # day outright: if the primary (09:30) breadth check landed
+            # in the neutral gap, recheck at 09:45 using the 09:40-
+            # labelled candle's close. A rescued day takes its bias AND
+            # its candidate ranking from the 09:45 close only (never
+            # mixed with the 09:30 data), and no signal may be evaluated
+            # before the 09:40 candle either -- its shortlist wasn't
+            # knowable any earlier -- hence window_start below, threaded
+            # into find_entry() so the scan genuinely can't start sooner.
+            close_0940, prev_close_retry = _closes_at(9, 40)
+            nifty_ratio_retry, _ = mkt.compute_first15_breadth(nifty50, close_0940, prev_close_retry)
+            bias_retry = strat.day_bias(nifty_ratio_retry)
+            if bias_retry is None:
+                skipped_days.append({"date": day, "reason": "no_day_bias", "nifty_ratio": nifty_ratio})
+                continue
+            bias = bias_retry
+            nifty_ratio = nifty_ratio_retry
+            close_0925, prev_close_map = close_0940, prev_close_retry
+            checkpoint = "09:45"
+            window_start = "09:40"
 
         fno_rets = {}
         for sym in fno_syms:
@@ -304,7 +329,7 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
         for rank, (sym, ret, gap) in enumerate(accepted, start=1):
             candidate_rows.append({"date": day, "symbol": sym, "rank": rank, "direction": bias,
                                   "ret_first15_pct": round(ret, 3), "gap_pct": gap,
-                                  "nifty_ratio": round(nifty_ratio, 3)})
+                                  "nifty_ratio": round(nifty_ratio, 3), "checkpoint": checkpoint})
             df5 = candles5.get(sym)
             if df5 is None or df5.empty or sym not in ema21_cache:
                 continue
@@ -323,7 +348,8 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
                                                   float(c25.iloc[0]["high"]), float(c25.iloc[0]["low"]))
             entry = strat.find_entry(dsub, bias, ema21_cache[sym], atr14_cache[sym],
                                      first_low, first_high, sig_range_low, sig_range_high,
-                                     ema50_series=ema50_cache.get(sym), fvg_lo=fvg_lo, fvg_hi=fvg_hi)
+                                     ema50_series=ema50_cache.get(sym), fvg_lo=fvg_lo, fvg_hi=fvg_hi,
+                                     window_start=window_start)
             if entry is None:
                 continue
             risk = abs(entry["entry_price"] - entry["stop_price"])

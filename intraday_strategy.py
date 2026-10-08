@@ -375,7 +375,8 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
                first_candle_high: float, sig_range_low: float | None = None,
                sig_range_high: float | None = None,
                ema50_series: pd.Series | None = None,
-               fvg_lo: float | None = None, fvg_hi: float | None = None) -> dict | None:
+               fvg_lo: float | None = None, fvg_hi: float | None = None,
+               window_start: str = SIGNAL_WINDOW_START) -> dict | None:
     """Spec v2 §3.2's walk-forward loop, for one candidate on one day.
 
     `day`: that symbol's 5-min OHLCV candles for the day, indexed by
@@ -401,11 +402,19 @@ def find_entry(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
     fair_value_gap() itself found no gap that day) means the veto is
     simply INERT -- opposite fail-direction from sig_range above.
 
+    `window_start`: v5.4 §5o -- on a day whose NIFTY-breadth day-bias was
+    only resolved by the 09:45 retry (the 09:30 check landed neutral),
+    the day's candidate shortlist itself wasn't knowable before the
+    09:40-labelled candle closed, so no signal may be evaluated any
+    earlier either -- pass "09:40" instead of the default SIGNAL_WINDOW_
+    START ("09:25") for such a day. A primary (09:30-decided) day passes
+    nothing and keeps today's normal behavior.
+
     Returns {"signal_time", "entry_time", "entry_price", "stop_price"}
     on a triggered entry, else None (day invalidated, or no signal ever
     triggered by SIGNAL_WINDOW_END). At most one trade per candidate per
     day -- the moment an entry triggers, this returns immediately."""
-    win = day.between_time(SIGNAL_WINDOW_START, SIGNAL_WINDOW_END)
+    win = day.between_time(window_start, SIGNAL_WINDOW_END)
     if win.empty:
         return None
 
@@ -541,7 +550,8 @@ def diagnose_day(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
                  first_candle_high: float, sig_range_low: float | None = None,
                  sig_range_high: float | None = None,
                  ema50_series: pd.Series | None = None,
-                 fvg_lo: float | None = None, fvg_hi: float | None = None) -> dict:
+                 fvg_lo: float | None = None, fvg_hi: float | None = None,
+                 window_start: str = SIGNAL_WINDOW_START) -> dict:
     """Read-only diagnostic twin of find_entry() -- walks the IDENTICAL
     §3.2/§5l/§5m/§5n loop, candle-by-candle-for-candle, but instead of stopping at
     the first trigger, records WHY every candle that didn't advance the
@@ -569,8 +579,11 @@ def diagnose_day(day: pd.DataFrame, direction: str, ema21_series: pd.Series,
         "no_signal_all_day" (not invalidated, but nothing EVER passed
         the fresh-signal checks), "empty" (no candles in the window at
         all, e.g. a holiday/data gap).
+
+    `window_start`: v5.4 §5o -- see find_entry()'s own docstring; pass
+    "09:40" for a day whose bias was only resolved by the 09:45 retry.
     """
-    win = day.between_time(SIGNAL_WINDOW_START, SIGNAL_WINDOW_END)
+    win = day.between_time(window_start, SIGNAL_WINDOW_END)
     trace: list[dict] = []
     if win.empty:
         return {"trace": trace, "outcome": {"type": "empty", "detail": "No candles in the signal window."}}

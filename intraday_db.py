@@ -183,6 +183,15 @@ def _migrate_daily_selection_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE intraday_days ADD COLUMN advancers INTEGER")
     if "decliners" not in day_cols:
         conn.execute("ALTER TABLE intraday_days ADD COLUMN decliners INTEGER")
+    # v5.4 §5o -- which NIFTY-breadth check actually decided today's bias:
+    # "09:30" (the normal, primary check) or "09:45" (the day was rescued
+    # by the one-time retry after the primary check landed neutral).
+    # Needed live, not just for display -- on a "09:45" day, no signal
+    # may be evaluated before the 09:40-labelled candle (the shortlist
+    # itself wasn't knowable any earlier), so run_live() reads this back
+    # to decide each tracker's effective window_start.
+    if "checkpoint" not in day_cols:
+        conn.execute("ALTER TABLE intraday_days ADD COLUMN checkpoint TEXT NOT NULL DEFAULT '09:30'")
     conn.commit()
 
     # v5.2 EMA-trail exit: once price first touches the 1:2R target, the
@@ -215,19 +224,26 @@ def _migrate_daily_selection_schema(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 def record_day(date: str, nifty_ratio: float, day_bias: str | None,
-               advancers: int | None = None, decliners: int | None = None) -> None:
-    """One call per trading day the engine runs the 09:30 check --
+               advancers: int | None = None, decliners: int | None = None,
+               checkpoint: str = "09:30") -> None:
+    """One call per trading day the engine runs the day-bias check --
     day_bias=None records a SKIPPED day (ratio didn't clear either
-    threshold), not an error. advancers/decliners are the raw NIFTY50
-    counts nifty_ratio was computed from -- kept alongside it so the
-    Dashboard can show them next to NSE's own live A/D widget for a
-    direct, same-format comparison."""
+    threshold on either attempt), not an error. advancers/decliners are
+    the raw NIFTY50 counts nifty_ratio was computed from -- kept
+    alongside it so the Dashboard can show them next to NSE's own live
+    A/D widget for a direct, same-format comparison. checkpoint: v5.4
+    §5o -- "09:30" (decided by the primary check) or "09:45" (the day
+    was rescued by the one-time retry); nifty_ratio/advancers/decliners
+    are always the figures from whichever checkpoint actually decided
+    the day, never the (neutral, discarded) primary ones on a rescued
+    day."""
     conn = get_conn()
     conn.execute(
-        "INSERT INTO intraday_days (date, nifty_ratio, day_bias, advancers, decliners) "
-        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(date) DO UPDATE SET nifty_ratio = excluded.nifty_ratio, "
-        "day_bias = excluded.day_bias, advancers = excluded.advancers, decliners = excluded.decliners",
-        (date, nifty_ratio, day_bias, advancers, decliners))
+        "INSERT INTO intraday_days (date, nifty_ratio, day_bias, advancers, decliners, checkpoint) "
+        "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(date) DO UPDATE SET nifty_ratio = excluded.nifty_ratio, "
+        "day_bias = excluded.day_bias, advancers = excluded.advancers, decliners = excluded.decliners, "
+        "checkpoint = excluded.checkpoint",
+        (date, nifty_ratio, day_bias, advancers, decliners, checkpoint))
     conn.commit()
     conn.close()
 

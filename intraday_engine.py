@@ -92,20 +92,32 @@ def _push(title: str, message: str) -> None:
 
 def run_selection(date: str, nifty50_symbols: list[str], fno_symbols: list[str],
                   close_0925: dict[str, float], prev_day_close: dict[str, float],
-                  mode: str) -> dict:
+                  mode: str, checkpoint: str = "09:30") -> dict:
     """Spec.md §2, given today's 09:25-candle closes + previous closes
     already fetched for the full nifty50 UNION fno universe. Writes
     intraday_days/intraday_daily_selection and returns
-    {"nifty_ratio", "day_bias", "candidates": [{"symbol","direction"}]}
-    -- candidates is empty when day_bias is None (skip day)."""
+    {"nifty_ratio", "day_bias", "candidates": [{"symbol","direction"}],
+    "checkpoint"} -- candidates is empty when day_bias is None (skip day).
+
+    checkpoint: v5.4 §5o -- "09:30" for the normal primary check
+    (close_0925/prev_day_close are the usual 09:25-candle-close-based
+    batch quote()), or "09:45" when the caller is retrying after the
+    primary check came back neutral -- same close_0925/prev_day_close
+    PARAMETER NAMES, but by the time that call happens the batched
+    quote()'s current price IS the 09:40-labelled candle's close
+    instead (the caller, run_live(), is responsible for re-fetching and
+    passing the right snapshot; this function only threads the label
+    through to idb.record_day() and the returned dict, it does no
+    waiting or re-fetching itself, same as every other wall-clock-free
+    decision function in this module)."""
     nifty_ratio, nifty_rets = mkt.compute_first15_breadth(nifty50_symbols, close_0925, prev_day_close)
     bias = strat.day_bias(nifty_ratio)
     advancers = sum(1 for v in nifty_rets.values() if v > 0)
     decliners = sum(1 for v in nifty_rets.values() if v < 0)
-    idb.record_day(date, nifty_ratio, bias, advancers, decliners)
+    idb.record_day(date, nifty_ratio, bias, advancers, decliners, checkpoint=checkpoint)
 
     if bias is None:
-        return {"nifty_ratio": nifty_ratio, "day_bias": None, "candidates": []}
+        return {"nifty_ratio": nifty_ratio, "day_bias": None, "candidates": [], "checkpoint": checkpoint}
 
     fno_rets = {}
     for sym in fno_symbols:
@@ -142,7 +154,8 @@ def run_selection(date: str, nifty50_symbols: list[str], fno_symbols: list[str],
     idb.record_candidates(date, [
         {"rank": i + 1, "symbol": sym, "ret_first15_pct": round(ret, 3), "gap_pct": gap}
         for i, (sym, ret, gap) in enumerate(accepted)])
-    return {"nifty_ratio": nifty_ratio, "day_bias": bias, "candidates": candidates}
+    return {"nifty_ratio": nifty_ratio, "day_bias": bias, "candidates": candidates,
+           "checkpoint": checkpoint}
 
 
 def _overnight_gap_pct(symbol: str, prev_close: float | None, today: dt.date) -> float | None:
@@ -881,12 +894,32 @@ def run_live(mode: str = "paper") -> None:
     sel = run_selection(date_str, nifty50, fno_syms, close_0925, prev_close, mode)
     print(f"nifty_ratio={sel['nifty_ratio']:.2f}  day_bias={sel['day_bias']}  "
          f"candidates={sel['candidates']}")
+
     if sel["day_bias"] is None:
-        print("No clear day bias -- no trading today.")
+        # v5.4 §5o -- one retry 15 minutes later before sitting out the
+        # day: if the 09:30 check landed in the neutral gap, wait for
+        # the 09:40-labelled candle to close and recheck breadth there.
+        # A rescued day takes its bias AND its candidate ranking from
+        # the 09:45 close only (never mixed with the discarded 09:30
+        # data) -- close_0925/prev_close are overwritten with the retry
+        # snapshot below so every downstream use (sector gate, tracker
+        # construction) is automatically consistent with whichever
+        # checkpoint actually decided the day.
+        print(f"09:30 check neutral (ratio {sel['nifty_ratio']:.2f}) -- "
+             f"waiting for the 09:45 retry ({dt.datetime.now():%H:%M:%S} now)...")
+        _wait_until(dt.time(9, 45))
+        close_0925, prev_close = _prev_close_and_0925(all_syms, today)
+        sel = run_selection(date_str, nifty50, fno_syms, close_0925, prev_close, mode,
+                            checkpoint="09:45")
+        print(f"09:45 retry: nifty_ratio={sel['nifty_ratio']:.2f}  day_bias={sel['day_bias']}  "
+             f"candidates={sel['candidates']}")
+
+    if sel["day_bias"] is None:
+        print("No clear day bias (09:30 or 09:45) -- no trading today.")
         _push("KK Trading — no intraday trade today",
-             f"NIFTY 50 first-15m ratio was {sel['nifty_ratio']:.2f} -- doesn't "
-             f"clear the LONG (>{strat.BIAS_RATIO_LONG_MIN}) or SHORT "
-             f"(<{strat.BIAS_RATIO_SHORT_MAX}) threshold. Sitting out today ({mode} mode).")
+             f"NIFTY 50 first-15m ratio was {sel['nifty_ratio']:.2f} at the 09:45 retry -- "
+             f"doesn't clear the LONG (>{strat.BIAS_RATIO_LONG_MIN}) or SHORT "
+             f"(<{strat.BIAS_RATIO_SHORT_MAX}) threshold either. Sitting out today ({mode} mode).")
         return
     if not sel["candidates"]:
         print("Day bias set but no valid candidates -- no trading today.")
@@ -917,6 +950,13 @@ def run_live(mode: str = "paper") -> None:
     capital = idb.get_capital(mode)["current_capital"]
     capital_alloc = (capital / strat.MAX_TRADES_PER_DAY) * strat.LEVERAGE
     risk_budget = capital * strat.MAX_RISK_PCT_PER_TRADE
+
+    # v5.4 §5o -- on a day rescued by the 09:45 retry, no signal may be
+    # evaluated before the 09:40-labelled candle (today's shortlist
+    # wasn't knowable any earlier) -- a day-level value, not per-tracker,
+    # since every candidate today shares the same checkpoint. Gates the
+    # boundary loop below.
+    window_start = "09:40" if sel["checkpoint"] == "09:45" else strat.SIGNAL_WINDOW_START
 
     trackers = []
     for c in sel["candidates"]:
@@ -976,8 +1016,16 @@ def run_live(mode: str = "paper") -> None:
         t.hist = hist
         # Seed the running vol-min from today's pre-window candles (09:15-
         # 09:30) -- see step_candle()'s docstring; the running min starts
-        # at session open, not at the 09:30 signal-window start.
-        pre_window = today_so_far.loc[today_so_far.index < pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=30)]
+        # at session open, not at the 09:30 signal-window start. v5.4
+        # §5o: on a 09:45-retry day, window_start itself is "09:40" --
+        # past the normal 09:30 cutoff -- so candles 09:30-09:35 would
+        # never be seen by EITHER this seed OR the per-boundary update
+        # below (which only runs from window_start onward) unless the
+        # seed's own cutoff also extends to cover them. max() keeps the
+        # existing 09:30 cutoff exactly as before on a normal day.
+        _cutoff_hm = max(dt.time(9, 30), dt.datetime.strptime(window_start, "%H:%M").time())
+        _cutoff_ts = pd.Timestamp(today).replace(hour=_cutoff_hm.hour, minute=_cutoff_hm.minute)
+        pre_window = today_so_far.loc[today_so_far.index < _cutoff_ts]
         t.vol_min_so_far = float(pre_window["volume"].min()) if not pre_window.empty else None
         trackers.append(t)
 
@@ -1062,7 +1110,9 @@ def run_live(mode: str = "paper") -> None:
             # candle labeled 09:30 is now itself eligible), so this gate
             # follows the same constant rather than a separate hardcoded
             # time, to avoid the two silently drifting apart again.
-            if (boundary.time() >= dt.datetime.strptime(strat.SIGNAL_WINDOW_START, "%H:%M").time()
+            # v5.4 §5o -- window_start is "09:40" instead on a day the
+            # 09:45 retry rescued (see its own definition above).
+            if (boundary.time() >= dt.datetime.strptime(window_start, "%H:%M").time()
                     and (last_candle_ts is None or boundary > last_candle_ts)
                     and day_state["slots_remaining"] > 0):
                 # v3 Spec §4 -- collect EVERY candidate's event at this
