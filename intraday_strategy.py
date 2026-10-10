@@ -91,7 +91,9 @@ TOP_N_CANDIDATES = 5  # v5.4: back to top-5 (from v5/v5.3's top-2) -- per
 # project has explained why. v5.4 §0 explicitly says NOT to deploy this
 # for real capital until that's resolved; paper mode is exactly the safe
 # way to actually test the disputed finding. MAX_TRADES_PER_DAY (below)
-# stays 2 -- the pool searched widens, the day's trade cap does not.
+# was 2 through §5o -- v5.4 §5p (adopted) later raised it to 4, for
+# monthly stability rather than return; see MAX_TRADES_PER_DAY's own
+# comment below for that change.
 #
 # CHRONO note (v5.4 §2.3/§5.1): the "look-ahead in slot-filling" bug
 # CHRONO fixes is a BACKTEST-SCRIPT artifact (a whole-day-at-once script
@@ -140,7 +142,18 @@ SECTOR_GATE_RATIO_LONG_MIN = 2.0
 SECTOR_GATE_RATIO_SHORT_MAX = 0.5
 
 # Spec.md §7 position sizing
-MAX_TRADES_PER_DAY = 2
+# v5.4 §5p (adopted, supersedes §5o) -- 2 -> 4 trade slots/day, risk per
+# trade UNCHANGED at 0.5%. Adopted for MONTHLY STABILITY, not return:
+# CAGR is ~flat (61.37%->62.68% on the frozen cache) but the longest
+# losing streak halves (4 months->2) and every rolling-6-month window
+# turns non-negative. The cap only ever binds on days a 3rd/4th signal
+# actually fires (every existing 1-2-slot day is untouched, purely
+# additive -- 332 positions added, 0 removed). Capital_alloc/risk_budget
+# split 4 ways instead of 2 (both already derive from this constant
+# everywhere they're used, nothing else to change) -- worst-case daily
+# risk exposure doubles in THEORY (4x0.5%=2.0% vs 1.0%), measured max
+# 2.01% on the frozen cache's single busiest 4-slot day, no blowups.
+MAX_TRADES_PER_DAY = 4
 LEVERAGE = 5.0
 MAX_RISK_PCT_PER_TRADE = 0.005
 
