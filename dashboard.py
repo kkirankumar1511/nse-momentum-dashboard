@@ -286,14 +286,22 @@ if not st.session_state.get("dashboard_authenticated", False):
                 if (e.key !== 'Enter' && e.keyCode !== 13) return;
                 const form = document.querySelector('[data-testid="stForm"]');
                 if (!form || !form.contains(document.activeElement)) return;
-                // NOT just the first <button> in the form -- that's the
-                // password field's own "show/hide" eye-icon toggle
-                // (kind="button"), which comes before the real submit
-                // button in DOM order and was wrongly being clicked
-                // instead (confirmed live: a real user's Enter press
-                // toggled password visibility rather than signing in).
-                // st.form_submit_button's own button carries
-                // kind="...FormSubmit" (e.g. "primaryFormSubmit").
+                // Not just the FIRST button element in the form -- that's
+                // the password field's own show/hide eye-icon toggle
+                // (kind is plain button), which comes before the real
+                // submit button in DOM order and was wrongly being
+                // clicked instead (confirmed live: a real user's Enter
+                // press toggled password visibility rather than signing
+                // in). form_submit_button's own button carries a kind
+                // ending in FormSubmit (e.g. primaryFormSubmit).
+                // NOTE: never write a tag name wrapped in angle brackets
+                // anywhere in this script body, even in a comment --
+                // Streamlit's st.html sanitizer silently empties the
+                // ENTIRE script, with no error, if the raw text looks
+                // like a disallowed nested tag. Confirmed this the hard
+                // way: Enter silently did nothing again after the
+                // previous fix, because the comment explaining the
+                // button-selector bug used that exact shape itself.
                 const btn = form.querySelector('button[kind$="FormSubmit"]');
                 if (btn) { btn.click(); }
               }, true);
