@@ -129,7 +129,11 @@ def passes_gap_filter(gap_pct: float | None, threshold: float = GAP_FILTER_PCT) 
 # Spec v2 §2.2 day-bias ratio gate -- CHANGED from v1's strict 2.0/0.5
 # to this more moderate threshold (§9.4's sweep: neither the strict v1
 # value nor a fully-relaxed 1.0/1.0 performed as well as this one).
-BIAS_RATIO_LONG_MIN = 1.5
+# LONG_MIN changed from 1.5 to 1.53 (v5.4 spec copy 7, ACTION 2) to match
+# the research engine's own list-builder threshold -- confirmed low-impact
+# (reclassifies only 5 of 869 days per that spec's §0.1) but kept the two
+# codebases on one number rather than two close-but-different ones.
+BIAS_RATIO_LONG_MIN = 1.53
 BIAS_RATIO_SHORT_MAX = 0.66
 
 # Spec v2 §6.3 -- entry-time sector-confirmation gate threshold.
