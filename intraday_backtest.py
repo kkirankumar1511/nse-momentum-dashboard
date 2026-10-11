@@ -396,9 +396,20 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
         _fetch_universe(new_sector_syms, candles5, daily, warmup_from, fetch_to,
                         tick=lambda f, s: _progress(s, 0.86 + f * 0.03), stage=_sector_fetch_stage)
 
-    sector_ratio_cache: dict[tuple[str, dt.date], float] = {}
+    sector_ratio_cache: dict[tuple[str, dt.date], float | None] = {}
 
-    def _sector_ratio(sec: str, day: dt.date) -> float:
+    def _sector_ratio(sec: str, day: dt.date) -> float | None:
+        """None (fail-closed) if ANY of this sector's constituents
+        couldn't be resolved for this day -- v5.4 §5.1's own "DATA
+        PREREQUISITES" warning: computing the ratio from whatever
+        partial subset of members happened to have data is exactly the
+        bug that silently passed a candidate that should have failed
+        the gate (their reference project's own incident, NAUKRI
+        2026-10-09, traced to a sector ratio computed from 4 of a
+        sector's real constituent count). Same fail-closed discipline
+        intraday_engine.py's own resolve_sector_gates() already uses
+        live (v2 Spec §10.3) -- this backtest module didn't have it
+        until now."""
         key = (sec, day)
         if key not in sector_ratio_cache:
             members = sector_members.get(sec, [])
@@ -411,8 +422,12 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
                     close_0925[m] = float(row["close"])
                 if pc is not None:
                     prev_close_map[m] = pc
-            ratio, _ = mkt.compute_first15_breadth(members, close_0925, prev_close_map)
-            sector_ratio_cache[key] = ratio
+            missing = [m for m in members if m not in close_0925 or m not in prev_close_map]
+            if missing or not members:
+                sector_ratio_cache[key] = None
+            else:
+                ratio, _ = mkt.compute_first15_breadth(members, close_0925, prev_close_map)
+                sector_ratio_cache[key] = ratio
         return sector_ratio_cache[key]
 
     _progress("Resolving sector bias for every candidate...", 0.89)
@@ -423,8 +438,9 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
             continue
         ratio = _sector_ratio(sec, row["date"])
         row["sector"] = sec
-        row["sector_ratio"] = round(ratio, 3)
-        row["sector_gate_pass"] = strat.sector_gate_pass(ratio, row["direction"])
+        row["sector_ratio"] = round(ratio, 3) if ratio is not None else None
+        row["sector_gate_pass"] = (strat.sector_gate_pass(ratio, row["direction"])
+                                   if ratio is not None else False)
 
     gated_by_day: dict[dt.date, list[dict]] = {}
     n_dropped_no_sector = n_dropped_sector_fail = 0
@@ -436,7 +452,7 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
                 n_dropped_no_sector += 1
                 continue
             ratio = _sector_ratio(sec, day)  # already cached from the candidate_rows pass above
-            if strat.sector_gate_pass(ratio, c["direction"]):
+            if ratio is not None and strat.sector_gate_pass(ratio, c["direction"]):
                 c["sector"] = sec
                 c["sector_ratio"] = ratio
                 kept.append(c)
