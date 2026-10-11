@@ -258,6 +258,40 @@ if not st.session_state.get("dashboard_authenticated", False):
             remember = st.checkbox("Remember me on this device until tomorrow morning",
                                    value=True)
             submitted = st.form_submit_button("Sign in", type="primary")
+        # Streamlit's own built-in Enter-to-submit (st.form's default
+        # enter_to_submit=True) didn't fire reliably for at least one
+        # real desktop user -- confirmed it DOES work in a clean
+        # headless-Chromium test against this exact page, so the most
+        # likely cause is something in that browser's own stack (a
+        # password-manager/ad-blocker extension swallowing the keydown
+        # before Streamlit's own listener ever sees it is the classic
+        # culprit for "Enter silently does nothing" reports like this).
+        # This is a PURELY ADDITIVE supplementary handler, not a
+        # replacement: registered on the CAPTURE phase (the `true` third
+        # argument) so it still runs even if something later in the
+        # bubble phase would otherwise eat the event, but it does NOT
+        # call preventDefault()/stopPropagation() -- those were tried
+        # and found to actually BREAK submission (they stopped whatever
+        # bubble-phase listener commits the just-typed text into
+        # Streamlit's session state before the click-triggered submit
+        # reads it, submitting stale/empty values instead). Just finds
+        # the Sign-in button and clicks it; Streamlit's own handler, if
+        # it also fires, is harmless (a second identical submit).
+        st.html(
+            """<script>
+            (function(){
+              if (window.__ovLoginEnter) return;
+              window.__ovLoginEnter = true;
+              document.addEventListener('keydown', function(e){
+                if (e.key !== 'Enter' && e.keyCode !== 13) return;
+                const form = document.querySelector('[data-testid="stForm"]');
+                if (!form || !form.contains(document.activeElement)) return;
+                const btn = form.querySelector('button');
+                if (btn) { btn.click(); }
+              }, true);
+            })();
+            </script>""",
+            unsafe_allow_javascript=True)
         if submitted:
             if state_db.verify_dashboard_login(u, p):
                 st.session_state["dashboard_authenticated"] = True
