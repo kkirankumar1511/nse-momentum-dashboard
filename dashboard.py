@@ -286,7 +286,15 @@ if not st.session_state.get("dashboard_authenticated", False):
                 if (e.key !== 'Enter' && e.keyCode !== 13) return;
                 const form = document.querySelector('[data-testid="stForm"]');
                 if (!form || !form.contains(document.activeElement)) return;
-                const btn = form.querySelector('button');
+                // NOT just the first <button> in the form -- that's the
+                // password field's own "show/hide" eye-icon toggle
+                // (kind="button"), which comes before the real submit
+                // button in DOM order and was wrongly being clicked
+                // instead (confirmed live: a real user's Enter press
+                // toggled password visibility rather than signing in).
+                // st.form_submit_button's own button carries
+                // kind="...FormSubmit" (e.g. "primaryFormSubmit").
+                const btn = form.querySelector('button[kind$="FormSubmit"]');
                 if (btn) { btn.click(); }
               }, true);
             })();
