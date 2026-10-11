@@ -526,22 +526,34 @@ def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.dateti
        closes by step_position_boundary()) or, if EMA10 doesn't apply,
        book the first half at the fixed target exactly like v5.1.
 
-    No-ops if this tracker has no open position, or while `now` is still
-    inside the position's own ENTRY CANDLE (v5.4 §5i.3 -- ported exactly
-    as specified: no intrabar stop -- or target -- check applies to the
-    entry candle itself, so a dip that recovers before that candle
-    closes survives, deliberately matching the backtest's own blind spot
-    rather than exploiting the live feed's finer information. The only
-    check on the entry candle is its own CLOSE vs the stop, handled
-    separately by check_entry_candle_close() once that candle closes;
-    normal tick-driven checking resumes from the next candle onward)."""
+    No-ops entirely if this tracker has no open position. Target
+    checking additionally no-ops while `now` is still inside the
+    position's own ENTRY CANDLE (v5.4 §5i.3, as specified: no intrabar
+    TARGET check applies to the entry candle itself -- the backtest has
+    no tick data either way, so a target touch there is deferred to the
+    next candle onward exactly as before).
+
+    STOP checking, however, is NOT suppressed on the entry candle (live/
+    paper-only refinement on top of §5i.3, requested explicitly --
+    deliberately NOT ported into the backtest's simulate_exit_v54(),
+    which still models the original close-based behavior, so this is an
+    accepted, intentional live/backtest divergence going forward). The
+    original spec's entry-candle rule exited the FULL position at that
+    candle's CLOSE if it ended up beyond the stop, which can overshoot
+    the sized risk badly (spec's own measured bound: mean 1.30R, max
+    2.40R) since the close can be far past the stop level itself. Now a
+    stop genuinely CROSSED intrabar -- even within the entry candle --
+    exits immediately at the stop price, same as any other candle,
+    instead of riding the rest of that candle blind. check_entry_candle_
+    close() is kept as a fallback for the rare case ticks miss the
+    crossing entirely (a feed outage, say) -- it will now rarely fire
+    rather than being the primary catch for this scenario."""
     if tracker.position_id is None:
         return None
     pos = idb.get_position(tracker.position_id)
     if pos is None or pos["status"] != "open":
         return None
-    if _floor5(now) == _floor5(pd.Timestamp(pos["entry_time"])):
-        return None
+    in_entry_candle = _floor5(now) == _floor5(pd.Timestamp(pos["entry_time"]))
 
     direction = pos["direction"]
     already_took_target = pos["qty_remaining"] < pos["qty"]
@@ -550,6 +562,8 @@ def check_intracandle_exit(tracker: CandidateTracker, ltp: float, now: dt.dateti
     if hit_stop:
         leg_type = "breakeven" if already_took_target else "stop"
         return _close_leg(tracker, pos, leg_type, pos["qty_remaining"], active_stop, now, mode)
+    if in_entry_candle:
+        return None  # stop not hit -- target stays deferred until the next candle (§5i.3, unchanged)
     if already_took_target:
         return None  # runner survives this tick; nothing else to check until squareoff
 
