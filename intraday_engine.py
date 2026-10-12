@@ -69,7 +69,12 @@ TICK_STALE_SECONDS = 20  # fall back to a REST get_ltp() if the feed goes quiet 
 # commonly "-BE", trade-for-trade) -- the company itself trades
 # completely normally, just under this suffixed symbol instead of its
 # plain one. See _prev_close_and_0925()'s docstring for why this matters.
-_NSE_SETTLEMENT_SUFFIXES = ("-BE", "-BZ", "-BL", "-BT")
+# Single canonical list lives on kite_client (its own instrument_map()
+# needed the identical fallback for the sector gate's candle fetches,
+# v5.4 spec copy 8 §0.3.6) -- referenced here rather than kept as a
+# second, separately-drifting copy; that drift is exactly how this list
+# ended up missing "-SM"/"-ST"/"-IL" until that audit.
+_NSE_SETTLEMENT_SUFFIXES = kite_client._SURVEILLANCE_SUFFIXES
 
 
 def _push(title: str, message: str) -> None:

@@ -74,16 +74,44 @@ def exchange_request_token(request_token: str) -> str:
 # Instruments & historical data
 # ---------------------------------------------------------------------------
 
+# A stock moved into NSE's Trade-for-Trade/surveillance/special-
+# settlement series trades under a suffixed tradingsymbol (e.g.
+# "HFCL-BE"), but the NSE index-constituent files this app's sector
+# gate reads key on the plain cmSymbol ("HFCL") -- so a candle fetch
+# for the plain name raised "Unknown NSE symbol" purely because the
+# stock was briefly under surveillance, not because it doesn't exist.
+# Confirmed 2026-10-12 (v5.4 spec copy 8 §0.3.6): HFCL/MTARTECH/
+# SIGMAADV/STLTECH silently had zero candle data this way, poisoning
+# every sector they belong to on every single day. intraday_engine.py's
+# own live quote-fetch path independently discovered and fixed the same
+# class of problem earlier (2026-09-17) with a DIFFERENT, non-
+# overlapping suffix list ("-BL"/"-BT" there, "-SM"/"-ST"/"-IL" here) --
+# this is the single canonical union of both, used by both paths, so
+# neither one is blind to a suffix the other already knew about. NSE
+# reshuffles this list periodically, so the fallback has to be
+# permanent here, not a one-off patch for today's names.
+_SURVEILLANCE_SUFFIXES = ("-BE", "-BZ", "-BL", "-BT", "-SM", "-ST", "-IL")
+
+
 @lru_cache(maxsize=1)
 def instrument_map() -> dict:
-    """symbol -> instrument_token for NSE equities."""
+    """symbol -> instrument_token for NSE equities. Also resolves a
+    plain symbol to its surveillance-suffixed tradingsymbol's token
+    (see _SURVEILLANCE_SUFFIXES above) when the plain name isn't
+    itself a distinct real tradingsymbol -- setdefault() never
+    overrides an actual non-suffixed listing."""
     kite = get_kite()
     instruments = kite.instruments("NSE")
-    return {
+    im = {
         row["tradingsymbol"]: row["instrument_token"]
         for row in instruments
         if row["segment"] == "NSE" and row["instrument_type"] == "EQ"
     }
+    for sym, token in list(im.items()):
+        for suffix in _SURVEILLANCE_SUFFIXES:
+            if sym.endswith(suffix):
+                im.setdefault(sym[:-len(suffix)], token)
+    return im
 
 
 @lru_cache(maxsize=1)

@@ -398,35 +398,70 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
 
     sector_ratio_cache: dict[tuple[str, dt.date], float | None] = {}
 
+    # v5.4 spec copy 8 §0.3.4's three-part rule, part 3: a floor below
+    # which a sector's ratio is never trusted however clean the resolved
+    # subset looks -- NAUKRI's own incident (2026-10-09) scored a ratio
+    # off 4 of 27 real constituents, which would satisfy "every member
+    # that exists is resolved" on its own. The exact tolerance for part
+    # 2 (how much slack a LARGE sector gets for one stale member) is
+    # still an OPEN question in that spec -- not implemented here,
+    # staying strict until it's actually measured rather than guessed.
+    MIN_SECTOR_MEMBERS = 5
+
     def _sector_ratio(sec: str, day: dt.date) -> float | None:
-        """None (fail-closed) if ANY of this sector's constituents
-        couldn't be resolved for this day -- v5.4 §5.1's own "DATA
-        PREREQUISITES" warning: computing the ratio from whatever
-        partial subset of members happened to have data is exactly the
-        bug that silently passed a candidate that should have failed
-        the gate (their reference project's own incident, NAUKRI
-        2026-10-09, traced to a sector ratio computed from 4 of a
-        sector's real constituent count). Same fail-closed discipline
-        intraday_engine.py's own resolve_sector_gates() already uses
-        live (v2 Spec §10.3) -- this backtest module didn't have it
-        until now."""
+        """v5.4 spec copy 8 §0.3's three-part rule -- supersedes the old
+        "fail closed on ANY missing constituent" rule (commit 33dee03),
+        which was measured to cost ~50 CAGR points over 5 years on this
+        exact ruleset because it's too strict for a BACKTEST specifically.
+        `sector_members` is TODAY's index membership; applied unmodified
+        to a historical date, most members simply hadn't listed yet
+        (AEQUS: 2025-12-10, TMCV: 2025-11-12, ...) -- treating "not yet
+        listed" the same as "data genuinely missing" rejected the sector
+        (and the whole day, once every candidate's sector is rejected)
+        for a reason that has nothing to do with data quality.
+        intraday_engine.py's own resolve_sector_gates() stays fully
+        strict unchanged -- LIVE has no not-yet-listed members (everything
+        in today's index exists today), so strict is correct there; it
+        only breaks replayed against the past.
+
+        1. a constituent counts toward the denominator only if it existed
+           by `day` -- a daily series with a bar on or before `day`. One
+           with NO daily data at all is NOT assumed not-yet-listed (that's
+           indistinguishable from a genuine fetch gap, e.g. the T2T/BE
+           tradingsymbol-suffix gap kite_client.instrument_map() now
+           covers, §0.3.6); only a non-empty series whose earliest bar is
+           AFTER `day` proves it hadn't listed yet, and is excluded
+           outright, not counted as a failure.
+        2. fail closed (None) if ANY constituent that DID exist by `day`
+           is still unresolved -- a real gap (stale cache, a suspension),
+           exactly the NAUKRI failure mode.
+        3. MIN_SECTOR_MEMBERS floor (see above) -- part 2 alone can't
+           protect a thin sector; NAUKRI's 4-of-27 passed an "every
+           resolved member agrees" check too, just among the wrong 4."""
         key = (sec, day)
         if key not in sector_ratio_cache:
             members = sector_members.get(sec, [])
             day_ts = pd.Timestamp(day)
             close_0925, prev_close_map = {}, {}
+            existing = []
             for m in members:
+                d = daily.get(m)
+                fetch_failed = d is None or d.empty
+                listed_by_day = not fetch_failed and d.index.min().normalize() <= day_ts
+                if not listed_by_day and not fetch_failed:
+                    continue  # proven not yet listed as of `day` -- excluded, not a gap
+                existing.append(m)
                 row = _candle_at(candles5, m, day_ts, 9, 25)
                 pc = _prev_close(daily, m, day_ts)
                 if row is not None:
                     close_0925[m] = float(row["close"])
                 if pc is not None:
                     prev_close_map[m] = pc
-            missing = [m for m in members if m not in close_0925 or m not in prev_close_map]
-            if missing or not members:
+            unresolved = [m for m in existing if m not in close_0925 or m not in prev_close_map]
+            if unresolved or len(existing) < MIN_SECTOR_MEMBERS:
                 sector_ratio_cache[key] = None
             else:
-                ratio, _ = mkt.compute_first15_breadth(members, close_0925, prev_close_map)
+                ratio, _ = mkt.compute_first15_breadth(existing, close_0925, prev_close_map)
                 sector_ratio_cache[key] = ratio
         return sector_ratio_cache[key]
 
