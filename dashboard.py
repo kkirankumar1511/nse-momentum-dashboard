@@ -5817,8 +5817,10 @@ def page_intraday_backtest():
                                                  key="ibt_cand_dir_filter")
             with cf3:
                 cand_dates = pd.to_datetime(candidates["date"]).dt.date
+                _cand_hi_default = min(dt.date.today(), cand_dates.max())
+                _cand_lo_default = max(cand_dates.min(), _cand_hi_default - dt.timedelta(days=30))
                 cand_date_range = st.date_input(
-                    "Date range", value=(cand_dates.min(), cand_dates.max()),
+                    "Date range", value=(_cand_lo_default, _cand_hi_default),
                     min_value=cand_dates.min(), max_value=cand_dates.max(),
                     key="ibt_cand_date_filter")
 
