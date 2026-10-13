@@ -56,8 +56,13 @@ NEW_SIGNAL_CUTOFF = dt.time(11, 0)  # v5: REVERTED from v3's 10:30 -- that
 # value does NOT transfer across pool sizes (spec §3.1's explicit sweep:
 # 10:30 on this top-2/gated-2nd-candle rule scores CAGR 15.20%/PF 1.42,
 # clearly worse than 11:00; 10:30 only won for the earlier top-5 pool).
-VOL_THRESHOLD_PCT = 0.05  # v5: REVERTED from v3's 0.10 back to v2's 5%
-# tolerance -- part of the v5 baseline rule set, not carried over from v3.
+VOL_THRESHOLD_PCT = 0.10  # §5r: RE-ADOPTED from v3's 0.10 (v5 had reverted
+# to 5%, back when MAX_TRADES_PER_DAY was still 2 -- §5r.4 shows this is a
+# genuine INTERACTION with that cap: at cap=2 the wider tolerance is worth
+# only +0.4 CAGR and Sortino falls; at cap=4 (adopted via §5p, already in
+# effect here) it's +7.4 CAGR and the only change this session to pass a
+# paired bootstrap (100% of 10,000 resamples won on monthly mean/std, CI
+# excluding zero). Do not lower MAX_TRADES_PER_DAY without re-checking this.
 ATR_PCT_BUFFER = 0.05
 BREAKOUT_WINDOW = 2  # v5's "gated-2nd-candle" entry (spec §2): window
 # candle #1 checks only the trigger price-cross; if it doesn't trigger,

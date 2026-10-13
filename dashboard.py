@@ -7496,14 +7496,20 @@ def page_intraday_tradebook():
         f'<span class="ov-info-icon" title="{_tip}">ℹ️</span></div></div>',
         unsafe_allow_html=True)
 
-    f1, f2 = st.columns(2)
+    f1, f2, f3 = st.columns(3)
     with f1:
         mode_filter = st.selectbox("Mode", ["paper", "live"], key="intraday_tb_mode")
     with f2:
         since = st.date_input("Since", value=dt.date.today() - dt.timedelta(days=30),
                               key="intraday_tb_since")
+    with f3:
+        include_archived = st.checkbox("Include archived (pre-reset) trades", value=False,
+                                       key="intraday_tb_include_archived",
+                                       help="Trades from before a capital/rule reset -- kept "
+                                            "for their own historical P&L, excluded from the "
+                                            "current season's numbers by default.")
 
-    positions = idb.get_positions(mode=mode_filter)
+    positions = idb.get_positions(mode=mode_filter, include_archived=include_archived)
     if not positions.empty:
         positions = positions[positions["date"] >= since.isoformat()]
     if positions.empty:
@@ -7511,7 +7517,7 @@ def page_intraday_tradebook():
         return
 
     closed = positions[positions["status"] == "closed"]
-    legs_all = idb.get_legs(mode=mode_filter)
+    legs_all = idb.get_legs(mode=mode_filter, include_archived=include_archived)
     legs_all = legs_all[legs_all["date"] >= since.isoformat()] if not legs_all.empty else legs_all
     total_pnl = float(legs_all["net_pnl"].sum()) if not legs_all.empty else 0.0
     win_rate = (100 * (legs_all["net_pnl"] > 0).mean()) if not legs_all.empty else float("nan")
@@ -7536,7 +7542,7 @@ def page_intraday_tradebook():
         final_capital = float(cap["current_capital"])
         total_return_pct = ((final_capital / starting_capital - 1) * 100
                            if starting_capital else 0.0)
-        positions_all = idb.get_positions(mode=mode_filter)
+        positions_all = idb.get_positions(mode=mode_filter, include_archived=include_archived)
         cagr_pct = None
         if not positions_all.empty and starting_capital > 0:
             first_date = pd.to_datetime(positions_all["date"]).min()

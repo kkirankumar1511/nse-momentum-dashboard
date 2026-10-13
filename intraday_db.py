@@ -205,6 +205,15 @@ def _migrate_daily_selection_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE intraday_positions ADD COLUMN target_touch_time TEXT")
     if "trail_ema" not in pos_cols:
         conn.execute("ALTER TABLE intraday_positions ADD COLUMN trail_ema INTEGER")
+    # A "reset the season" marker -- e.g. a rule change significant enough
+    # (v5.4 §5r, 2026-10-13) that prior trades shouldn't blend into the
+    # ongoing capital/CAGR numbers any more, but should stay in the DB for
+    # their own historical P&L rather than being deleted. 0 for every
+    # position going forward; get_positions()/get_legs() exclude archived
+    # rows by default so a fresh capital reset reads as a clean start, with
+    # an explicit include_archived=True opt-in for reviewing old ones.
+    if "archived" not in pos_cols:
+        conn.execute("ALTER TABLE intraday_positions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
     # v5.4 -- overnight-gap filter (checked once, pre-market, before a
@@ -445,9 +454,12 @@ def get_open_positions(date: str | None = None, mode: str | None = None) -> pd.D
     return df
 
 
-def get_positions(date: str | None = None, mode: str | None = None) -> pd.DataFrame:
+def get_positions(date: str | None = None, mode: str | None = None,
+                 include_archived: bool = False) -> pd.DataFrame:
     """All positions (open + closed), optionally filtered -- for the
-    Tradebook page."""
+    Tradebook page. Archived positions (a prior "season" reset, see the
+    `archived` column's migration comment) are excluded by default --
+    pass include_archived=True to review their historical P&L."""
     conn = get_conn()
     where, params = [], []
     if date:
@@ -456,6 +468,8 @@ def get_positions(date: str | None = None, mode: str | None = None) -> pd.DataFr
     if mode:
         where.append("mode = ?")
         params.append(mode)
+    if not include_archived:
+        where.append("archived = 0")
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     df = pd.read_sql(f"SELECT * FROM intraday_positions {clause} ORDER BY id", conn, params=params)
     conn.close()
@@ -463,9 +477,12 @@ def get_positions(date: str | None = None, mode: str | None = None) -> pd.DataFr
 
 
 def get_legs(position_id: int | None = None, date: str | None = None,
-            mode: str | None = None) -> pd.DataFrame:
+            mode: str | None = None, include_archived: bool = False) -> pd.DataFrame:
     """All legs, optionally for one position, or joined/filtered by the
-    parent position's date/mode (for the Tradebook page's day view)."""
+    parent position's date/mode (for the Tradebook page's day view).
+    Archived positions' legs are excluded by default, same as
+    get_positions() -- not applied when position_id is given explicitly,
+    since that's always a deliberate single-position lookup."""
     conn = get_conn()
     if position_id is not None:
         df = pd.read_sql(
@@ -480,6 +497,8 @@ def get_legs(position_id: int | None = None, date: str | None = None,
     if mode:
         where.append("p.mode = ?")
         params.append(mode)
+    if not include_archived:
+        where.append("p.archived = 0")
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     df = pd.read_sql(
         f"SELECT l.*, p.date, p.symbol, p.direction, p.entry_price, p.entry_time, "
