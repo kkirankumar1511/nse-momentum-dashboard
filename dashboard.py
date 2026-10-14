@@ -6802,24 +6802,35 @@ def page_intraday_dashboard():
         unsafe_allow_html=True)
 
     today = dt.date.today().isoformat()
-    cap = idb.get_capital(_mode)
 
     # --- Capital / P&L strip -------------------------------------------------
-    legs_today = idb.get_legs(date=today, mode=_mode)
-    today_pnl = float(legs_today["net_pnl"].sum()) if not legs_today.empty else 0.0
-    current_capital = cap["current_capital"] if cap else None
-    cum_pnl = (current_capital - cap["starting_capital"]) if cap else None
-    metrics = [
-        _ov_metric_html("Capital (compounding)",
-                       f"₹{current_capital:,.0f}" if current_capital is not None else "—",
-                       f"started at ₹{cap['starting_capital']:,.0f}" if cap else "not seeded yet"),
-        _ov_metric_html("Today's P&L", f"₹{today_pnl:+,.2f}" if legs_today is not None else "—",
-                       f"{len(legs_today)} leg(s) closed today" if not legs_today.empty else "nothing closed yet",
-                       value_cls=("ov-pos" if today_pnl >= 0 else "ov-neg")),
-        _ov_metric_html("Cumulative P&L", f"₹{cum_pnl:+,.2f}" if cum_pnl is not None else "—",
-                       "since inception", value_cls=("ov-pos" if (cum_pnl or 0) >= 0 else "ov-neg")),
-    ]
-    st.markdown(f'<div class="ov-grid-metrics">{"".join(metrics)}</div>', unsafe_allow_html=True)
+    # Own fragment, same 3s/market-hours cadence as the sections below --
+    # this used to be rendered directly in page_intraday_dashboard()'s own
+    # body, OUTSIDE any fragment, so it only ever updated on a full page
+    # reload while the candidate table/chart kept auto-refreshing right
+    # next to it -- confirmed live 2026-10-14: capital/today's P&L/
+    # cumulative P&L all sat frozen at whatever they were on page load,
+    # and only a manual browser refresh picked up a new fill/event.
+    @st.fragment(run_every="3s" if _is_market_hours() else None)
+    def _render_capital_strip():
+        cap = idb.get_capital(_mode)
+        legs_today = idb.get_legs(date=today, mode=_mode)
+        today_pnl = float(legs_today["net_pnl"].sum()) if not legs_today.empty else 0.0
+        current_capital = cap["current_capital"] if cap else None
+        cum_pnl = (current_capital - cap["starting_capital"]) if cap else None
+        metrics = [
+            _ov_metric_html("Capital (compounding)",
+                           f"₹{current_capital:,.0f}" if current_capital is not None else "—",
+                           f"started at ₹{cap['starting_capital']:,.0f}" if cap else "not seeded yet"),
+            _ov_metric_html("Today's P&L", f"₹{today_pnl:+,.2f}" if legs_today is not None else "—",
+                           f"{len(legs_today)} leg(s) closed today" if not legs_today.empty else "nothing closed yet",
+                           value_cls=("ov-pos" if today_pnl >= 0 else "ov-neg")),
+            _ov_metric_html("Cumulative P&L", f"₹{cum_pnl:+,.2f}" if cum_pnl is not None else "—",
+                           "since inception", value_cls=("ov-pos" if (cum_pnl or 0) >= 0 else "ov-neg")),
+        ]
+        st.markdown(f'<div class="ov-grid-metrics">{"".join(metrics)}</div>', unsafe_allow_html=True)
+
+    _render_capital_strip()
 
     st.divider()
 
