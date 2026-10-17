@@ -7999,11 +7999,15 @@ def page_guide():
 
     st.markdown(
         '<div class="guide-hero"><h1>📘 How This System Works</h1>'
-        '<p>A momentum-driven, rules-based swing-trading engine for NSE F&amp;O stocks — '
+        '<p>Two independent, rules-based strategies live here. The first is a '
+        'momentum-driven swing-trading engine for NSE F&amp;O stocks — '
         'it ranks the whole eligible universe every day, only ever buys a stock that clears '
         'a stack of technical and fundamental checks, sizes and protects every position '
-        'automatically, and rebalances on a schedule you control. Everything below reflects '
-        'the exact logic actually running right now, pulled live from your current settings.</p>'
+        'automatically, and rebalances on a schedule you control. The second, covered in its own '
+        'section further down, is a same-day intraday breakout strategy with its own candidate '
+        'selection, entries and exits, running entirely separately (own capital, own tradebook). '
+        'Everything below reflects the exact logic actually running right now, pulled live from '
+        'your current settings.</p>'
         '<div class="guide-stats">'
         + f'<div class="guide-stat"><b>{len(config.UNIVERSE)}</b>stocks in universe</div>'
         + f'<div class="guide-stat"><b>{cfg.get("max_positions", 10)}</b>max positions</div>'
@@ -8020,6 +8024,7 @@ def page_guide():
         '<a href="#g-rhythm">📅 The daily rhythm</a>'
         '<a href="#g-safety">🚨 Execution &amp; safety nets</a>'
         '<a href="#g-cash">💰 Cash management</a>'
+        '<a href="#g-intraday">⚡ Intraday trading</a>'
         '<a href="#g-pages">🧭 Tour of every page</a>'
         '</div>', unsafe_allow_html=True)
 
@@ -8075,6 +8080,19 @@ def page_guide():
         f'<td>{"ON, top " + str(cfg.get("top_n_sectors",3)) if cfg.get("sector_diversification_enabled") else "off"}</td></tr>'
         '</table></div>', unsafe_allow_html=True)
 
+    _entry_confirm_days = int(cfg.get("entry_confirm_days", 0) or 0)
+    st.markdown(
+        '<div class="guide-card"><h4>2b. Entry confirmation — prove it twice (backtest-only tool)</h4>'
+        '<p>A NEW buy can optionally be required to have stayed near the top of the ranking for '
+        f'{_entry_confirm_days or "N"} consecutive rebalances in a row before it\'s bought — a filter '
+        'against a stock that only looks great for one single scan and immediately falls back out. '
+        'It only ever delays a fresh entry; it never affects a sell, and an existing holding is never '
+        'force-exited by it.</p>'
+        f'<p>Currently <b>{"ON, " + str(_entry_confirm_days) + " day(s)" if _entry_confirm_days else "off"}</b> '
+        '— tested and found to make every headline backtest metric worse (lower CAGR and Sharpe, deeper '
+        'drawdown, for only a small win-rate gain), so it ships off by default. Available as a Backtest-page '
+        'toggle to re-test, not currently wired into live automated trading.</p></div>', unsafe_allow_html=True)
+
     st.markdown('<div class="guide-card"><h4>3. Momentum score — ranks everyone who passed the gates</h4>'
                '<p>Every gate-passer gets one score, each ingredient converted to a Z-score '
                '(how many standard deviations above/below the AVERAGE stock in today\'s universe) '
@@ -8111,6 +8129,20 @@ def page_guide():
         f'({cfg.get("resistance_zone_weight",0.0)} × Z-score of room-to-run before the next chart '
         'resistance level).</p></div>', unsafe_allow_html=True)
 
+    st.markdown(
+        '<div class="guide-card"><h4>3b. How the resistance-clearance tilt is actually built</h4>'
+        '<p>Every swing high/low in the stock\'s trailing '
+        f'{cfg.get("resistance_zone_lookback_years",5.0):.0f} years of daily history becomes a candidate '
+        'level (a pivot only counts once price has failed to break it on both sides across a '
+        f'{cfg.get("resistance_zone_pivot_window",10)}-day window, so no look-ahead). Nearby pivots within '
+        f'{cfg.get("resistance_zone_cluster_tolerance_pct",0.03)*100:.0f}% of each other are merged into one '
+        '"zone" — a zone touched more often is treated as a stronger ceiling. Only zones within '
+        f'{cfg.get("resistance_zone_search_pct",0.20)*100:.0f}% above today\'s price are even considered (a '
+        'level far away isn\'t a near-term threat). The score itself shrinks sharply for a close, '
+        'well-touched zone and barely moves for a distant or weak one — a stock with clear air above it '
+        'ranks higher than an otherwise-identical stock running straight into a well-tested ceiling.</p></div>',
+        unsafe_allow_html=True)
+
     st.markdown('<div class="guide-card"><h4>4. Fundamental value score — 0 to 100, sector-aware</h4>'
                '<p>Pulled from companies\' own primary-source XBRL regulatory filings (no scraping, '
                'no AI guessing) — routed to one of five rubrics by the company\'s actual sector, since '
@@ -8145,11 +8177,21 @@ def page_guide():
     st.markdown('<div class="guide-card"><h4>5. Sector strength &amp; diversification</h4>'
                '<p>Every stock is mapped to its real NSE sector index (not a rough heatmap guess). '
                'A sector\'s own relative strength is measured the exact same way a stock\'s is — '
-               'its index\'s return vs NIFTY\'s. When diversification is on, only stocks from the '
-               f'top {cfg.get("top_n_sectors",3)} strongest sector groups are eligible to buy at all, '
-               f'and no more than {cfg.get("max_positions_per_sector",3)} positions are ever held in '
-               'the same sector group at once — this only ever blocks a NEW purchase, it never forces '
-               'out a position you already hold.</p></div></div>', unsafe_allow_html=True)
+               f'its index\'s return vs NIFTY\'s, over the trailing {cfg.get("sector_rs_lookback_days",126)} '
+               'trading days (deliberately kept in sync with the stock-level 6-month lookback). When '
+               f'diversification is on, only stocks from the top {cfg.get("top_n_sectors",3)} strongest '
+               f'sector groups are eligible to buy at all, and no more than '
+               f'{cfg.get("max_positions_per_sector",3)} positions are ever held in the same sector group '
+               'at once — this only ever blocks a NEW purchase, it never forces out a position you '
+               'already hold.</p>'
+               f'<p>Which sectors count as "strongest" is itself configurable: by default, plain relative '
+               'strength decides. With the <b>composite sector score</b> '
+               f'({"ON" if cfg.get("sector_composite_score_enabled") else "currently off"}) a sector\'s '
+               'raw RS number can be misleading if it\'s really just one or two outlier stocks carrying '
+               'it — so this blends three signals instead: 50% relative strength, 25% how close the '
+               'sector index itself sits to its own 52-week high, and 25% breadth (what fraction of the '
+               'sector\'s own stocks are currently passing every other technical gate on their own).</p>'
+               '</div></div>', unsafe_allow_html=True)
 
     # ---- Protecting what you own ------------------------------------
     st.markdown(_guide_section("🛡️", "red", "Protecting what you own", anchor="g-protect",
@@ -8184,6 +8226,17 @@ def page_guide():
         '<p style="font-size:12.5px;color:var(--ov-text-muted);">Whichever mechanism is active, the same '
         'rule always applies: a stop can only ever tighten, never loosen — a quieter/lower candidate value '
         'on any given day is simply ignored.</p></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="guide-card"><h4>Letting a hot winner run (RSI exit carve-out)</h4>'
+        f'<p>{"Currently ON" if cfg.get("rsi_exit_gate_enabled") else "Currently off"} — normally, a held '
+        'position that no longer qualifies gets force-sold once it also drops out of the ranked '
+        'buy-list. This carves out exactly one case: if the ONLY reason it would\'ve been dropped is '
+        '"RSI is above the entry ceiling" — it\'s simply running hot — and every other gate (trend, '
+        '52-week-high proximity, fundamentals, price) still passes, it stays held as long as RSI is '
+        f'still under a separate, wider ceiling (currently {cfg.get("rsi_exit_max",80)}) rather than '
+        'being sold purely for looking overbought. Every other exit reason (a real stop-loss, a broken '
+        'trend, falling out of rank entirely) is completely unaffected.</p></div>', unsafe_allow_html=True)
 
     st.markdown('<div class="guide-card"><h4>Market regime filter</h4>'
                f'<p>{"Currently ON" if cfg.get("regime_filter_enabled") else "Currently off"} — when NIFTY 50 '
@@ -8298,6 +8351,143 @@ def page_guide():
         '(amount, cadence, next due date), then posted automatically every time they come due, correctly '
         'anchored to the same day of the month cycle after cycle.</p></div>'
         '</div></div>', unsafe_allow_html=True)
+
+    # ---- Intraday trading -------------------------------------------
+    _intraday_mode = ("LIVE" if cfg.get("intraday_live_enabled", False) else "PAPER")
+    _intraday_capital = (cfg.get("intraday_live_capital", 1_000_000.0) if _intraday_mode == "LIVE"
+                        else cfg.get("intraday_paper_capital", 1_000_000.0))
+    st.markdown(_guide_section("⚡", "blue", "Intraday trading", anchor="g-intraday",
+                               subtitle="A completely separate same-day strategy — \"DaysLowVolumnBreakout\" "
+                                        "— with its own capital, candidates, and rules. Nothing here shares "
+                                        "state with the positional engine above."),
+               unsafe_allow_html=True)
+    st.markdown(
+        '<div class="guide-stats" style="margin:-4px 0 18px 0;">'
+        + f'<div class="guide-stat"><b>{_intraday_mode}</b>current mode</div>'
+        + f'<div class="guide-stat"><b>₹{_intraday_capital:,.0f}</b>starting capital ({_intraday_mode.lower()})</div>'
+        + f'<div class="guide-stat"><b>{istrat.TOP_N_CANDIDATES}</b>candidates tracked/day</div>'
+        + f'<div class="guide-stat"><b>{istrat.MAX_TRADES_PER_DAY}</b>max trades/day</div>'
+        + f'<div class="guide-stat"><b>{istrat.LEVERAGE:.0f}×</b>intraday leverage (MIS)</div>'
+        + '</div>', unsafe_allow_html=True)
+
+    st.markdown(_guide_flow([
+        ("NIFTY breadth", "09:30 A/D ratio"),
+        ("Rank F&O movers", f"top {istrat.TOP_N_CANDIDATES}, by 09:15-09:25 move"),
+        ("Gap filter", f">{istrat.GAP_FILTER_PCT:.0f}% overnight gap skipped"),
+        ("Signal candle", "lowest-volume pullback"),
+        ("Breakout entry", "gated 2-candle trigger"),
+        ("Sector gate", "re-checked at trigger"),
+        ("Target / trail / stop", "manage the open position"),
+        ("15:10 squareoff", "everything flat by day end"),
+    ]), unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="guide-card"><h4>1. Does today even trade? — the day-bias call</h4>'
+        '<p>At 09:30, every NIFTY 50 stock\'s first-15-minute move (09:15 open to 09:25 close, vs the '
+        'previous day\'s close) is checked for direction. The ratio of advancers to decliners decides '
+        f'the whole day\'s stance: above <b>{istrat.BIAS_RATIO_LONG_MIN}</b> and only LONG setups are '
+        f'considered all day; below <b>{istrat.BIAS_RATIO_SHORT_MAX}</b> and only SHORT setups are. '
+        'Anywhere in between is genuinely neutral — nothing is forced, the day is simply skipped. If '
+        '09:30 lands in that neutral gap, there\'s one second chance: the exact same check re-runs at '
+        '09:45 off the 09:40 candle, and if THAT clears a threshold, the day is "rescued" — but every '
+        'candidate ranking and every signal scan for that day then uses only the 09:45 data, never a mix '
+        'of both, and nothing is allowed to trigger before that 09:40 candle closes (its own shortlist '
+        'genuinely wasn\'t knowable any earlier).</p></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="guide-card"><h4>2. Picking today\'s candidates</h4>'
+        f'<p>Once the day\'s direction is set, the whole F&amp;O universe is ranked by that same '
+        'first-15-minute move — biggest advancers for a LONG day, biggest decliners for a SHORT day — '
+        f'and the top {istrat.TOP_N_CANDIDATES} become today\'s watchlist. A candidate whose 09:15 open '
+        f'already gapped more than {istrat.GAP_FILTER_PCT:.0f}% from the previous close is skipped '
+        'outright and replaced by the next-best ranked name, rather than trading a stock that\'s already '
+        'made most of its move before the opening range even forms. No sector or trend filter narrows '
+        'this initial pool — those checks come later, at the point a candidate actually tries to '
+        'trigger a trade, not before.</p></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="guide-card"><h4>3. The signal candle — what makes a candle worth watching</h4>'
+        '<p>From 09:25 onward, each candidate\'s own 5-minute candles are scanned one at a time for a '
+        '<b>pullback candle</b>: it must be the counter-trend color (red for a LONG setup, green for '
+        'SHORT — i.e. a dip against the day\'s own direction), its volume must be at or near the '
+        f'lowest seen so far that day (within {istrat.VOL_THRESHOLD_PCT*100:.0f}% of the running '
+        'minimum), its body must stay on the safe side of the opening range (a LONG pullback can\'t '
+        'have already broken below the 09:20/09:25 candles\' own low), and its close must sit on the '
+        'trend side of a 50-candle EMA. A candle meeting all of this becomes the active signal — and a '
+        'candle whose own close breaks the day\'s opening range against the trade\'s direction, or '
+        'closes the wrong side of a continuously-tracked 21-candle EMA, kills the whole candidate for '
+        'the rest of the day outright, signal or no signal.</p>'
+        '<p style="margin-top:8px;">One more silent veto: the very first (09:15) and third (09:25) '
+        'candles of the day sometimes leave a price gap between them that never traded during that '
+        'window — a "fair value gap." A signal candle whose close falls inside that untraded zone is '
+        'rejected, even if everything else about it qualifies.</p></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="guide-card"><h4>4. The breakout trigger — gated two-candle entry</h4>'
+        f'<p>Once a signal candle is active, entry is a straightforward price cross: its own high plus a '
+        f'small ATR-scaled buffer for a LONG ({istrat.ATR_PCT_BUFFER*100:.0f}% of that candle\'s own '
+        'ATR), or its low minus the same buffer for a SHORT. The very next candle gets first look — if '
+        'it crosses, the trade is live immediately, filled at that trigger price. If it DOESN\'T cross, '
+        'it only gets a second candle\'s chance if it was itself a clean continuation of the pullback '
+        '(same counter-trend color, even lower volume than the signal candle, and stayed fully within '
+        'the signal candle\'s own high/low) — fail any one of those and the setup dies right there '
+        'rather than waiting out the window. A candle that fails this way, or a second candle that '
+        'exhausts the window without triggering, simply falls back to being re-scanned as an ordinary '
+        'fresh candle from step 3 — there\'s no special re-signal chain, a dead signal is just dead. New '
+        f'signal candles stop being accepted after {istrat.NEW_SIGNAL_CUTOFF:%H:%M} — no setups are '
+        'chased deep into the afternoon.</p></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="guide-card"><h4>5. One more check at the moment of entry — the sector gate</h4>'
+        f'<p>A breakout having triggered isn\'t enough on its own: the candidate\'s own NSE sector index '
+        'must ALSO show the same first-15-minute advance/decline skew the whole-market check used — but '
+        f'held to a stricter bar ({istrat.SECTOR_GATE_RATIO_LONG_MIN} / {istrat.SECTOR_GATE_RATIO_SHORT_MAX}, '
+        'independent of the looser market-wide threshold). A strong individual stock inside a weak sector '
+        'fails here and the trade is simply never taken — this gate protects trade QUALITY, not just '
+        'sector exposure, so a candidate that fails it isn\'t replaced by a backup; that slot is just not '
+        'filled that day.</p></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="guide-card"><h4>6. Managing an open position — target, trail, and the breakeven stop</h4>'
+        '<p>The initial stop sits just past the signal candle\'s own opposite extreme (the same buffer '
+        f'used for the trigger) and protects the FULL position until something books. The fixed '
+        f'target is {istrat.REWARD_RISK:.0f}:1 reward-to-risk. When price first touches it, half the '
+        'position doesn\'t necessarily book right there — if the target sits on the strong side of a '
+        f'{istrat.TRAIL_EMA_SLOW}-candle EMA, booking is deferred and that EMA is trailed instead, with '
+        'the half exiting the first time a candle closes back through it (filled at the next candle\'s '
+        'open) — this makes the trail LOOSER, not tighter, letting a genuinely strong move run further '
+        'before locking in the first half. Only once that first half is actually booked does the stop '
+        'on the remaining half move up to breakeven (the original entry price) — before that moment, a '
+        'full stop-out still risks the whole position, never just half.</p>'
+        '<p style="margin-top:8px;">One more real-time-only rule: if price crosses the stop WHILE the '
+        'entry candle itself is still forming (an intrabar move, not waiting for that candle to close), '
+        'the position exits immediately at the stop price — this applies to live/paper trading only; a '
+        'batch backtest can\'t see intrabar ticks, so it instead exits the full position at that candle\'s '
+        f'own close if it breaches the stop. Whatever hasn\'t already closed is squared off at the '
+        f'"{istrat.SQUAREOFF_TIME}"-labeled candle\'s own close — nothing is ever held overnight.</p></div>',
+        unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="guide-card"><h4>7. Position sizing &amp; costs</h4>'
+        f'<p>Each day\'s capital is split evenly across the {istrat.MAX_TRADES_PER_DAY} available trade '
+        f'slots and leveraged {istrat.LEVERAGE:.0f}× (MIS intraday margin) for the capital-based sizing '
+        f'cap; a separate risk budget — {istrat.MAX_RISK_PCT_PER_TRADE*100:.1f}% of current capital per '
+        'trade — caps it from the other side. Quantity is whichever of the two binds first, floored to a '
+        'whole share, so a single trade can never risk more than its budgeted slice of capital no matter '
+        'how tight or wide its own stop happens to be. Every fill — paper or live — has Zerodha\'s real '
+        'intraday-equity cost model applied: brokerage (0.03% or ₹20/order, whichever is lower, each leg), '
+        'STT on the actual sell leg only, exchange transaction charges, and 18% GST on top of brokerage '
+        'and exchange charges combined.</p></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="guide-card"><h4>Paper vs. live</h4>'
+        f'<p>Currently running in <b>{_intraday_mode}</b> mode. Paper mode simulates every fill at the '
+        'exact computed price with zero real orders placed — a full, continuously-running dry run against '
+        'real live market data, not a historical replay. Switching to live is a separate, deliberate step '
+        '(Admin) that starts routing the exact same signals as real MIS orders, with its own independently '
+        'tracked capital — paper keeps compounding on its own track even after live trading starts, so it '
+        'stays a meaningful ongoing check rather than freezing the moment real money goes in.</p></div>'
+        '</div>', unsafe_allow_html=True)
 
     # ---- Pages tour -------------------------------------------------
     st.markdown(_guide_section("🧭", "pink", "Tour of every page", anchor="g-pages",
