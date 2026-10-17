@@ -3320,7 +3320,7 @@ def page_live_rebalance():
     def _run_scan_now():
         fundamentals = st.session_state.get("value_scores")
         start_background_job(
-            "rebalance_run", lr.propose_rebalance, available_cash,
+            "rebalance_run", lr.propose_rebalance, lr.cash_available_for_swing(available_cash),
             fundamentals=fundamentals, job_type="rebalance_scan",
             summarize_fn=lambda r: (f"{len(r['buys'])} buys, {len(r['sells'])} sells, "
                                     f"{len(r['stop_updates'])} stop updates"))
@@ -8384,6 +8384,11 @@ def page_guide():
             _sweep_qty, _sweep_value = lr.get_cash_sweep_holding(cfg)
         except Exception:
             pass
+    _live_intraday_reserve = 0.0
+    if cfg.get("intraday_live_enabled", False):
+        _live_cap_row_g = idb.get_capital("live")
+        if _live_cap_row_g:
+            _live_intraday_reserve = float(_live_cap_row_g["current_capital"])
     st.markdown(
         '<div class="guide-grid3">'
         '<div class="guide-card"><h4>Idle cash sweep</h4>'
@@ -8396,6 +8401,12 @@ def page_guide():
         'positions, and its value is folded into "Cash" everywhere on the Overview page so nothing looks '
         'like it went missing.'
         + (f'<br><b>Currently parked: {_sweep_qty} units, ₹{_sweep_value:,.0f}</b>' if _sweep_qty else '')
+        + (f'<br><b>Reserved for live intraday, never swept:</b> ₹{_live_intraday_reserve:,.0f} — '
+           'once live intraday trading is on, this strategy\'s own cash decisions (the sweep '
+           'itself, and new swing buys/position sizing) treat that much of your real cash as '
+           'unavailable, so it stays genuine broker margin for live intraday MIS orders instead '
+           'of getting parked in the ETF or deployed into a new swing position.'
+           if cfg.get("intraday_live_enabled") and _live_intraday_reserve else '')
         + '</p></div>'
         '<div class="guide-card"><h4>DP charges</h4>'
         f'<p>Your depository charges ₹{cfg.get("dp_charge_per_scrip",15.34):.2f} per stock, per day you '

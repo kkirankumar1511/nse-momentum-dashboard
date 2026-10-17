@@ -39,6 +39,7 @@ import pandas as pd
 
 import config
 import indicators
+import intraday_db as idb
 import kite_client
 import nse_holidays
 import screener
@@ -387,6 +388,37 @@ def compute_portfolio_value(cfg: dict | None = None) -> dict:
 CASH_SHORTFALL_BUFFER = 1000.0
 
 
+def cash_available_for_swing(raw_available_cash: float, cfg: dict | None = None) -> float:
+    """Real Kite margin minus whatever's reserved for live intraday
+    trading -- the figure every SWING-strategy cash DECISION (the
+    rebalance scan's own position sizing, the idle-cash sweep, the
+    pre-buy shortfall check) should use instead of the raw broker
+    figure, once live intraday trading is on. Reporting/display call
+    sites (compute_portfolio_value(), the Cockpit's own total-equity
+    metric, the Ledger's first-cash-flow seed, a manual order entry
+    field's default) must NOT call this -- those need the account's
+    TRUE total cash, since the reserved amount is still genuinely the
+    user's money, just earmarked differently; shrinking those numbers
+    would misreport net worth, not protect anything.
+
+    Reserves the LIVE track's own CURRENT COMPOUNDING capital
+    (intraday_capital_state, mode='live'), not the fixed
+    intraday_live_capital Admin setting -- the reservation should track
+    what live intraday has actually grown/shrunk to, not stay pinned to
+    day-one's number. Returns raw_available_cash unchanged (no
+    reservation) when intraday_live_enabled is off, or if that track
+    hasn't been seeded yet (nothing to reserve before live intraday has
+    ever actually run). Floored at 0 -- never returns negative."""
+    cfg = cfg or config.STRATEGY
+    if not cfg.get("intraday_live_enabled", False):
+        return raw_available_cash
+    live_cap_row = idb.get_capital("live")
+    if not live_cap_row:
+        return raw_available_cash
+    reserved = float(live_cap_row["current_capital"])
+    return max(raw_available_cash - reserved, 0.0)
+
+
 def ensure_cash_for_buys(needed: float, cfg: dict | None = None) -> dict | None:
     """Call right before placing real buy/top-up orders: if today's total
     buy cost exceeds real available cash, redeems the cash-sweep
@@ -403,7 +435,8 @@ def ensure_cash_for_buys(needed: float, cfg: dict | None = None) -> dict | None:
     sym = cfg.get("cash_sweep_symbol", "LIQUIDCASE")
     try:
         margins = kite_client.get_margins()
-        available_cash = margins["equity"]["available"]["live_balance"]
+        available_cash = cash_available_for_swing(
+            margins["equity"]["available"]["live_balance"], cfg)
     except Exception:
         return None
     shortfall = needed - available_cash
@@ -449,7 +482,8 @@ def sweep_idle_cash(cfg: dict | None = None) -> dict | None:
     sym = cfg.get("cash_sweep_symbol", "LIQUIDCASE")
     try:
         margins = kite_client.get_margins()
-        available_cash = margins["equity"]["available"]["live_balance"]
+        available_cash = cash_available_for_swing(
+            margins["equity"]["available"]["live_balance"], cfg)
         ltp = kite_client.get_ltp([sym])[sym]
     except Exception:
         return None
@@ -1309,7 +1343,8 @@ def main():
     with state_db.job_run("rebalance_scan", "scheduled") as jr:
         try:
             margins = kite_client.get_margins()
-            available_cash = margins["equity"]["available"]["live_balance"]
+            available_cash = cash_available_for_swing(
+                margins["equity"]["available"]["live_balance"])
         except Exception as e:
             log(f"FAILED -- Kite connection failed (token may have expired): {e}")
             log("Refresh the token (python kite_client.py login / token <request_token>) "
