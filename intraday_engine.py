@@ -140,18 +140,24 @@ def run_selection(date: str, nifty50_symbols: list[str], fno_symbols: list[str],
     # 09:15 candle for as many symbols as actually needed to fill the
     # pool (typically just a few beyond 5, matching the spec's own ~6.5%
     # measured discard rate), not the whole ~200-symbol F&O universe.
+    # Admin-editable operational knobs -- see config.py's own comment by
+    # these keys for why only these two (not the strategy-edge constants)
+    # are overridable from Admin.
+    gap_filter_pct = config.STRATEGY.get("intraday_gap_filter_pct", strat.GAP_FILTER_PCT)
+    top_n_candidates = config.STRATEGY.get("intraday_top_n_candidates", strat.TOP_N_CANDIDATES)
+
     ranked_all = strat.select_candidates(pd.Series(fno_rets), bias, n=len(fno_rets))
     today_date = dt.date.fromisoformat(date)
     accepted: list[tuple[str, float, float | None]] = []  # (symbol, ret_first15_pct, gap_pct)
     for sym, ret in ranked_all.items():
         gap = _overnight_gap_pct(sym, prev_day_close.get(sym), today_date)
-        if not strat.passes_gap_filter(gap):
+        if not strat.passes_gap_filter(gap, threshold=gap_filter_pct):
             print(f"[intraday_engine] {sym}: excluded from candidate pool -- "
                  f"09:15 gap {'unresolvable' if gap is None else f'{gap:+.2f}%'} "
-                 f"(threshold ±{strat.GAP_FILTER_PCT}%)")
+                 f"(threshold ±{gap_filter_pct}%)")
             continue
         accepted.append((sym, float(ret), gap))
-        if len(accepted) >= strat.TOP_N_CANDIDATES:
+        if len(accepted) >= top_n_candidates:
             break
 
     candidates = [{"symbol": sym, "direction": bias, "rank": i + 1}
@@ -966,9 +972,14 @@ def run_live(mode: str = "paper") -> None:
          f"NIFTY 50 ratio {sel['nifty_ratio']:.2f} -> {sel['day_bias']}. "
          f"Candidates: {_cand_summary}")
 
+    max_trades_per_day = config.STRATEGY.get("intraday_max_trades_per_day", strat.MAX_TRADES_PER_DAY)
+    leverage = config.STRATEGY.get("intraday_leverage", strat.LEVERAGE)
+    risk_pct_per_trade = config.STRATEGY.get(
+        "intraday_risk_pct_per_trade", strat.MAX_RISK_PCT_PER_TRADE * 100) / 100
+
     capital = idb.get_capital(mode)["current_capital"]
-    capital_alloc = (capital / strat.MAX_TRADES_PER_DAY) * strat.LEVERAGE
-    risk_budget = capital * strat.MAX_RISK_PCT_PER_TRADE
+    capital_alloc = (capital / max_trades_per_day) * leverage
+    risk_budget = capital * risk_pct_per_trade
 
     # v5.4 §5o -- on a day rescued by the 09:45 retry, no signal may be
     # evaluated before the 09:40-labelled candle (today's shortlist
@@ -1061,7 +1072,7 @@ def run_live(mode: str = "paper") -> None:
     # (check_tick_entry()) -- a single dict so both share the same live
     # count rather than each keeping its own (which would let both
     # independently think a slot was free and double-fill it).
-    day_state = {"slots_remaining": strat.MAX_TRADES_PER_DAY}
+    day_state = {"slots_remaining": max_trades_per_day}
 
     try:
         last_candle_ts = None
@@ -1216,7 +1227,7 @@ def run_live(mode: str = "paper") -> None:
                         # True (set in process_candle() the instant it
                         # triggered), no position opened, nothing more to do.
                         print(f"{boundary} {t.symbol}: triggered but day's "
-                             f"{strat.MAX_TRADES_PER_DAY} slots already filled -- no trade")
+                             f"{max_trades_per_day} slots already filled -- no trade")
                         continue
                     result = _open_position_from_trigger(t, event, capital_alloc, risk_budget, mode)
                     print(f"{boundary} {t.symbol}: {result}")

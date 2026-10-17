@@ -450,6 +450,25 @@ _STRATEGY_DEFAULTS = {
     # reset its compounded current_capital, by design.
     "intraday_live_capital": 1_000_000.0,
     "intraday_paper_capital": 1_000_000.0,
+
+    # Operational knobs for the intraday engine -- deliberately a SEPARATE,
+    # smaller set from the strategy-edge constants that stay hardcoded in
+    # intraday_strategy.py (day-bias ratio thresholds, signal volume
+    # tolerance, sector-gate ratios, the EMA50/FVG filters, reward:risk,
+    # trail EMA period): those were bootstrap-validated to their exact
+    # current values and editing them from here with no re-test would
+    # silently invalidate a proven edge. These five are capacity/risk
+    # levers, safe to tune without re-deriving the strategy's signal logic.
+    # Both intraday_engine.py (live/paper) and intraday_backtest.py read
+    # these via config.STRATEGY.get(key, intraday_strategy.CONST) at each
+    # use site, falling back to intraday_strategy.py's own module-level
+    # constant if a key is ever missing -- same convention as every other
+    # Admin-editable setting elsewhere in this file.
+    "intraday_max_trades_per_day": 4,      # intraday_strategy.MAX_TRADES_PER_DAY
+    "intraday_risk_pct_per_trade": 0.5,    # %, intraday_strategy.MAX_RISK_PCT_PER_TRADE (0.005) x100
+    "intraday_leverage": 5.0,              # intraday_strategy.LEVERAGE (MIS)
+    "intraday_gap_filter_pct": 5.0,        # intraday_strategy.GAP_FILTER_PCT
+    "intraday_top_n_candidates": 5,        # intraday_strategy.TOP_N_CANDIDATES
 }
 
 # Keys the Backtest page's run_cfg-builder overrides from its own widgets

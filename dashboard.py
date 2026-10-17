@@ -2811,6 +2811,45 @@ def page_admin():
                      "Same idea as the live field, for the paper track "
                      "(intraday_capital_state, mode='paper') -- only takes "
                      "effect before paper mode has ever run."))
+            st.caption(
+                "Operational knobs below -- read fresh by the engine (live AND paper) and the "
+                "backtest every run, no restart needed. Deliberately a SMALL set: the strategy's "
+                "actual signal logic (day-bias thresholds, signal volume tolerance, sector-gate "
+                "ratios, the EMA50/FVG filters, reward:risk, trail EMA period) stays hardcoded in "
+                "intraday_strategy.py -- those were bootstrap-validated to their exact current "
+                "values, and editing them here with no re-test would silently break a proven edge. "
+                "These five are capacity/risk levers, safe to tune without touching that.")
+            ic4, ic5, ic6, ic7, ic8 = st.columns(5)
+            intraday_max_trades = ic4.number_input(
+                "Max trades/day", min_value=1, max_value=10, step=1,
+                value=int(config.STRATEGY.get("intraday_max_trades_per_day", istrat.MAX_TRADES_PER_DAY)),
+                help="How many trade slots the day's capital is split across -- each additional "
+                     "slot both adds opportunity AND adds worst-case same-day risk exposure "
+                     "(risk per trade x this number).")
+            intraday_risk_pct = ic5.number_input(
+                "Risk per trade (%)", min_value=0.1, max_value=5.0, step=0.1,
+                value=float(config.STRATEGY.get(
+                    "intraday_risk_pct_per_trade", istrat.MAX_RISK_PCT_PER_TRADE * 100)),
+                help="% of current capital a single trade's stop-loss is sized to risk. Caps "
+                     "quantity from the risk side; the leverage/capital side below is the other "
+                     "cap, whichever binds first.")
+            intraday_leverage = ic6.number_input(
+                "Leverage (MIS)", min_value=1.0, max_value=10.0, step=0.5,
+                value=float(config.STRATEGY.get("intraday_leverage", istrat.LEVERAGE)),
+                help="Intraday margin multiple applied to each slot's capital for the "
+                     "capital-based sizing cap -- must match what your broker actually grants "
+                     "on MIS orders for these symbols, or a live order can be rejected/resized.")
+            intraday_gap_filter = ic7.number_input(
+                "Overnight gap filter (%)", min_value=0.0, max_value=20.0, step=0.5,
+                value=float(config.STRATEGY.get("intraday_gap_filter_pct", istrat.GAP_FILTER_PCT)),
+                help="A candidate whose 09:15 open already gapped more than this % from the "
+                     "previous close is skipped and replaced by the next-best ranked one.")
+            intraday_top_n = ic8.number_input(
+                "Candidate pool size", min_value=1, max_value=20, step=1,
+                value=int(config.STRATEGY.get("intraday_top_n_candidates", istrat.TOP_N_CANDIDATES)),
+                help="How many top-ranked F&O movers are tracked for a signal each day -- not "
+                     "the same as max trades/day above; only some of this pool ever actually "
+                     "triggers a trade.")
             intraday_submitted = st.form_submit_button("Save intraday settings", type="primary")
         if intraday_submitted:
             idb.ensure_capital_seeded("live", float(intraday_live_capital))
@@ -2819,6 +2858,11 @@ def page_admin():
                 "intraday_live_enabled": bool(intraday_live_enabled),
                 "intraday_live_capital": float(intraday_live_capital),
                 "intraday_paper_capital": float(intraday_paper_capital),
+                "intraday_max_trades_per_day": int(intraday_max_trades),
+                "intraday_risk_pct_per_trade": float(intraday_risk_pct),
+                "intraday_leverage": float(intraday_leverage),
+                "intraday_gap_filter_pct": float(intraday_gap_filter),
+                "intraday_top_n_candidates": int(intraday_top_n),
             }
             state_db.update_strategy_config(intraday_updates)
             config.STRATEGY.update(intraday_updates)
@@ -5736,15 +5780,22 @@ def page_intraday_backtest():
             ip2.metric("Starting capital", f"₹{_ibt_run_meta.get('capital', 0):,.0f}")
             ip3.metric("Ending capital", f"₹{res.get('capital_end', 0):,.0f}")
 
-        st.caption("Strategy rule set (fixed -- not tunable here; this is the "
-                  "currently DEPLOYED rule set, same as the live engine)")
+        _p_top_n = config.STRATEGY.get("intraday_top_n_candidates", istrat.TOP_N_CANDIDATES)
+        _p_gap_filter = config.STRATEGY.get("intraday_gap_filter_pct", istrat.GAP_FILTER_PCT)
+        _p_max_trades = config.STRATEGY.get("intraday_max_trades_per_day", istrat.MAX_TRADES_PER_DAY)
+        _p_leverage = config.STRATEGY.get("intraday_leverage", istrat.LEVERAGE)
+        _p_risk_pct = config.STRATEGY.get(
+            "intraday_risk_pct_per_trade", istrat.MAX_RISK_PCT_PER_TRADE * 100) / 100
+        st.caption("Strategy rule set used for this run -- most of it fixed (same as the live "
+                  "engine); candidate pool/gap filter/max trades/leverage/risk per trade are "
+                  "Admin-editable operational knobs, shown here at their CURRENT value (Admin)")
         sp1, sp2, sp3, sp4 = st.columns(4)
         sp1.metric("Day-bias ratio (L/S)",
                   f">{istrat.BIAS_RATIO_LONG_MIN} / <{istrat.BIAS_RATIO_SHORT_MAX}")
         sp2.metric("Sector gate ratio (L/S)",
                   f">{istrat.SECTOR_GATE_RATIO_LONG_MIN} / <{istrat.SECTOR_GATE_RATIO_SHORT_MAX}")
-        sp3.metric("Candidate pool", f"Top {istrat.TOP_N_CANDIDATES}")
-        sp4.metric("Overnight gap filter", f"±{istrat.GAP_FILTER_PCT}%")
+        sp3.metric("Candidate pool", f"Top {_p_top_n}")
+        sp4.metric("Overnight gap filter", f"±{_p_gap_filter}%")
         sp5, sp6, sp7, sp8 = st.columns(4)
         sp5.metric("Signal window", f"{istrat.SIGNAL_WINDOW_START}–{istrat.SIGNAL_WINDOW_END}")
         sp6.metric("New-signal cutoff", str(istrat.NEW_SIGNAL_CUTOFF))
@@ -5757,9 +5808,9 @@ def page_intraday_backtest():
         sp12.metric("Trail EMA span", istrat.TRAIL_EMA_SLOW)
         sp13, sp14, sp15, sp16 = st.columns(4)
         sp13.metric("Reward : risk", f"1 : {istrat.REWARD_RISK}")
-        sp14.metric("Max trades/day", istrat.MAX_TRADES_PER_DAY)
-        sp15.metric("Leverage", f"{istrat.LEVERAGE}×")
-        sp16.metric("Risk per trade", f"{istrat.MAX_RISK_PCT_PER_TRADE:.1%}")
+        sp14.metric("Max trades/day", _p_max_trades)
+        sp15.metric("Leverage", f"{_p_leverage}×")
+        sp16.metric("Risk per trade", f"{_p_risk_pct:.1%}")
 
     if daily.empty:
         st.warning("No trading day in this range produced a sector-gate-confirmed signal "
@@ -6771,6 +6822,8 @@ def _build_intraday_candle_figure(symbol: str, direction: str, today: dt.date,
 
 def page_intraday_dashboard():
     _mode = "live" if config.STRATEGY.get("intraday_live_enabled", False) else "paper"
+    _top_n = config.STRATEGY.get("intraday_top_n_candidates", istrat.TOP_N_CANDIDATES)
+    _max_trades = config.STRATEGY.get("intraday_max_trades_per_day", istrat.MAX_TRADES_PER_DAY)
     _tip = html_lib.escape(
         "The DaysLowVolumnBreakout intraday strategy (v5.4 §5i, paper-trading "
         "trial of the disputed top-5 finding -- see the v5.4 spec §0) -- "
@@ -6932,8 +6985,8 @@ def page_intraday_dashboard():
         st.markdown(
             '<p class="ov-card-title" style="margin-top:16px;"><span class="ov-dot" '
             f'style="background:var(--ov-teal);"></span>Today\'s candidates '
-            f'<span class="ov-card-meta">(top-{istrat.TOP_N_CANDIDATES} pool, '
-            f'{istrat.MAX_TRADES_PER_DAY} trade slots)</span></p>', unsafe_allow_html=True)
+            f'<span class="ov-card-meta">(top-{_top_n} pool, '
+            f'{_max_trades} trade slots)</span></p>', unsafe_allow_html=True)
         candidates = idb.get_candidates(today)
         if candidates.empty:
             st.info("No candidates selected yet today.")
@@ -6943,10 +6996,10 @@ def page_intraday_dashboard():
             # real positions opened today, not just candidates evaluated.
             _today_positions = idb.get_positions(date=today, mode=_mode)
             _slots_filled = int(_today_positions["symbol"].nunique()) if not _today_positions.empty else 0
-            _slots_cls = "ov-pos" if _slots_filled < istrat.MAX_TRADES_PER_DAY else "ov-neg"
+            _slots_cls = "ov-pos" if _slots_filled < _max_trades else "ov-neg"
             st.markdown(
                 f'<p class="ov-card-meta">Trade slots: '
-                f'<span class="{_slots_cls}">{_slots_filled}/{istrat.MAX_TRADES_PER_DAY} filled</span></p>',
+                f'<span class="{_slots_cls}">{_slots_filled}/{_max_trades} filled</span></p>',
                 unsafe_allow_html=True)
 
             _ensure_subscribed(ticker, list(candidates["symbol"]))
@@ -7193,7 +7246,7 @@ def page_intraday_dashboard():
         if _watch_syms:
             st.markdown(
                 f'<p class="ov-card-meta">Watch another candidate '
-                f'({len(_watch_syms)} of today\'s top-{istrat.TOP_N_CANDIDATES} not currently open)</p>',
+                f'({len(_watch_syms)} of today\'s top-{_top_n} not currently open)</p>',
                 unsafe_allow_html=True)
             _watch_default = st.session_state.get("intraday_watch_symbol")
             _watch_idx = _watch_syms.index(_watch_default) if _watch_default in _watch_syms else 0
@@ -7452,7 +7505,9 @@ def page_intraday_logs():
             detail = (f"{c['sector'] or 'unresolved sector'}, ratio {ratio_txt} "
                      f"didn't confirm {direction} (needs ≥2.0 for LONG / ≤0.5 for SHORT)")
         elif status == "day_slots_filled":
-            detail = (f"Breakout triggered, but MAX_TRADES_PER_DAY ({istrat.MAX_TRADES_PER_DAY}) "
+            _max_trades_today = config.STRATEGY.get(
+                "intraday_max_trades_per_day", istrat.MAX_TRADES_PER_DAY)
+            detail = (f"Breakout triggered, but MAX_TRADES_PER_DAY ({_max_trades_today}) "
                      "was already used by other candidates ranked ahead of this one that day.")
 
         with st.container(border=True, key=f"ov-card-ilog-{sym}"):
@@ -8356,6 +8411,14 @@ def page_guide():
     _intraday_mode = ("LIVE" if cfg.get("intraday_live_enabled", False) else "PAPER")
     _intraday_capital = (cfg.get("intraday_live_capital", 1_000_000.0) if _intraday_mode == "LIVE"
                         else cfg.get("intraday_paper_capital", 1_000_000.0))
+    # Operational knobs -- Admin-editable (unlike every other intraday
+    # constant on this page, which is read straight from istrat.* since
+    # it's hardcoded/tuned) -- see config.py's own comment by these keys.
+    _i_top_n = cfg.get("intraday_top_n_candidates", istrat.TOP_N_CANDIDATES)
+    _i_max_trades = cfg.get("intraday_max_trades_per_day", istrat.MAX_TRADES_PER_DAY)
+    _i_leverage = cfg.get("intraday_leverage", istrat.LEVERAGE)
+    _i_gap_filter = cfg.get("intraday_gap_filter_pct", istrat.GAP_FILTER_PCT)
+    _i_risk_pct = cfg.get("intraday_risk_pct_per_trade", istrat.MAX_RISK_PCT_PER_TRADE * 100) / 100
     st.markdown(_guide_section("⚡", "blue", "Intraday trading", anchor="g-intraday",
                                subtitle="A completely separate same-day strategy — \"DaysLowVolumnBreakout\" "
                                         "— with its own capital, candidates, and rules. Nothing here shares "
@@ -8365,15 +8428,20 @@ def page_guide():
         '<div class="guide-stats" style="margin:-4px 0 18px 0;">'
         + f'<div class="guide-stat"><b>{_intraday_mode}</b>current mode</div>'
         + f'<div class="guide-stat"><b>₹{_intraday_capital:,.0f}</b>starting capital ({_intraday_mode.lower()})</div>'
-        + f'<div class="guide-stat"><b>{istrat.TOP_N_CANDIDATES}</b>candidates tracked/day</div>'
-        + f'<div class="guide-stat"><b>{istrat.MAX_TRADES_PER_DAY}</b>max trades/day</div>'
-        + f'<div class="guide-stat"><b>{istrat.LEVERAGE:.0f}×</b>intraday leverage (MIS)</div>'
+        + f'<div class="guide-stat"><b>{_i_top_n}</b>candidates tracked/day</div>'
+        + f'<div class="guide-stat"><b>{_i_max_trades}</b>max trades/day</div>'
+        + f'<div class="guide-stat"><b>{_i_leverage:.0f}×</b>intraday leverage (MIS)</div>'
         + '</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:12px;color:var(--ov-text-muted);margin:-10px 0 14px 0;">'
+        'Candidate pool size, max trades/day, leverage, gap filter, and risk per trade are '
+        'Admin-editable (⚙️ Admin → Intraday strategy); everything else below is fixed, '
+        'bootstrap-validated strategy logic, not a setting.</p>', unsafe_allow_html=True)
 
     st.markdown(_guide_flow([
         ("NIFTY breadth", "09:30 A/D ratio"),
-        ("Rank F&O movers", f"top {istrat.TOP_N_CANDIDATES}, by 09:15-09:25 move"),
-        ("Gap filter", f">{istrat.GAP_FILTER_PCT:.0f}% overnight gap skipped"),
+        ("Rank F&O movers", f"top {_i_top_n}, by 09:15-09:25 move"),
+        ("Gap filter", f">{_i_gap_filter:.0f}% overnight gap skipped"),
         ("Signal candle", "lowest-volume pullback"),
         ("Breakout entry", "gated 2-candle trigger"),
         ("Sector gate", "re-checked at trigger"),
@@ -8398,8 +8466,8 @@ def page_guide():
         '<div class="guide-card"><h4>2. Picking today\'s candidates</h4>'
         f'<p>Once the day\'s direction is set, the whole F&amp;O universe is ranked by that same '
         'first-15-minute move — biggest advancers for a LONG day, biggest decliners for a SHORT day — '
-        f'and the top {istrat.TOP_N_CANDIDATES} become today\'s watchlist. A candidate whose 09:15 open '
-        f'already gapped more than {istrat.GAP_FILTER_PCT:.0f}% from the previous close is skipped '
+        f'and the top {_i_top_n} become today\'s watchlist. A candidate whose 09:15 open '
+        f'already gapped more than {_i_gap_filter:.0f}% from the previous close is skipped '
         'outright and replaced by the next-best ranked name, rather than trading a stock that\'s already '
         'made most of its move before the opening range even forms. No sector or trend filter narrows '
         'this initial pool — those checks come later, at the point a candidate actually tries to '
@@ -8469,9 +8537,9 @@ def page_guide():
 
     st.markdown(
         '<div class="guide-card"><h4>7. Position sizing &amp; costs</h4>'
-        f'<p>Each day\'s capital is split evenly across the {istrat.MAX_TRADES_PER_DAY} available trade '
-        f'slots and leveraged {istrat.LEVERAGE:.0f}× (MIS intraday margin) for the capital-based sizing '
-        f'cap; a separate risk budget — {istrat.MAX_RISK_PCT_PER_TRADE*100:.1f}% of current capital per '
+        f'<p>Each day\'s capital is split evenly across the {_i_max_trades} available trade '
+        f'slots and leveraged {_i_leverage:.0f}× (MIS intraday margin) for the capital-based sizing '
+        f'cap; a separate risk budget — {_i_risk_pct*100:.1f}% of current capital per '
         'trade — caps it from the other side. Quantity is whichever of the two binds first, floored to a '
         'whole share, so a single trade can never risk more than its budgeted slice of capital no matter '
         'how tight or wide its own stop happens to be. Every fill — paper or live — has Zerodha\'s real '

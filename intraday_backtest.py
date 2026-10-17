@@ -260,6 +260,19 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
     skipped_days: list[dict] = []
     candidate_rows: list[dict] = []
 
+    # Admin-editable operational knobs, read ONCE for the whole run (not
+    # re-read per day) -- same keys/fallback convention intraday_engine.py
+    # uses live, so a backtest and the live/paper engine always agree on
+    # these even if Admin changes them mid-session. See config.py's own
+    # comment by these keys for why only these five (not the strategy-edge
+    # constants) are overridable.
+    gap_filter_pct = config.STRATEGY.get("intraday_gap_filter_pct", strat.GAP_FILTER_PCT)
+    top_n_candidates = config.STRATEGY.get("intraday_top_n_candidates", strat.TOP_N_CANDIDATES)
+    max_trades_per_day = config.STRATEGY.get("intraday_max_trades_per_day", strat.MAX_TRADES_PER_DAY)
+    leverage = config.STRATEGY.get("intraday_leverage", strat.LEVERAGE)
+    risk_pct_per_trade = config.STRATEGY.get(
+        "intraday_risk_pct_per_trade", strat.MAX_RISK_PCT_PER_TRADE * 100) / 100
+
     for day_i, day in enumerate(trading_days):
         _progress(f"Scanning {day}...", 0.70 + (day_i / len(trading_days)) * 0.15)
         day_ts = pd.Timestamp(day)
@@ -316,10 +329,10 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
             c0915 = _candle_at(candles5, sym, day_ts, 9, 15)
             pc = prev_close_map.get(sym)
             gap = (float(c0915["open"]) - pc) / pc * 100.0 if (c0915 is not None and pc) else None
-            if not strat.passes_gap_filter(gap):
+            if not strat.passes_gap_filter(gap, threshold=gap_filter_pct):
                 continue
             accepted.append((sym, float(ret), gap))
-            if len(accepted) >= strat.TOP_N_CANDIDATES:
+            if len(accepted) >= top_n_candidates:
                 break
 
         if not accepted:
@@ -522,10 +535,10 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
         # rank -- the only selection rule a live system can genuinely
         # execute, matching run_live()'s own same-boundary tiebreak.
         ordered = sorted(cands, key=lambda c: (c["entry"]["entry_time"], c["rank"]))
-        sigs = ordered[:strat.MAX_TRADES_PER_DAY]
+        sigs = ordered[:max_trades_per_day]
 
-        capital_alloc = (capital_cur / strat.MAX_TRADES_PER_DAY) * strat.LEVERAGE
-        risk_budget = capital_cur * strat.MAX_RISK_PCT_PER_TRADE
+        capital_alloc = (capital_cur / max_trades_per_day) * leverage
+        risk_budget = capital_cur * risk_pct_per_trade
         day_pnl = 0.0
         capital_before = capital_cur
 
