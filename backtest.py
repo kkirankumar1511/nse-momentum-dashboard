@@ -55,6 +55,35 @@ import sector_universe
 CACHE_DIR = "cache"
 LONG_CACHE_DIR = os.path.join(CACHE_DIR, "long")
 
+# ---------------------------------------------------------------------------
+# MTF (Margin Trading Facility) -- opt-in leverage mode for run_backtest()
+# (mtf_enabled/fixed_risk_amount/mtf_leverage_map params). OFF by default;
+# every existing call/result is byte-identical unless explicitly turned on.
+# Costs per Zerodha's published MTF fee schedule (2026); pledge/unpledge
+# fees deliberately NOT modeled yet (would need per-buy-day lot tracking --
+# this engine averages cost basis on top-ups, not per-lot -- skipped for
+# now rather than approximated wrong).
+# ---------------------------------------------------------------------------
+MTF_DAILY_INTEREST_RATE = 0.0004    # 0.04%/day (Rs.40/lakh) on the FUNDED (borrowed) amount, from T+1
+MTF_BROKERAGE_PCT = 0.003           # 0.3% per order...
+MTF_BROKERAGE_CAP = 20.0            # ...or Rs.20, whichever is LOWER
+MTF_SQUAREOFF_CHARGE = 50.0 * 1.18  # Rs.50 + 18% GST, per exit order
+MTF_LEVERAGE_CSV = os.path.join("assets", "Zerodha - Approved Securities for MTF.csv")
+
+
+def load_mtf_leverage_map(path: str = MTF_LEVERAGE_CSV) -> dict[str, dict]:
+    """symbol -> {"margin_pct": ..., "leverage": ...} from Zerodha's own
+    per-symbol MTF-eligible list (varies 2x-5x by stock, NOT a flat
+    multiplier) -- covers the full F&O universe as of when this CSV was
+    last refreshed. A symbol missing from this map (e.g. added to F&O
+    after the CSV's snapshot) falls back to margin_pct=100 (no leverage,
+    i.e. treated as a plain cash trade) in try_enter() below, rather than
+    silently guessing a multiplier or erroring the whole run."""
+    df = pd.read_csv(path)
+    return {row["tradingsymbol"]: {"margin_pct": float(row["margin"]),
+                                   "leverage": float(row["leverage"])}
+           for _, row in df.iterrows()}
+
 
 def _tz_naive(frame: pd.DataFrame) -> pd.DataFrame:
     """Kite's timestamps are tz-aware (IST); everything this module compares
@@ -336,6 +365,22 @@ class Position:
     entry_date: pd.Timestamp
     highest_close: float = 0.0
     sector: str | None = None
+    # MTF-only fields (see run_backtest()'s mtf_enabled param) -- 0.0/False
+    # for every plain-cash position, so dataclasses.asdict(t) on a Trade
+    # (which has none of these) and every existing non-MTF code path stay
+    # exactly as they were.
+    mtf: bool = False
+    funded_amount: float = 0.0   # broker-funded (borrowed) portion of this position's exposure
+    mtf_interest_paid: float = 0.0  # running total, for reporting only
+    # Set once at the FIRST entry, for every position (MTF or not) --
+    # frozen regardless of later top-ups (which blend entry_price) or a
+    # trailing stop (which ratchets `stop`). See run_backtest()'s
+    # mtf_topup_enabled param: R-multiple for the top-up trigger is
+    # always measured against this original risk, not a moving target.
+    original_entry_price: float = 0.0
+    initial_risk: float = 0.0
+    mtf_topup_count: int = 0
+    mtf_topup_last_r: float = 0.0
 
 
 @dataclasses.dataclass
@@ -348,6 +393,14 @@ class Trade:
     qty: int
     reason: str
     sector: str | None = None
+    # MTF-only (see run_backtest()'s mtf_enabled param), 0.0 for every
+    # plain-cash trade. entry_price/exit_price already have MTF brokerage
+    # + the square-off charge baked in (same convention cost_bps uses),
+    # so `pnl` below already nets those out -- mtf_interest_paid is
+    # reported here purely for cost transparency (it was already deducted
+    # from cash day-by-day as it accrued, so it's already reflected in
+    # the equity curve; it is NOT additionally subtracted from `pnl`).
+    mtf_interest_paid: float = 0.0
 
     @property
     def pnl(self):
@@ -607,7 +660,21 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                  start_date: dt.date | None = None,
                  progress_cb=None,
                  precomputed_pivots: dict | None = None,
-                 track_daily_positions: bool = False) -> dict:
+                 track_daily_positions: bool = False,
+                 mtf_enabled: bool = False,
+                 fixed_risk_amount: float | None = None,
+                 mtf_risk_pct: float | None = None,
+                 mtf_equal_weight: bool = False,
+                 mtf_leverage_map: dict | None = None,
+                 mtf_leverage_utilization: float = 1.0,
+                 mtf_leverage_top_n: int | None = None,
+                 mtf_regime_gated: bool = False,
+                 mtf_regime_below_utilization: float = 0.0,
+                 mtf_regime_above_utilization: float = 0.5,
+                 mtf_topup_enabled: bool = False,
+                 mtf_topup_r_multiple: float = 1.0,
+                 mtf_topup_pct: float = 0.20,
+                 mtf_topup_repeat: bool = False) -> dict:
     """Monthly-rebalanced long-only backtest.
 
     track_daily_positions: off by default, zero cost when off. When True,
@@ -641,7 +708,145 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     delivery (CNC). Statutory costs (STT, stamp duty, exchange/SEBI
     charges) still apply in reality (~5-7 bps round trip) and aren't
     broker-specific; pass a non-zero cost_bps (e.g. via --cost-bps on the
-    CLI) to model them back in for a more conservative backtest.
+    CLI) to model them back in for a more conservative backtest. Fully
+    orthogonal to mtf_enabled below -- MTF's own costs are added on top
+    of whatever cost_bps you pass, not a replacement for it.
+
+    mtf_enabled (False by default -- every existing call/result is
+    byte-identical unless explicitly turned on): switches sizing and
+    cost accounting to Zerodha's Margin Trading Facility model instead
+    of plain cash CNC.
+      - Position sizing: pass EXACTLY ONE of fixed_risk_amount (a flat
+        rupee risk per trade, e.g. 3000 -- stays constant regardless of
+        account size, so compounding capital doesn't grow position size
+        the way screener.position_size() does) or mtf_risk_pct (e.g.
+        0.3 -- risks that % of CURRENT total equity each trade, same
+        compounding behavior as screener.position_size()'s risk_per_
+        trade_pct, just computed independently of it since MTF may want
+        its own risk %). Both ultimately size via screener.fixed_risk_
+        position_size(risk_amount, price, stop) -- mtf_risk_pct just
+        computes a fresh risk_amount = equity_now * mtf_risk_pct / 100
+        immediately before each entry instead of using one fixed
+        number for the whole run. A third option, mtf_equal_weight,
+        sizes off CAPITAL instead of risk -- same idea as screener.
+        capital_position_size()/advanced_equal_weight_sizing (each of
+        up to max_positions slots gets ~equity/max_positions), except
+        that amount is deployed as the MARGIN deposit and then
+        leveraged up to its symbol's own real exposure (margin_budget /
+        (margin_pct/100)) -- i.e. "put 10% of equity down, control
+        ~10%/margin_pct of equity in stock", not "risk 10% if stopped
+        out". This is the one to use to compare against a baseline run
+        with advanced_equal_weight_sizing/capital_equal_weight_sizing
+        on -- same per-slot capital commitment, MTF adds the leverage
+        on top instead of changing the sizing philosophy entirely the
+        way fixed_risk_amount/mtf_risk_pct do. Exactly one of
+        fixed_risk_amount / mtf_risk_pct / mtf_equal_weight is required
+        when mtf_enabled=True.
+      - Per-symbol leverage/margin% comes from mtf_leverage_map (symbol
+        -> {"margin_pct","leverage"}, defaults to load_mtf_leverage_map()
+        reading assets/Zerodha - Approved Securities for MTF.csv if not
+        passed explicitly) -- Zerodha's real per-stock multiplier (2x-5x
+        as of this CSV's snapshot), NOT a flat leverage figure. A symbol
+        missing from the map falls back to margin_pct=100 (no leverage).
+      - mtf_leverage_utilization (1.0 = full eligible leverage, the
+        default -- byte-identical to before this existed): linearly
+        interpolates each symbol's EFFECTIVE leverage between 1x (0.0)
+        and its full Zerodha-eligible leverage (1.0) -- e.g. 0.5 with a
+        4x-eligible stock uses 2.5x (halfway from 1x to 4x), not 2x.
+        Exists because maxing out real per-stock leverage on every slot
+        compounds fast but with a proportionally amplified drawdown AND
+        this engine does not model margin calls/forced liquidation --
+        real MTF accounts get force-squared-off by the broker if equity
+        falls too far relative to leveraged exposure, well before a
+        backtest's own stop-loss would exit, so a full-leverage backtest
+        number can overstate what's actually survivable in practice.
+        Dialing this down is a way to explore a more realistic risk
+        level without margin-call simulation.
+      - mtf_leverage_top_n (None = every position eligible, the default):
+        an alternative to leverage_utilization for spreading risk --
+        instead of using LESS leverage on EVERY position, use FULL
+        leverage but only on the N best-scored NEW entries each fill
+        (simple-greedy-path only, matches its own score-descending fill
+        order -- sym_rank is that loop's 0-indexed position). Positions
+        beyond the Nth still open (unleveraged, margin_pct=100) rather
+        than being skipped -- concentrates leverage on your highest-
+        conviction picks instead of diluting it uniformly. A decision
+        made ONCE at entry (not re-evaluated as scores/ranks shift for
+        already-open positions). Combinable with mtf_leverage_
+        utilization (applies utilization only within the leveraged N).
+      - mtf_regime_gated (False by default): ties leverage utilization
+        to NIFTY 50's own regime -- same close-vs-EMA(cfg[regime_ema_
+        period], default 200) signal regime_filter_enabled uses,
+        computed independently of that flag so this works without it.
+        At each entry, uses mtf_regime_below_utilization (default 0.0
+        -- NO leverage, plain 1x margin) when NIFTY is below its
+        regime EMA that day, or mtf_regime_above_utilization (default
+        0.5 -- half of each symbol's eligible leverage) when above.
+        Overrides mtf_leverage_utilization's fixed value with this
+        regime-dependent one (don't pass both -- regime wins); still
+        composes with mtf_leverage_top_n (the regime-derived
+        utilization only applies within the leveraged N, same as a
+        fixed utilization would). A DIFFERENT decision than
+        regime_filter_enabled's own (that caps how many NEW positions
+        may open in a bad regime; this instead lets every position
+        open but sizes its leverage, not its count, off the regime) --
+        the two are independent and may be combined.
+      - mtf_topup_enabled (False by default): a DIFFERENT thing from all
+        the above -- instead of leveraging the INITIAL entry, entries
+        stay on whatever sizing this run would otherwise use (leave
+        fixed_risk_amount/mtf_risk_pct/mtf_equal_weight all unset/False
+        to keep entries on the plain baseline sizing, e.g. the current
+        advanced_equal_weight_sizing/capital_equal_weight_sizing config
+        -- pyramiding onto an already-CNC position with an MTF-funded
+        add-on), and instead adds an MTF-funded TOP-UP once a position
+        both (a) has an unrealized gain of >= mtf_topup_r_multiple
+        (default 1.0, i.e. "R") times its ORIGINAL entry-to-stop risk
+        (frozen at first entry -- Position.initial_risk/original_entry_
+        price, unaffected by any later top-up's blended entry_price or
+        a trailing stop's ratcheting), AND (b) is still in the current
+        top-max_positions ranked candidate set (current_candidate_syms,
+        refreshed each rebalance -- membership is checked as of the
+        MOST RECENT rebalance, not re-ranked daily). The top-up adds
+        mtf_topup_pct (default 0.20 = 20%) MORE SHARES on top of the
+        position's CURRENT qty, funded via MTF at that symbol's own
+        leverage (blended into entry_price the same weighted-average
+        way top_up_position() already works; the position becomes
+        Position.mtf=True from that point on, so it starts accruing
+        interest on just the added funded_amount, not the original
+        plain-cash shares). mtf_topup_repeat (False by default) decides
+        whether this can fire again at each FURTHER R gained (2R, 3R,
+        ...) as long as it's still top-ranked each time, or only ONCE
+        per position at its first qualifying R. Composes with mtf_
+        leverage_utilization/mtf_regime_gated (both apply to the top-up
+        itself, same as they would to an entry). Requires mtf_enabled=
+        True; does not itself require any of fixed_risk_amount/
+        mtf_risk_pct/mtf_equal_weight to be set.
+      - cash is only debited the MARGIN portion at entry (not the full
+        exposure); the broker-funded remainder (Position.funded_amount)
+        is a running debt, repaid from proceeds at exit, and accrues
+        MTF_DAILY_INTEREST_RATE (0.04%/day) from the day AFTER entry
+        until exit (inclusive) -- see the daily loop's own "MTF interest
+        accrual" step. The equity curve nets this debt out correctly
+        (mark-to-market = cash + open positions' full exposure value -
+        their outstanding funded_amount), so leverage shows its real P&L
+        amplification without a phantom equity inflation from the
+        borrowed portion.
+      - MTF brokerage (min(Rs.20, 0.3%) per order) and a Rs.50+18%GST
+        square-off charge (on exit only) are deducted from cash directly
+        at entry/exit -- baked into Trade.entry_price/exit_price the same
+        way cost_bps already is, so Trade.pnl stays net-of-cost.
+      - Pledge/unpledge fees (Rs.15+18%GST per stock per distinct
+        buy-day, on pledge and on unpledge) are NOT modeled -- this
+        engine averages a position's cost basis across top-ups rather
+        than tracking per-lot purchase dates, so an accurate per-lot fee
+        wasn't implementable without a bigger position-tracking rewrite.
+        Understates real MTF cost by roughly Rs.35+GST per position (more
+        for positions built via multiple top-up days).
+      - Only the simple greedy entry path is MTF-aware (the
+        advanced_equal_weight_sizing allocator and top_up_position() are
+        NOT -- fixed-risk sizing is a different sizing philosophy than
+        equal-weight capital allocation, so mixing them wasn't attempted;
+        set advanced_equal_weight_sizing=False when mtf_enabled=True).
 
     fundamentals_history: optional, from fundamentals_agent.build_
     fundamentals_history() -- turns on a real point-in-time fundamental
@@ -717,6 +922,26 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     """
     cfg = dict(cfg or config.STRATEGY)
     cost = cost_bps / 10_000
+    has_flat = fixed_risk_amount is not None and fixed_risk_amount > 0
+    has_pct = mtf_risk_pct is not None and mtf_risk_pct > 0
+    if mtf_enabled:
+        n_entry_sizing_modes = sum([has_flat, has_pct, mtf_equal_weight])
+        if n_entry_sizing_modes > 1:
+            raise ValueError("mtf_enabled=True allows AT MOST ONE of a positive "
+                            "fixed_risk_amount, a positive mtf_risk_pct, or "
+                            "mtf_equal_weight=True")
+        if n_entry_sizing_modes == 0 and not mtf_topup_enabled:
+            raise ValueError("mtf_enabled=True requires either an entry sizing mode "
+                            "(fixed_risk_amount/mtf_risk_pct/mtf_equal_weight) or "
+                            "mtf_topup_enabled=True (entries stay on the baseline "
+                            "sizing, MTF is used only for top-ups)")
+        if mtf_leverage_map is None:
+            mtf_leverage_map = load_mtf_leverage_map()
+    # Whether try_enter() should route a NEW position through MTF sizing at
+    # all -- False when mtf_topup_enabled is the only MTF feature on, so
+    # entries fall through to the plain baseline sizing further down and
+    # ONLY the top-up (a separate step in the daily loop) touches MTF.
+    mtf_entry_sizing = mtf_enabled and (has_flat or has_pct or mtf_equal_weight)
     # Created once per run (not module-level) so repeated backtests in one
     # process (Streamlit reruns, multiple CLI invocations) never share stale
     # state -- see fundamentals_agent.score_asof for the memoization key.
@@ -811,7 +1036,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     # indicators.precompute_daily_series does for stocks (safe for the same
     # reason: a causal ewm at position i depends only on rows [0..i]).
     bench_above_regime_ema = None
-    if cfg.get("regime_filter_enabled", False):
+    if cfg.get("regime_filter_enabled", False) or mtf_regime_gated:
         regime_ema = indicators.ema(bench["close"], cfg.get("regime_ema_period", 200))
         bench_above_regime_ema = bench["close"] > regime_ema
 
@@ -872,10 +1097,23 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     def close_position(sym, price, date, reason):
         nonlocal cash
         pos = positions.pop(sym)
-        proceeds = pos.qty * price * (1 - cost)
-        cash += proceeds
-        trades.append(Trade(sym, pos.entry_date, date, pos.entry_price,
-                            price * (1 - cost), pos.qty, reason, sector=pos.sector))
+        if pos.mtf:
+            # Full exposure value comes back, minus repaying the broker-
+            # funded debt and this exit order's own costs -- see
+            # run_backtest()'s mtf_enabled docstring for the accounting.
+            exposure_out = pos.qty * price
+            exit_brokerage = min(MTF_BROKERAGE_CAP, MTF_BROKERAGE_PCT * exposure_out)
+            exit_costs = exit_brokerage + MTF_SQUAREOFF_CHARGE
+            cash += exposure_out - pos.funded_amount - exit_costs
+            exit_price = price - (exit_costs / pos.qty if pos.qty else 0.0)
+            trades.append(Trade(sym, pos.entry_date, date, pos.entry_price,
+                                exit_price, pos.qty, reason, sector=pos.sector,
+                                mtf_interest_paid=pos.mtf_interest_paid))
+        else:
+            proceeds = pos.qty * price * (1 - cost)
+            cash += proceeds
+            trades.append(Trade(sym, pos.entry_date, date, pos.entry_price,
+                                price * (1 - cost), pos.qty, reason, sector=pos.sector))
 
     def _price_asof(sym: str, date) -> float | None:
         """Last known close at or before `date` -- forward-fills over a
@@ -892,9 +1130,81 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         sliced = candles[sym].loc[:date, "close"]
         return float(sliced.iloc[-1]) if not sliced.empty else None
 
-    def try_enter(sym, row, price, stop, date, qty_override=None):
+    def try_enter(sym, row, price, stop, date, qty_override=None, sym_rank=None):
         nonlocal cash
         if len(positions) >= effective_max_positions or sym in positions:
+            return
+        if mtf_entry_sizing:
+            leverage_eligible = mtf_leverage_top_n is None or \
+                (sym_rank is not None and sym_rank < mtf_leverage_top_n)
+            if not leverage_eligible:
+                margin_pct = 100.0  # beyond the top N -- opens unleveraged, not skipped
+            else:
+                if mtf_regime_gated:
+                    regime_above = bool(bench_above_regime_ema.get(date, True)) \
+                        if bench_above_regime_ema is not None else True
+                    utilization = mtf_regime_above_utilization if regime_above \
+                        else mtf_regime_below_utilization
+                else:
+                    utilization = mtf_leverage_utilization
+                raw_margin_pct = mtf_leverage_map.get(sym, {}).get("margin_pct", 100.0)
+                if utilization < 1.0 and raw_margin_pct > 0:
+                    raw_leverage = 100.0 / raw_margin_pct
+                    effective_leverage = 1.0 + utilization * (raw_leverage - 1.0)
+                    margin_pct = 100.0 / effective_leverage
+                else:
+                    margin_pct = raw_margin_pct
+            if qty_override is not None:
+                qty = qty_override
+            elif mtf_equal_weight:
+                # Equal-weight CAPITAL (margin) allocation, leveraged up
+                # to this symbol's own real exposure -- see run_backtest()
+                # docstring's mtf_equal_weight entry. Deliberately ignores
+                # `stop` for sizing (same as screener.capital_position_
+                # size()/the advanced_equal_weight_sizing allocator this
+                # mirrors) -- stop still governs the exit, just not qty.
+                equity_now = cash + sum(
+                    p.qty * (_price_asof(s, date) or 0.0) - (p.funded_amount if p.mtf else 0.0)
+                    for s, p in positions.items())
+                margin_budget = equity_now / cfg["max_positions"]
+                exposure_target = margin_budget / (margin_pct / 100)
+                qty = max(int(exposure_target / price), 0)
+            elif mtf_risk_pct is not None:
+                equity_now = cash + sum(
+                    p.qty * (_price_asof(s, date) or 0.0) - (p.funded_amount if p.mtf else 0.0)
+                    for s, p in positions.items())
+                risk_amount = equity_now * mtf_risk_pct / 100
+                qty = screener.fixed_risk_position_size(risk_amount, price, stop)
+            else:
+                qty = screener.fixed_risk_position_size(fixed_risk_amount, price, stop)
+            if qty <= 0:
+                return
+            exposure = qty * price
+            margin_required = exposure * margin_pct / 100
+            entry_brokerage = min(MTF_BROKERAGE_CAP, MTF_BROKERAGE_PCT * exposure)
+            if margin_required + entry_brokerage > cash:
+                # Cash-constrained shrink (rare -- fixed_risk_amount alone
+                # usually needs far less than max_positions-worth of cash).
+                # Conservative: divides by (1 + brokerage pct) even though
+                # brokerage is capped at Rs.20, so this never OVER-shrinks.
+                qty = max(int(cash / (price * (margin_pct / 100 + MTF_BROKERAGE_PCT))), 0)
+                if qty <= 0:
+                    return
+                exposure = qty * price
+                margin_required = exposure * margin_pct / 100
+                entry_brokerage = min(MTF_BROKERAGE_CAP, MTF_BROKERAGE_PCT * exposure)
+            funded_amount = exposure - margin_required
+            cash -= margin_required + entry_brokerage
+            entry_price = price + entry_brokerage / qty
+            sector = row.get("top_sector") if hasattr(row, "get") else None
+            positions[sym] = Position(sym, qty, entry_price, stop, date,
+                                      highest_close=entry_price, sector=sector,
+                                      mtf=True, funded_amount=funded_amount,
+                                      original_entry_price=entry_price,
+                                      initial_risk=abs(entry_price - stop))
+            if verbose:
+                print(f"{date.date()} BUY(MTF) {sym:8s} x{qty} @ {price:.1f} "
+                     f"margin {margin_required:.0f} funded {funded_amount:.0f} stop {stop:.1f}")
             return
         if qty_override is not None:
             qty = qty_override
@@ -927,7 +1237,9 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         # index name to show, not a made-up bucket.
         sector = row.get("top_sector") if hasattr(row, "get") else None
         positions[sym] = Position(sym, qty, entry_price, stop, date,
-                                  highest_close=entry_price, sector=sector)
+                                  highest_close=entry_price, sector=sector,
+                                  original_entry_price=entry_price,
+                                  initial_risk=abs(entry_price - stop))
         if verbose:
             print(f"{date.date()} BUY  {sym:8s} x{qty} @ {price:.1f} stop {stop:.1f}")
 
@@ -951,6 +1263,68 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
         if verbose:
             print(f"{date.date()} TOPUP {sym:8s} +{extra_qty} @ {price:.1f} (new qty {new_qty})")
 
+    def mtf_topup_position(sym, pos, price, date) -> None:
+        """See run_backtest()'s mtf_topup_enabled docstring. Adds
+        mtf_topup_pct more shares, funded via MTF, once the position's
+        gain (vs its ORIGINAL entry/risk, never a moved stop or a prior
+        top-up's blended price) crosses the next qualifying R-multiple
+        and it's still in the current top-ranked candidate set. Blends
+        entry_price the same weighted-average way top_up_position()
+        does; marks the position mtf=True so it starts accruing
+        interest on just the newly-funded amount."""
+        nonlocal cash
+        if pos.initial_risk <= 0:
+            return
+        r_multiple = (price - pos.original_entry_price) / pos.initial_risk
+        if mtf_topup_repeat:
+            next_r = pos.mtf_topup_last_r + mtf_topup_r_multiple
+            if r_multiple < next_r:
+                return
+        else:
+            if pos.mtf_topup_count > 0 or r_multiple < mtf_topup_r_multiple:
+                return
+        extra_qty = int(pos.qty * mtf_topup_pct)
+        if extra_qty <= 0:
+            return
+        if mtf_regime_gated:
+            regime_above = bool(bench_above_regime_ema.get(date, True)) \
+                if bench_above_regime_ema is not None else True
+            utilization = mtf_regime_above_utilization if regime_above \
+                else mtf_regime_below_utilization
+        else:
+            utilization = mtf_leverage_utilization
+        raw_margin_pct = mtf_leverage_map.get(sym, {}).get("margin_pct", 100.0)
+        if utilization < 1.0 and raw_margin_pct > 0:
+            raw_leverage = 100.0 / raw_margin_pct
+            effective_leverage = 1.0 + utilization * (raw_leverage - 1.0)
+            margin_pct = 100.0 / effective_leverage
+        else:
+            margin_pct = raw_margin_pct
+        exposure = extra_qty * price
+        margin_required = exposure * margin_pct / 100
+        entry_brokerage = min(MTF_BROKERAGE_CAP, MTF_BROKERAGE_PCT * exposure)
+        if margin_required + entry_brokerage > cash:
+            extra_qty = max(int(cash / (price * (margin_pct / 100 + MTF_BROKERAGE_PCT))), 0)
+            if extra_qty <= 0:
+                return
+            exposure = extra_qty * price
+            margin_required = exposure * margin_pct / 100
+            entry_brokerage = min(MTF_BROKERAGE_CAP, MTF_BROKERAGE_PCT * exposure)
+        funded_amount_added = exposure - margin_required
+        new_qty = pos.qty + extra_qty
+        fill_price = price + entry_brokerage / extra_qty
+        pos.entry_price = (pos.entry_price * pos.qty + fill_price * extra_qty) / new_qty
+        pos.qty = new_qty
+        pos.mtf = True
+        pos.funded_amount += funded_amount_added
+        pos.mtf_topup_count += 1
+        pos.mtf_topup_last_r = mtf_topup_r_multiple * pos.mtf_topup_count if not mtf_topup_repeat \
+            else pos.mtf_topup_last_r + mtf_topup_r_multiple
+        cash -= margin_required + entry_brokerage
+        if verbose:
+            print(f"{date.date()} MTF-TOPUP {sym:8s} +{extra_qty} @ {price:.1f} "
+                 f"(R={r_multiple:.2f}, new qty {new_qty}, funded +{funded_amount_added:.0f})")
+
     n_dates = len(dates)
     for i, date in enumerate(dates):
         # Throttled to ~100 updates over the whole run rather than every
@@ -964,6 +1338,20 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             regime_ok = bool(bench_above_regime_ema.get(date, True))
             effective_max_positions = cfg["max_positions"] if regime_ok else \
                 max(1, int(cfg["max_positions"] * cfg.get("regime_position_multiplier", 0.5)))
+
+        # 0) MTF daily interest accrual -- on every OPEN MTF position's
+        # funded (borrowed) amount, starting the day AFTER entry (T+1)
+        # through the day it's sold (inclusive, since it's still "funded"
+        # for that whole day). A real cash outflow, deducted immediately
+        # rather than accrued-then-batched, so it shows up in the same
+        # day's mark-to-market below.
+        if mtf_enabled:
+            for pos in positions.values():
+                if pos.mtf and date > pos.entry_date:
+                    interest = pos.funded_amount * MTF_DAILY_INTEREST_RATE
+                    cash -= interest
+                    pos.mtf_interest_paid += interest
+
         # 1) stop checks on today's bar
         for sym in list(positions):
             df = candles[sym]
@@ -1007,6 +1395,17 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 new_stop = pos.highest_close - cfg["trailing_atr_multiple"] * atr_now
                 if new_stop > pos.stop:
                     pos.stop = new_stop
+
+        # 1c) MTF top-up -- see mtf_topup_position()'s own docstring.
+        # "Still top-ranked" is checked against current_candidate_syms as
+        # of the MOST RECENT rebalance (step 2 below refreshes it), not
+        # re-ranked daily.
+        if mtf_topup_enabled:
+            for sym, pos in list(positions.items()):
+                if sym not in current_candidate_syms or date not in candles[sym].index:
+                    continue
+                price = float(candles[sym].loc[date, "close"])
+                mtf_topup_position(sym, pos, price, date)
 
         # 2) monthly rebalance: recompute the universe, drop trend/rank
         # failures, and refresh the standing watchlist (see step 2b).
@@ -1112,7 +1511,7 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
             capped_syms = set(_apply_sector_cap(
                 [s for s, _ in ordered], positions, ranked, cfg))
             ordered = [(s, r) for s, r in ordered if s in capped_syms]
-            for sym, row in ordered:
+            for sym_rank, (sym, row) in enumerate(ordered):
                 if len(positions) >= effective_max_positions:
                     break
                 if sym in positions or date not in candles[sym].index:
@@ -1121,13 +1520,18 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
                 price = float(df_upto["close"].iloc[-1])
                 atr_now = float(indicators.atr(df_upto, cfg["atr_period"]).iloc[-1])
                 stop = _initial_stop(price, atr_now, cfg, sym, date, _get_mad)
-                try_enter(sym, row, price, stop, date)
+                try_enter(sym, row, price, stop, date, sym_rank=sym_rank)
                 if sym in positions:
                     watchlist.pop(sym, None)
 
-        # 3) mark to market
+        # 3) mark to market -- an MTF position's full exposure value
+        # (qty * price) already includes the broker-funded portion, which
+        # cash was never debited for at entry (only the margin was), so
+        # its outstanding funded_amount must be subtracted here as an
+        # outstanding debt -- otherwise equity would be inflated by
+        # money that was never actually the account's own.
         mtm = cash + sum(
-            p.qty * (_price_asof(s, date) or 0.0)
+            p.qty * (_price_asof(s, date) or 0.0) - (p.funded_amount if p.mtf else 0.0)
             for s, p in positions.items())
         curve.append((date, mtm))
 
@@ -1175,6 +1579,15 @@ def run_backtest(candles: dict, bench: pd.DataFrame,
     metrics = compute_metrics(equity, trades, bench.loc[equity.index[0]:])
     metrics["Final Capital"] = round(float(equity.iloc[-1]), 2)
     metrics["Open positions"] = len(open_positions_df)
+    if mtf_enabled:
+        # Cost transparency -- interest is already reflected in the
+        # equity curve (deducted from cash day-by-day as it accrued);
+        # shown here as a total so "how much did leverage actually cost"
+        # is a direct read, not something you'd have to sum trades for.
+        metrics["MTF interest paid (closed trades)"] = round(
+            sum(t.mtf_interest_paid for t in trades), 2)
+        metrics["MTF interest accrued (still-open positions)"] = round(
+            sum(p.mtf_interest_paid for p in positions.values() if p.mtf), 2)
     return {
         "equity_curve": equity,
         "trades": pd.DataFrame([dataclasses.asdict(t) | {

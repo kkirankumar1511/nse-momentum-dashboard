@@ -325,6 +325,17 @@ def position_size(capital: float, price: float, stop: float,
     return max(int(risk_amount / per_share_risk), 0)
 
 
+def fixed_risk_position_size(risk_amount: float, price: float, stop: float) -> int:
+    """Same risk-based sizing idea as position_size() above, but off a
+    FLAT rupee amount instead of a %-of-capital -- so per-trade risk
+    stays constant (e.g. exactly Rs.3000) regardless of account size,
+    rather than scaling with it. Used by backtest.py's MTF mode
+    (fixed_risk_amount param) -- leverage there only changes how much
+    MARGIN cash a given qty requires, never the qty itself."""
+    per_share_risk = max(price - stop, 0.01)
+    return max(int(risk_amount / per_share_risk), 0)
+
+
 def capital_position_size(total_equity: float, remaining_cash: float, price: float,
                           open_slots_remaining: int, max_positions: int) -> int:
     """Equal-weight capital allocation: each of up to max_positions slots
