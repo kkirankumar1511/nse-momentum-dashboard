@@ -63,6 +63,7 @@ $LocalBackupDir = "D:\trading-db-backup"
 # No separate copy step needed: whatever lands/gets pruned here, Drive
 # mirrors automatically in the background.
 $RetentionDays = 30
+$RepoDir = "E:\trading-workspace\nse-momentum-dashboard"
 
 New-Item -ItemType Directory -Force -Path $LocalBackupDir | Out-Null
 $LogFile = Join-Path $LocalBackupDir "pull_backup.log"
@@ -76,6 +77,29 @@ function Write-Log($msg) {
 if ($VpsHost -like "<*>") {
     Write-Log "FAILED -- placeholder VpsHost/VpsUser not filled in yet."
     exit 1
+}
+
+# Skip weekends and NSE holidays -- no new trading activity means the DB
+# hasn't changed, so there's nothing worth backing up. Deliberately calls
+# out to nse_holidays.is_trading_day() (the repo's own single canonical
+# holiday calendar, already used by every scheduled job on the VPS side)
+# rather than re-encoding the holiday list in PowerShell -- one list, no
+# drift risk between this script and everything else that cares which
+# days NSE trades. If the check itself fails for any reason (network
+# blip and no cached/bundled snapshot, Python not found, etc.), this
+# fails OPEN -- proceeds with the backup anyway, logged as a warning --
+# since an unnecessary backup on a holiday is harmless but silently
+# skipping a REAL trading day because of an unrelated glitch is not.
+try {
+    $isTradingDayRaw = & python -c "import sys; sys.path.insert(0, r'$RepoDir'); import os; os.chdir(r'$RepoDir'); import datetime, nse_holidays; print(nse_holidays.is_trading_day(datetime.date.today()))" 2>&1
+    if ($LASTEXITCODE -eq 0 -and $isTradingDayRaw.Trim() -eq "False") {
+        Write-Log "SKIPPED -- today is a weekend or NSE holiday, nothing new to back up."
+        exit 0
+    } elseif ($LASTEXITCODE -ne 0) {
+        Write-Log "WARN -- trading-day check failed ($isTradingDayRaw), proceeding with backup anyway (fail-open)."
+    }
+} catch {
+    Write-Log "WARN -- trading-day check errored ($($_.Exception.Message)), proceeding with backup anyway (fail-open)."
 }
 
 try {
