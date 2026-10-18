@@ -2773,9 +2773,67 @@ def page_admin():
             "a change here.")
         _live_cap_row = idb.get_capital("live")
         _paper_cap_row = idb.get_capital("paper")
+
+        # Capital fields + their Reset controls live OUTSIDE the form
+        # below -- a plain st.button (unlike st.form_submit_button) can't
+        # go inside a form, and Reset needs its own immediate rerun
+        # (archive + delete the capital row, then re-render with the
+        # field unlocked) independent of "Save intraday settings".
+        def _capital_field_with_reset(mode: str, label: str, cap_row: dict | None, col):
+            with col:
+                new_val = st.number_input(
+                    f"{label} capital allocation (₹)", min_value=0.0, step=10_000.0,
+                    value=float(cap_row["starting_capital"]) if cap_row
+                         else float(config.STRATEGY.get(f"intraday_{mode}_capital", 1_000_000.0)),
+                    disabled=cap_row is not None, key=f"intraday_{mode}_capital_field",
+                    help=("Already seeded at ₹{:,.0f} ({} capital track has started trading) -- "
+                         "editing this field no longer has any effect; use Reset below if you "
+                         "genuinely want to start this track over.".format(
+                             cap_row["starting_capital"], mode) if cap_row else
+                         f"Seeded as the {mode} track's starting capital the FIRST time "
+                         f"{mode} mode actually runs (intraday_capital_state, mode='{mode}') -- "
+                         "separate from the other mode's capital and from the swing book's cash."))
+                if cap_row is not None:
+                    _confirm_key = f"intraday_{mode}_reset_confirm"
+                    if st.session_state.get(_confirm_key):
+                        st.warning(
+                            f"This archives all current {mode} positions (kept in the DB for "
+                            "their own historical P&L -- see the Intraday Tradebook's \"Include "
+                            "archived\" checkbox -- just excluded from the ongoing capital/CAGR "
+                            f"numbers from here on) and clears the {mode} capital track "
+                            "entirely, so the field above unlocks for a genuinely fresh starting "
+                            "amount. Cannot be undone from here.")
+                        rc1, rc2 = st.columns(2)
+                        if rc1.button("Confirm reset", key=f"intraday_{mode}_reset_confirm_btn",
+                                     type="primary"):
+                            _n = idb.reset_capital_track(mode)
+                            st.session_state[_confirm_key] = False
+                            # A keyed widget's session_state value wins
+                            # over a freshly-computed value= on the very
+                            # next render (same gotcha the Backtest page's
+                            # own _backtest_job_status() comment documents)
+                            # -- without popping it, the now-unlocked field
+                            # would keep showing the stale pre-reset number
+                            # instead of re-seeding from config.STRATEGY.
+                            st.session_state.pop(f"intraday_{mode}_capital_field", None)
+                            st.success(f"{label} capital track reset -- {_n} position(s) "
+                                      "archived. Enter a new starting capital above and Save.")
+                            st.rerun()
+                        if rc2.button("Cancel", key=f"intraday_{mode}_reset_cancel_btn"):
+                            st.session_state[_confirm_key] = False
+                            st.rerun()
+                    else:
+                        if st.button(f"Reset {mode} capital", key=f"intraday_{mode}_reset_btn"):
+                            st.session_state[_confirm_key] = True
+                            st.rerun()
+            return new_val
+
+        rc_col1, rc_col2 = st.columns(2)
+        intraday_live_capital = _capital_field_with_reset("live", "Live", _live_cap_row, rc_col1)
+        intraday_paper_capital = _capital_field_with_reset("paper", "Paper", _paper_cap_row, rc_col2)
+
         with st.form("intraday_strategy_form"):
-            ic1, ic2, ic3 = st.columns(3)
-            intraday_live_enabled = ic1.checkbox(
+            intraday_live_enabled = st.checkbox(
                 "Enable live intraday trading", value=bool(config.STRATEGY.get("intraday_live_enabled", False)),
                 help="OFF by default. Places real MIS (5x leveraged) intraday "
                      "orders starting the next time the engine is (re)started -- "
@@ -2783,34 +2841,6 @@ def page_admin():
                      "book already running live. Only flip this on once "
                      "you've watched paper mode work correctly for real "
                      "trading days.")
-            intraday_live_capital = ic2.number_input(
-                "Live capital allocation (₹)", min_value=0.0, step=10_000.0,
-                value=float(_live_cap_row["starting_capital"]) if _live_cap_row
-                     else float(config.STRATEGY.get("intraday_live_capital", 1_000_000.0)),
-                disabled=_live_cap_row is not None,
-                help=("Already seeded at ₹{:,.0f} the first time live mode ran -- "
-                     "editing this field no longer has any effect, so a save "
-                     "here can never silently reset an already-compounding "
-                     "live account.".format(_live_cap_row["starting_capital"])
-                     if _live_cap_row else
-                     "Seeded as the live track's starting capital the FIRST "
-                     "time live mode actually runs (intraday_capital_state, "
-                     "mode='live') -- separate from the paper track's "
-                     "capital and from the swing book's cash. Change this "
-                     "before going live for the first time; it has no "
-                     "effect afterward."))
-            intraday_paper_capital = ic3.number_input(
-                "Paper capital allocation (₹)", min_value=0.0, step=10_000.0,
-                value=float(_paper_cap_row["starting_capital"]) if _paper_cap_row
-                     else float(config.STRATEGY.get("intraday_paper_capital", 1_000_000.0)),
-                disabled=_paper_cap_row is not None,
-                help=("Already seeded at ₹{:,.0f} the first time paper mode ran -- "
-                     "editing this field no longer has any effect."
-                     .format(_paper_cap_row["starting_capital"])
-                     if _paper_cap_row else
-                     "Same idea as the live field, for the paper track "
-                     "(intraday_capital_state, mode='paper') -- only takes "
-                     "effect before paper mode has ever run."))
             st.caption(
                 "Operational knobs below -- read fresh by the engine (live AND paper) and the "
                 "backtest every run, no restart needed. Deliberately a SMALL set: the strategy's "

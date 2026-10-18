@@ -564,6 +564,26 @@ def get_capital(mode: str) -> dict | None:
     return dict(row) if row else None
 
 
+def reset_capital_track(mode: str) -> int:
+    """Admin's "Reset {mode} capital" button -- archives every currently
+    active (non-archived) position for `mode` (kept in the DB for its
+    own historical P&L, same `archived` flag the Tradebook page's
+    "Include archived" checkbox already reads -- never deleted) and
+    deletes that mode's intraday_capital_state row outright, so
+    ensure_capital_seeded() treats the NEXT value it's given (the
+    Admin form's now-re-enabled capital field) as a genuinely fresh
+    start rather than a no-op against an already-seeded row. Returns
+    the number of positions archived."""
+    conn = get_conn()
+    cur = conn.execute(
+        "UPDATE intraday_positions SET archived = 1 WHERE mode = ? AND archived = 0", (mode,))
+    n = cur.rowcount
+    conn.execute("DELETE FROM intraday_capital_state WHERE mode = ?", (mode,))
+    conn.commit()
+    conn.close()
+    return n
+
+
 def apply_day_pnl(mode: str, day_pnl: float) -> float:
     """Compounds one day's net P&L into this mode's current_capital
     (Spec.md §7: "next_day_capital = today_capital + today's_total_net_
