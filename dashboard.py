@@ -2933,7 +2933,29 @@ def page_admin():
       for (let i = 0; i < rawData.length; ++i) arr[i] = rawData.charCodeAt(i);
       return arr;
     }}
-    const reg = await navigator.serviceWorker.register('/app/static/sw.js');
+    // A stale/half-failed registration from an earlier attempt can leave
+    // the browser in a state where every FRESH register() call for the
+    // same scope keeps rejecting with "Operation has been aborted" --
+    // confirmed on a real desktop browser 2026-10-18. Clearing whatever's
+    // already registered at this scope first, then retrying the register
+    // itself once (a plain transient network hiccup is the other common
+    // cause of that exact error), makes this recover on its own instead of
+    // needing a manual DevTools "unregister" + reload from the user.
+    const existing = await navigator.serviceWorker.getRegistration('/app/static/');
+    if (existing) {{ await existing.unregister(); }}
+    async function registerSW() {{
+      let lastErr;
+      for (let attempt = 0; attempt < 2; attempt++) {{
+        try {{
+          return await navigator.serviceWorker.register('/app/static/sw.js');
+        }} catch (e) {{
+          lastErr = e;
+          await new Promise((r) => setTimeout(r, 500));
+        }}
+      }}
+      throw lastErr;
+    }}
+    const reg = await registerSW();
     const perm = await Notification.requestPermission();
     if (perm !== 'granted') {{ alert('Notification permission was not granted.'); return; }}
     let sub = await reg.pushManager.getSubscription();
