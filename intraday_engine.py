@@ -246,6 +246,47 @@ def resolve_sector_gates(date: str, candidates: list[dict], close_0925: dict[str
         idb.update_candidate_sector_gate(date, sym, sector, sector_ratio, gate_pass)
 
 
+# Comfortably more than the ~19 trading days daily_rng_atr() needs (14
+# sessions for ATR14 + 5 more for the mean-range window) once weekends/
+# holidays are accounted for -- a fixed, generous buffer rather than
+# something that could silently run short near a long holiday stretch.
+RNG_ATR_FETCH_DAYS = 45
+
+
+def resolve_rng_atr_gate(date: str, candidates: list[dict]) -> None:
+    """v5.4 §5s -- for each candidate, fetch its own daily candle history
+    and resolve the daily vol-regime floor ONCE (same timing as
+    resolve_sector_gates() above -- call this right after it, at 09:30,
+    before any signal scanning). Mutates each `candidates` dict in place,
+    adding "rng_atr"/"rng_atr_gate_pass"; persists both to
+    intraday_daily_selection so the Dashboard can show them and so a
+    later trigger looks this up instead of recomputing it.
+
+    Live's own daily fetch naturally stops at YESTERDAY's close (today's
+    daily candle doesn't exist in Kite's API yet at 09:30) -- so unlike
+    a backtest, which must explicitly exclude "today" via rng_atr_asof()'s
+    own strictly-before-day filter, here that filter is a no-op safety
+    net, not the thing doing the real exclusion work. Both paths still
+    go through the exact same rng_atr_asof() call, deliberately, so
+    there's only one place this day-boundary logic could ever drift."""
+    today = dt.date.fromisoformat(date)
+    for c in candidates:
+        sym = c["symbol"]
+        try:
+            daily_df = kite_client.fetch_daily_candles(sym, days=RNG_ATR_FETCH_DAYS)
+        except Exception as e:
+            print(f"[intraday_engine] {sym}: vol-regime floor fetch failed -- {e}")
+            daily_df = None
+        rng_atr = None
+        if daily_df is not None and not daily_df.empty:
+            series = strat.daily_rng_atr(daily_df)
+            rng_atr = strat.rng_atr_asof(series, today)
+        gate_pass = strat.rng_atr_gate_pass(rng_atr)
+        c["rng_atr"] = rng_atr
+        c["rng_atr_gate_pass"] = gate_pass
+        idb.update_candidate_rng_atr_gate(date, sym, rng_atr, gate_pass)
+
+
 # ---------------------------------------------------------------------------
 # Per-candidate tracking
 # ---------------------------------------------------------------------------
@@ -261,7 +302,8 @@ class CandidateTracker:
                 rank: int, sector: str | None = None, sector_ratio: float | None = None,
                 sector_gate_pass: bool = False, sig_range_low: float | None = None,
                 sig_range_high: float | None = None, ema50_series: pd.Series | None = None,
-                fvg_lo: float | None = None, fvg_hi: float | None = None):
+                fvg_lo: float | None = None, fvg_hi: float | None = None,
+                rng_atr: float | None = None, rng_atr_gate_pass: bool = False):
         self.date = date
         self.symbol = symbol
         self.direction = direction
@@ -300,6 +342,10 @@ class CandidateTracker:
         self.sector = sector
         self.sector_ratio = sector_ratio
         self.sector_gate_pass = sector_gate_pass
+        # v5.4 §5s -- resolved once at 09:30 (resolve_rng_atr_gate()),
+        # same lookup-not-recompute convention as the sector gate above.
+        self.rng_atr = rng_atr
+        self.rng_atr_gate_pass = rng_atr_gate_pass
         self.signal_state = strat.new_signal_state()
         self.vol_min_so_far: float | None = None
         self.signal_db_id: int | None = None
@@ -435,6 +481,18 @@ def _open_position_from_trigger(tracker: CandidateTracker, event: dict,
              f"didn't confirm {tracker.direction} -- no trade taken ({mode} mode).")
         return {"type": "sector_gate_failed", "sector": tracker.sector,
                "sector_ratio": tracker.sector_ratio}
+
+    # v5.4 §5s -- same post-trigger, drop-only-this-candidate placement
+    # as the sector gate just above. tracker.rng_atr_gate_pass was
+    # resolved once at 09:30 (resolve_rng_atr_gate()), not recomputed now.
+    if not tracker.rng_atr_gate_pass:
+        tracker.done = True
+        idb.mark_candidate_status(tracker.date, tracker.symbol, "rng_atr_gate_failed")
+        _rng_atr_detail = (f"{tracker.rng_atr:.2f}" if tracker.rng_atr is not None else "no data")
+        _push(f"KK Trading — {tracker.symbol} trade dropped (vol-regime floor)",
+             f"Breakout triggered but {tracker.symbol}'s daily range/ATR14 ({_rng_atr_detail}) "
+             f"is below the {strat.MIN_RNG_ATR} floor -- no trade taken ({mode} mode).")
+        return {"type": "rng_atr_gate_failed", "rng_atr": tracker.rng_atr}
 
     entry_price, stop_price = event["entry_price"], event["stop_price"]
     qty = strat.position_size(capital_alloc, risk_budget, entry_price, stop_price)
@@ -959,6 +1017,8 @@ def run_live(mode: str = "paper") -> None:
     # covered) -- fixed for the whole day, looked up (never recomputed)
     # the moment a breakout later triggers (see _open_position_from_trigger()).
     resolve_sector_gates(date_str, sel["candidates"], close_0925, prev_close, today)
+    # v5.4 §5s -- same timing/placement as the sector gate just above.
+    resolve_rng_atr_gate(date_str, sel["candidates"])
 
     _cands_df = idb.get_candidates(date_str)
     _cand_summary = ", ".join(
@@ -1042,7 +1102,8 @@ def run_live(mode: str = "paper") -> None:
                             sector=c.get("sector"), sector_ratio=c.get("sector_ratio"),
                             sector_gate_pass=c.get("sector_gate_pass", False),
                             sig_range_low=sig_range_low, sig_range_high=sig_range_high,
-                            ema50_series=ema50_series, fvg_lo=fvg_lo, fvg_hi=fvg_hi)
+                            ema50_series=ema50_series, fvg_lo=fvg_lo, fvg_hi=fvg_hi,
+                            rng_atr=c.get("rng_atr"), rng_atr_gate_pass=c.get("rng_atr_gate_pass", False))
         t.hist = hist
         # Seed the running vol-min from today's pre-window candles (09:15-
         # 09:30) -- see step_candle()'s docstring; the running min starts

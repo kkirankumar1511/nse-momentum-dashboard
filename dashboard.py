@@ -5811,6 +5811,8 @@ def page_intraday_backtest():
         sp14.metric("Max trades/day", _p_max_trades)
         sp15.metric("Leverage", f"{_p_leverage}×")
         sp16.metric("Risk per trade", f"{_p_risk_pct:.1%}")
+        sp17, _, _, _ = st.columns(4)
+        sp17.metric("Vol-regime floor (§5s)", f"≥{istrat.MIN_RNG_ATR}")
 
     if daily.empty:
         st.warning("No trading day in this range produced a sector-gate-confirmed signal "
@@ -5892,8 +5894,9 @@ def page_intraday_backtest():
                 _ov_table_html(
                     cand_page, sym_cols=["symbol"],
                     num_fmt={"ret_first15_pct": "{:+.2f}", "gap_pct": "{:+.2f}",
-                            "nifty_ratio": "{:.2f}", "sector_ratio": "{:.2f}"},
-                    badges={"sector_gate_pass": {True: "ov-badge-green", False: "ov-badge-red"}}),
+                            "nifty_ratio": "{:.2f}", "sector_ratio": "{:.2f}", "rng_atr": "{:.2f}"},
+                    badges={"sector_gate_pass": {True: "ov-badge-green", False: "ov-badge-red"},
+                           "rng_atr_gate_pass": {True: "ov-badge-green", False: "ov-badge-red"}}),
                 unsafe_allow_html=True)
             _ov_pagination_controls(cand_sorted, key="ibt_candidates", page_size=25)
             st.download_button("Download candidates CSV (filtered view)",
@@ -7053,10 +7056,21 @@ def page_intraday_dashboard():
                     # FAIL -- without calling that out, it looks like a
                     # live, actionable setup when any trigger it produces
                     # will actually be silently rejected.
+                    # Both the sector gate and the vol-regime floor (v5.4
+                    # §5s) are resolved once at 09:30, same as each other --
+                    # either (or both) can already be known to fail well
+                    # before any signal even forms, same reasoning as the
+                    # sector-only comment above.
+                    _known_fails = []
                     if c.get("sector_gate_pass") is False:
-                        state = "Signal active (sector already failed)"
+                        _known_fails.append("sector")
+                    if c.get("rng_atr_gate_pass") is False:
+                        _known_fails.append("vol floor")
+                    if _known_fails:
+                        state = f"Signal active ({'/'.join(_known_fails)} already failed)"
                         detail = (f"H/L ₹{sig['signal_high']:.2f}/₹{sig['signal_low']:.2f} → would-be "
-                                 f"entry ₹{_proj_entry:.2f} -- won't open, sector gate already failed")
+                                 f"entry ₹{_proj_entry:.2f} -- won't open, {' & '.join(_known_fails)} "
+                                 f"already failed")
                     else:
                         state = "Signal active"
                         detail = (f"H/L ₹{sig['signal_high']:.2f}/₹{sig['signal_low']:.2f} → entry "
@@ -7085,6 +7099,11 @@ def page_intraday_dashboard():
                             _sr_text = f"{_sr:.2f}"
                         state = "Sector gate failed"
                         detail = f"Triggered, ratio {_sr_text} didn't confirm"
+                    elif c.get("status") == "rng_atr_gate_failed":
+                        _ra = c.get("rng_atr")
+                        _ra_text = f"{_ra:.2f}" if pd.notna(_ra) else "no data"
+                        state = "Vol floor failed"
+                        detail = f"Triggered, range/ATR14 {_ra_text} below {istrat.MIN_RNG_ATR} floor"
                     elif c.get("status") == "day_slots_filled":
                         state, detail = "Slots filled", "Other candidates confirmed first"
                     elif dt.datetime.now().time() > istrat.NEW_SIGNAL_CUTOFF:
@@ -7107,6 +7126,14 @@ def page_intraday_dashboard():
                 else:
                     gate = "—"
 
+                _rag = c.get("rng_atr_gate_pass")
+                _ra = c.get("rng_atr")
+                if pd.notna(_rag) and day is not None:
+                    rng_gate = f"{'PASS' if _rag else 'FAIL'} {_ra:.2f}" if pd.notna(_ra) else \
+                        f"{'PASS' if _rag else 'FAIL'} —"
+                else:
+                    rng_gate = "—"
+
                 _gap = c.get("gap_pct")
                 _table_rows.append({
                     "cand_rank": int(c["rank"]), "symbol": c["symbol"],
@@ -7114,14 +7141,14 @@ def page_intraday_dashboard():
                     "gap_pct": float(_gap) if pd.notna(_gap) else float("nan"),
                     "ltp": cand_price if cand_price is not None else float("nan"),
                     "chg_pct": cand_chg if cand_chg is not None else float("nan"),
-                    "gate": gate, "state": state, "detail": detail or "—",
+                    "gate": gate, "rng_gate": rng_gate, "state": state, "detail": detail or "—",
                 })
 
             _tdf = pd.DataFrame(_table_rows)
             st.markdown(_ov_table_html(
                 _tdf,
                 columns=["cand_rank", "symbol", "cand_sector", "ret_first15_pct", "gap_pct",
-                        "ltp", "chg_pct", "gate", "state", "detail"],
+                        "ltp", "chg_pct", "gate", "rng_gate", "state", "detail"],
                 sym_cols=["symbol"],
                 pnl_cols=["ret_first15_pct", "chg_pct"],
                 num_fmt={"ret_first15_pct": "{:+.2f}%", "gap_pct": "{:+.2f}%", "ltp": "₹{:,.2f}",
@@ -7129,13 +7156,17 @@ def page_intraday_dashboard():
                 badges={
                     "gate": lambda v: ("ov-badge-green" if v.startswith("PASS")
                                        else "ov-badge-red" if v.startswith("FAIL") else "ov-badge-gray"),
-                    "state": {
-                        "Position open": "ov-badge-green", "Signal active": "ov-badge-amber",
-                        "Signal active (sector already failed)": "ov-badge-gray",
-                        "Invalidated": "ov-badge-red", "Sector gate failed": "ov-badge-red",
-                        "Day closed": "ov-badge-gray", "Slots filled": "ov-badge-gray",
-                        "No signal formed": "ov-badge-gray", "No signal yet": "ov-badge-gray",
-                    },
+                    "rng_gate": lambda v: ("ov-badge-green" if v.startswith("PASS")
+                                          else "ov-badge-red" if v.startswith("FAIL") else "ov-badge-gray"),
+                    # A lambda, not a literal dict -- "Signal active (...)"
+                    # now has several possible variants (sector, vol floor,
+                    # or both already known to fail), not just one fixed
+                    # string, so an exact-match dict can't cover them all.
+                    "state": lambda v: (
+                        "ov-badge-green" if v == "Position open" else
+                        "ov-badge-amber" if v == "Signal active" else
+                        "ov-badge-red" if v in ("Invalidated", "Sector gate failed", "Vol floor failed") else
+                        "ov-badge-gray"),
                 }), unsafe_allow_html=True)
 
     _render_live_section()
@@ -7418,7 +7449,7 @@ def page_intraday_logs():
     _tip = html_lib.escape(
         "Per-candidate, per-day record of why each symbol did or didn't "
         "qualify for a signal/entry. The status badge and its detail for "
-        "'traded' and 'sector_gate_failed' rows is always the REAL outcome "
+        "'traded', 'sector_gate_failed' and 'rng_atr_gate_failed' rows is always the REAL outcome "
         "the live engine recorded at the time -- ground truth, never "
         "reconstructed. For 'watching' (no signal ever formed) and "
         "'invalidated' rows, which don't have a persisted reason of their "
@@ -7470,8 +7501,8 @@ def page_intraday_logs():
     legs = idb.get_legs(date=date_str)
 
     _status_badge = {"watching": "ov-badge-amber", "invalidated": "ov-badge-gray",
-                     "sector_gate_failed": "ov-badge-red", "day_slots_filled": "ov-badge-gray",
-                     "traded": "ov-badge-green"}
+                     "sector_gate_failed": "ov-badge-red", "rng_atr_gate_failed": "ov-badge-red",
+                     "day_slots_filled": "ov-badge-gray", "traded": "ov-badge-green"}
 
     for _, c in candidates.iterrows():
         sym = c["symbol"]
@@ -7481,7 +7512,7 @@ def page_intraday_logs():
                    else pd.DataFrame())
         # intraday_daily_selection's own status column is never actually
         # written as "traded" (mark_candidate_status()'s real call sites
-        # are only invalidated/sector_gate_failed/day_slots_filled -- a
+        # are only invalidated/sector_gate_failed/rng_atr_gate_failed/day_slots_filled -- a
         # candidate that opens a real position just stays "watching"
         # there forever). A real position record is the actual ground
         # truth for "did this trade", independent of that column's text.
@@ -7504,6 +7535,10 @@ def page_intraday_logs():
             ratio_txt = f"{c['sector_ratio']:.2f}" if pd.notna(c["sector_ratio"]) else "no data"
             detail = (f"{c['sector'] or 'unresolved sector'}, ratio {ratio_txt} "
                      f"didn't confirm {direction} (needs ≥2.0 for LONG / ≤0.5 for SHORT)")
+        elif status == "rng_atr_gate_failed":
+            ra_txt = f"{c['rng_atr']:.2f}" if pd.notna(c.get("rng_atr")) else "no data"
+            detail = (f"Daily range/ATR14 {ra_txt} below the {istrat.MIN_RNG_ATR} "
+                     "vol-regime floor (v5.4 §5s)")
         elif status == "day_slots_filled":
             _max_trades_today = config.STRATEGY.get(
                 "intraday_max_trades_per_day", istrat.MAX_TRADES_PER_DAY)
@@ -8525,6 +8560,17 @@ def page_guide():
         'fails here and the trade is simply never taken — this gate protects trade QUALITY, not just '
         'sector exposure, so a candidate that fails it isn\'t replaced by a backup; that slot is just not '
         'filled that day.</p></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="guide-card"><h4>5b. One more check, resolved alongside it — the daily vol-regime floor</h4>'
+        f'<p>A stock\'s own recent daily range, relative to its own 14-day ATR, must be at least '
+        f'<b>{istrat.MIN_RNG_ATR}×</b> — checked once at 09:30, same timing as the sector gate above. '
+        'This isn\'t a directional prediction: it\'s a check for whether the stock can even move far '
+        'enough intraday to produce the kind of outsized move this strategy\'s edge actually depends on '
+        '— a stock currently compressed well below its own normal range usually can\'t, whichever way '
+        'the trade goes. Fails the same way the sector gate does: this specific candidate\'s slot just '
+        'goes unfilled that day, nothing is substituted in from further down the rankings.</p></div>',
+        unsafe_allow_html=True)
 
     st.markdown(
         '<div class="guide-card"><h4>6. Managing an open position — target, trail, and the breakeven stop</h4>'

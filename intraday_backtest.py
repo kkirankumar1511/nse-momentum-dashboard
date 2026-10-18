@@ -251,6 +251,24 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
         ema50_cache[sym] = strat.ema_n(df["close"], 50)
         ema10_cache[sym] = strat.ema_n(df["close"], strat.TRAIL_EMA_SLOW)
 
+    # v5.4 §5s -- daily vol-regime floor input, from DAILY candles (not
+    # 5-min), computed once per symbol over its whole series with NO
+    # internal day-shift -- see daily_rng_atr()'s own docstring for why
+    # the day-exclusion instead happens at LOOKUP time (_rng_atr_for()
+    # below), via rng_atr_asof()'s strictly-before-day filter. This is
+    # what makes a backtest day loop (which has every symbol's full
+    # history, including "today", already loaded) and the live engine
+    # (whose daily fetch naturally stops at yesterday) share one
+    # identical lookup path instead of two separately-shifted ones.
+    rng_atr_cache: dict[str, pd.Series] = {}
+    for sym, dfd in daily.items():
+        if dfd is None or dfd.empty:
+            continue
+        rng_atr_cache[sym] = strat.daily_rng_atr(dfd)
+
+    def _rng_atr_for(sym: str, day: dt.date) -> float | None:
+        return strat.rng_atr_asof(rng_atr_cache.get(sym), day)
+
     # -- Phase C: day-by-day day-bias + candidate selection + signal
     # detection. Sector gate NOT applied yet -- which sectors are even
     # touched isn't known until this phase finishes (same two-phase
@@ -521,6 +539,48 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
     _progress(f"{n_signals} signal(s) across {len(by_day)} day(s) after the sector gate "
              f"({n_dropped_no_sector} no primary sector, {n_dropped_sector_fail} sector ratio didn't confirm)",
              0.90)
+
+    # v5.4 §5s -- daily vol-regime floor, resolved "beside the sector
+    # gate" (same post-selection stage, per that spec's own §5s.9
+    # placement note) -- NOT inside the earlier acceptance/ranking loop.
+    # That distinction is load-bearing: the reference research engine's
+    # own measured numbers come from a fixed, already-ranked top-N pool
+    # with no deeper candidate to substitute in when one fails this gate
+    # (so a drop there is effectively "mark and drop"); this backtest's
+    # acceptance loop, by contrast, walks the FULL ranked universe and
+    # WOULD genuinely substitute in a rank-6+ name if this gate were
+    # applied there instead, inflating the effective pool size beyond
+    # what was ever measured/validated.
+    _progress("Resolving the daily vol-regime floor for every candidate...", 0.905)
+    for row in candidate_rows:
+        ra = _rng_atr_for(row["symbol"], row["date"])
+        row["rng_atr"] = round(ra, 3) if ra is not None else None
+        row["rng_atr_gate_pass"] = strat.rng_atr_gate_pass(ra)
+
+    rngatr_gated_by_day: dict[dt.date, list[dict]] = {}
+    n_dropped_rng_atr = 0
+    for day, cands in by_day.items():
+        kept = []
+        for c in cands:
+            ra = _rng_atr_for(c["symbol"], day)
+            if strat.rng_atr_gate_pass(ra):
+                c["rng_atr"] = ra
+                kept.append(c)
+            else:
+                n_dropped_rng_atr += 1
+        if kept:
+            rngatr_gated_by_day[day] = kept
+        else:
+            # Same visibility reasoning as the sector gate's own empty-day
+            # case just above -- this day cleared the sector gate but
+            # every survivor was then too volatility-compressed to trade.
+            skipped_days.append({"date": day, "reason": "all_rng_atr_gate_failed",
+                                "nifty_ratio": None})
+
+    by_day = rngatr_gated_by_day
+    n_signals = sum(len(v) for v in by_day.values())
+    _progress(f"{n_signals} signal(s) across {len(by_day)} day(s) after the vol-regime floor "
+             f"({n_dropped_rng_atr} below MIN_RNG_ATR={strat.MIN_RNG_ATR})", 0.91)
 
     # -- Phase E: CHRONO slot-filling + capital-compounding day simulation.
     trades: list[dict] = []

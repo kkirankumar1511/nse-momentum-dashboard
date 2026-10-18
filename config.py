@@ -465,7 +465,9 @@ _STRATEGY_DEFAULTS = {
     # constant if a key is ever missing -- same convention as every other
     # Admin-editable setting elsewhere in this file.
     "intraday_max_trades_per_day": 4,      # intraday_strategy.MAX_TRADES_PER_DAY
-    "intraday_risk_pct_per_trade": 0.5,    # %, intraday_strategy.MAX_RISK_PCT_PER_TRADE (0.005) x100
+    "intraday_risk_pct_per_trade": 0.6,    # %, intraday_strategy.MAX_RISK_PCT_PER_TRADE (0.006) x100
+    # (v5.4 §5s -- raised from 0.5% alongside the new daily vol-regime
+    # floor below; REQUIRED pairing, don't change one without the other)
     "intraday_leverage": 5.0,              # intraday_strategy.LEVERAGE (MIS)
     "intraday_gap_filter_pct": 5.0,        # intraday_strategy.GAP_FILTER_PCT
     "intraday_top_n_candidates": 5,        # intraday_strategy.TOP_N_CANDIDATES

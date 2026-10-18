@@ -227,6 +227,16 @@ def _migrate_daily_selection_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE intraday_daily_selection ADD COLUMN gap_pct REAL")
     conn.commit()
 
+    # v5.4 §5s -- daily volatility-regime floor, resolved once post-
+    # selection (same stage/timing as sector/sector_ratio/sector_gate_pass
+    # above), looked up (not recomputed) if/when that candidate's
+    # breakout later triggers.
+    if "rng_atr" not in cols:
+        conn.execute("ALTER TABLE intraday_daily_selection ADD COLUMN rng_atr REAL")
+    if "rng_atr_gate_pass" not in cols:
+        conn.execute("ALTER TABLE intraday_daily_selection ADD COLUMN rng_atr_gate_pass INTEGER")
+    conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # Days / daily selection -- Spec.md §2
@@ -282,17 +292,19 @@ def get_candidates(date: str) -> pd.DataFrame:
     conn = get_conn()
     df = pd.read_sql(
         "SELECT rank, symbol, ret_first15_pct, gap_pct, status, sector, sector_ratio, "
-        "sector_gate_pass FROM intraday_daily_selection WHERE date = ? ORDER BY rank",
+        "sector_gate_pass, rng_atr, rng_atr_gate_pass FROM intraday_daily_selection "
+        "WHERE date = ? ORDER BY rank",
         conn, params=(date,))
     conn.close()
     if not df.empty:
         df["sector_gate_pass"] = df["sector_gate_pass"].astype("boolean")
+        df["rng_atr_gate_pass"] = df["rng_atr_gate_pass"].astype("boolean")
     return df
 
 
 def mark_candidate_status(date: str, symbol: str, status: str) -> None:
     """status: 'watching' (default) | 'invalidated' | 'sector_gate_failed'
-    | 'traded'. Called the moment a candidate's day is decided one way or
+    | 'rng_atr_gate_failed' | 'traded'. Called the moment a candidate's day is decided one way or
     the other, so the Dashboard can show a definitive state instead of
     inferring it from intraday_signals (which has no row at all for a
     candidate invalidated before ever forming a signal candle)."""
@@ -315,6 +327,22 @@ def update_candidate_sector_gate(date: str, symbol: str, sector: str | None,
         "UPDATE intraday_daily_selection SET sector = ?, sector_ratio = ?, "
         "sector_gate_pass = ? WHERE date = ? AND symbol = ?",
         (sector, sector_ratio, int(gate_pass), date, symbol))
+    conn.commit()
+    conn.close()
+
+
+def update_candidate_rng_atr_gate(date: str, symbol: str, rng_atr: float | None,
+                                  gate_pass: bool) -> None:
+    """v5.4 §5s -- persists a candidate's resolved daily vol-regime floor
+    value and whether it cleared MIN_RNG_ATR. Called once post-selection
+    (resolve_rng_atr_gate()), looked up (not recomputed) later if/when
+    that candidate's breakout triggers -- same convention as
+    update_candidate_sector_gate() above."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE intraday_daily_selection SET rng_atr = ?, rng_atr_gate_pass = ? "
+        "WHERE date = ? AND symbol = ?",
+        (rng_atr, int(gate_pass), date, symbol))
     conn.commit()
     conn.close()
 

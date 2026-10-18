@@ -164,7 +164,31 @@ SECTOR_GATE_RATIO_SHORT_MAX = 0.5
 # 2.01% on the frozen cache's single busiest 4-slot day, no blowups.
 MAX_TRADES_PER_DAY = 4
 LEVERAGE = 5.0
-MAX_RISK_PCT_PER_TRADE = 0.005
+# v5.4 §5s -- raised 0.5% -> 0.6% alongside the daily vol-regime floor
+# below. The floor alone cuts positions ~34% (1811 -> 1198 on the 5-year
+# reference run); 0.6% is the adopted compensating risk bump -- a round,
+# statable number that beats the exact scaling factor (0.615%) on
+# drawdown, downside deviation, Sortino and Calmar for ~1pp less CAGR.
+# Do not change one without re-checking the other (REQUIRED pairing,
+# same as §5r's 10% vol tolerance needing §5p's 4 slots).
+MAX_RISK_PCT_PER_TRADE = 0.006
+
+# v5.4 §5s -- daily volatility-regime floor (ADOPTED 2026-10-18): a
+# candidate is dropped post-selection (same stage as the sector gate,
+# NOT the acceptance/ranking loop -- see daily_rng_atr()'s own docstring
+# for why that placement is load-bearing) unless its stock's own recent
+# daily range, relative to its own ATR14, clears this floor. Predicts
+# nothing about direction or win rate -- it's a NECESSARY CONDITION on
+# the payoff: a stock currently compressed to under ~90% of its own
+# ATR14 in daily range cannot travel far enough intraday to produce the
+# small number of outsized (5R+) trades the strategy's entire positive
+# expectancy depends on (median trade is -1.04R; the mean is only
+# positive because of the right tail). Measured: -33.8% positions,
+# +0.10 mean R, negative months 20->13-14, max drawdown -9.87%->-9.34%,
+# on the 5-year reference run; validated (consistent +0.08 to +0.10 mean
+# R lift, same direction) on two independently-built candidate pools
+# (top-8, top-10) it was never tuned against.
+MIN_RNG_ATR = 0.90
 
 # Spec.md §8 cost model (Zerodha intraday equity)
 BROKERAGE_PCT = 0.0003
@@ -317,6 +341,83 @@ def select_candidates(fno_ret_first15: pd.Series, bias: str, n: int = TOP_N_CAND
     backtest showing it actually helps."""
     ranked = fno_ret_first15.sort_values(ascending=(bias == SHORT))
     return ranked.head(n)
+
+
+# ---------------------------------------------------------------------------
+# §2b -- daily volatility-regime floor (v5.4 §5s)
+# ---------------------------------------------------------------------------
+
+def daily_rng_atr(daily_df: pd.DataFrame) -> pd.Series:
+    """v5.4 §5s -- for each day D present in `daily_df`, the 5-session
+    mean daily range (the 5 most recent sessions INCLUSIVE of D) divided
+    by a 14-session mean True Range (the 14 most recent sessions
+    INCLUSIVE of D) -- both a SIMPLE rolling mean, deliberately NOT
+    Wilder/EMA (a different smoothing than atr14() above, which this
+    gate does not reuse). NaN wherever there isn't yet 14 sessions of
+    history, or where ATR14 is ~0 (division blows up to inf -- replaced
+    with NaN, same "can't resolve this" treatment as missing history).
+
+    Deliberately NO internal day-shift -- the value attributed to row D
+    here is "as of D itself" (D's own high/low/close already folded in),
+    NOT "as of D-1" the way the reference research script's own
+    `_m5.shift(1)`/`_a14.shift(1)` convention computes it. Call
+    rng_atr_asof() below to get the D-1-as-of-D value the spec actually
+    calls for -- it does the day-exclusion by FILTERING THE LOOKUP to
+    strictly-before-D, not by shifting this series. This is deliberate,
+    not a simplification: a backtest's `daily_df` already contains every
+    day including D itself (the whole history is loaded upfront), so it
+    MUST explicitly exclude D at lookup time or it reads D's own
+    same-day bar -- a real look-ahead. Live's own daily fetch, called at
+    09:30, naturally only ever contains bars through D-1 (D's own daily
+    candle doesn't exist in Kite's API yet at that point in the day) --
+    so for live, filtering to strictly-before-D is a no-op safety net,
+    not the thing doing the real exclusion work. One function, one
+    lookup helper, used identically by both callers -- rather than two
+    separately-shifted versions that could silently drift one day out
+    of alignment with each other (backtest correct, live off-by-one, or
+    vice versa) without either call site's own code making that obvious.
+
+    Duplicate dates are dropped (keep="last") before any rolling calc.
+    The very first row's True Range has no prior close to diff against
+    -- pandas' max(axis=1, skipna=True) (the default) already falls back
+    to that day's own high-low range in that one case, no special-casing
+    needed, matching the spec's own "14 prior sessions sufficient" note."""
+    d = daily_df[~daily_df.index.duplicated(keep="last")].sort_index()
+    rng = d["high"] - d["low"]
+    prev_close = d["close"].shift(1)
+    tr = pd.concat([
+        rng, (d["high"] - prev_close).abs(), (d["low"] - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    mean5 = rng.rolling(5, min_periods=5).mean()
+    atr14_simple = tr.rolling(14, min_periods=14).mean()
+    return (mean5 / atr14_simple).replace([float("inf"), float("-inf")], float("nan"))
+
+
+def rng_atr_asof(rng_atr_series: pd.Series | None, day) -> float | None:
+    """Looks up a daily_rng_atr() series at the last row STRICTLY BEFORE
+    `day` -- i.e. "as of D-1" for day=D, exactly v5.4 §5s's own
+    definition, regardless of whether `rng_atr_series` happens to already
+    contain a row for D itself (a backtest's full-history series does;
+    live's naturally doesn't). None if there's no such row (not enough
+    history yet) or the value there is NaN -- fails closed, same
+    discipline as every other data-completeness check in this module."""
+    if rng_atr_series is None or rng_atr_series.empty:
+        return None
+    day_ts = pd.Timestamp(day).normalize()
+    prior = rng_atr_series[rng_atr_series.index.normalize() < day_ts]
+    if prior.empty:
+        return None
+    val = prior.iloc[-1]
+    return float(val) if pd.notna(val) else None
+
+
+def rng_atr_gate_pass(rng_atr: float | None) -> bool:
+    """v5.4 §5s -- fails CLOSED (False) on missing/NaN data, same
+    convention as sector_gate_pass()'s own caller contract elsewhere in
+    this codebase. Direction-agnostic (unlike the sector gate) -- the
+    floor is about whether the stock can move far enough intraday at
+    all, not which way it's expected to move."""
+    return rng_atr is not None and pd.notna(rng_atr) and rng_atr >= MIN_RNG_ATR
 
 
 # ---------------------------------------------------------------------------
