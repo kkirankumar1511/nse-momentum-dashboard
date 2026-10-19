@@ -287,6 +287,58 @@ def resolve_rng_atr_gate(date: str, candidates: list[dict]) -> None:
         idb.update_candidate_rng_atr_gate(date, sym, rng_atr, gate_pass)
 
 
+def _rolling_reselect(date_str: str, checkpoint: str, all_syms: list[str], fno_syms: list[str],
+                      bias: str, already_selected: set[str], today: dt.date) -> list[dict]:
+    """v5.4 §5u -- one rolling re-ranking pass, for checkpoint in
+    {"09:35", "09:40", "09:45"} (09:30 is the day's own initial
+    selection, handled separately in run_live()). Called the moment
+    that checkpoint's own wall-clock time arrives -- same "call
+    _prev_close_and_0925() again, promptly, right at the checkpoint"
+    convention the existing 09:45 retry already established (its
+    quote()-based last_price read is only a valid proxy for "this
+    candle's close" called right at its own checkpoint, not revisited
+    later -- see that function's own docstring).
+
+    Returns ONLY the NEWLY-admitted candidates (symbols not already in
+    `already_selected`), each with sector/rng_atr gates already resolved
+    and persisted (entry_checkpoint=`checkpoint`) -- ready for
+    _build_tracker(). BIAS is NOT recomputed here -- v5.4 §5u.1: "BIAS
+    logic is UNCHANGED (5o)" -- only the candidate ranking re-runs."""
+    close_map, prev_close = _prev_close_and_0925(all_syms, today)
+    fno_rets = {}
+    for sym in fno_syms:
+        c_px, pc = close_map.get(sym), prev_close.get(sym)
+        if c_px is None or pc is None or pc == 0:
+            continue
+        fno_rets[sym] = strat.first15_return(c_px, pc)
+
+    gap_filter_pct = config.STRATEGY.get("intraday_gap_filter_pct", strat.GAP_FILTER_PCT)
+    top_n_candidates = config.STRATEGY.get("intraday_top_n_candidates", strat.TOP_N_CANDIDATES)
+    accepted = strat.rank_and_accept_candidates(
+        fno_rets, bias, top_n_candidates,
+        lambda sym: _overnight_gap_pct(sym, prev_close.get(sym), today),
+        gap_threshold=gap_filter_pct)
+
+    new_candidates = [
+        {"symbol": sym, "direction": bias, "rank": local_rank,
+        "ret_first15_pct": round(ret, 3), "gap_pct": gap, "entry_checkpoint": checkpoint}
+        for local_rank, (sym, ret, gap) in enumerate(accepted, start=1)
+        if sym not in already_selected]
+    if not new_candidates:
+        return []
+
+    idb.record_candidates(date_str, new_candidates)
+    print(f"[intraday_engine] {checkpoint} rolling re-select: "
+         f"{len(new_candidates)} new candidate(s) -- "
+         f"{[c['symbol'] for c in new_candidates]}")
+    # Same post-selection gate timing/placement as the day's initial
+    # selection (resolve_sector_gates() right after run_selection()) --
+    # just scoped to the FEW new entrants, not the whole day's pool.
+    resolve_sector_gates(date_str, new_candidates, close_map, prev_close, today)
+    resolve_rng_atr_gate(date_str, new_candidates)
+    return new_candidates
+
+
 # ---------------------------------------------------------------------------
 # Per-candidate tracking
 # ---------------------------------------------------------------------------
@@ -303,7 +355,8 @@ class CandidateTracker:
                 sector_gate_pass: bool = False, sig_range_low: float | None = None,
                 sig_range_high: float | None = None, ema50_series: pd.Series | None = None,
                 fvg_lo: float | None = None, fvg_hi: float | None = None,
-                rng_atr: float | None = None, rng_atr_gate_pass: bool = False):
+                rng_atr: float | None = None, rng_atr_gate_pass: bool = False,
+                window_start: str = strat.SIGNAL_WINDOW_START):
         self.date = date
         self.symbol = symbol
         self.direction = direction
@@ -346,6 +399,13 @@ class CandidateTracker:
         # same lookup-not-recompute convention as the sector gate above.
         self.rng_atr = rng_atr
         self.rng_atr_gate_pass = rng_atr_gate_pass
+        # v5.4 §5u -- the checkpoint candle this candidate first entered
+        # the rolling top-N at, PER TRACKER (not a single day-level value
+        # any more) -- a candidate admitted at, say, the 09:40 checkpoint
+        # must never be evaluated against candles before the 09:35 one,
+        # which it structurally couldn't have been known to qualify
+        # against. strat.checkpoint_candle(entry_checkpoint).
+        self.window_start = window_start
         self.signal_state = strat.new_signal_state()
         self.vol_min_so_far: float | None = None
         self.signal_db_id: int | None = None
@@ -952,6 +1012,96 @@ def _get_live_ltp(ticker: live_ticker.LiveTicker, token: int, symbol: str) -> fl
         return ticker.get_ltp(token)
 
 
+def _build_tracker(c: dict, date_str: str, today: dt.date, window_start: str) -> CandidateTracker | None:
+    """Builds one candidate's full day-fixed state (continuous EMA21/
+    ATR14/EMA50 series, the 09:15 first-candle low/high, the 09:20+09:25
+    one-sided-signal reference range, the FVG veto zone, and the running
+    vol-min seed) from a fresh history fetch, and wraps it in a
+    CandidateTracker. Returns None (after marking the candidate
+    "invalidated") if the 09:15 candle itself is missing -- can't safely
+    build the first-candle gate without it.
+
+    Extracted from run_live()'s own initial-candidate-construction loop
+    (v5.4 §5u) so the SAME logic builds a tracker whether `c` came from
+    the day's FIRST selection (09:30, or 09:45 on a retry day) or from a
+    later rolling re-selection (09:35/09:40/09:45) adding a fresh
+    entrant mid-day -- one code path, not two that could quietly drift
+    apart on exactly the kind of day-fixed state a late entrant most
+    needs to get right."""
+    sym = c["symbol"]
+    hist = kite_client.fetch_intraday_candles(sym, days=EMA_WARMUP_DAYS, interval="5minute")
+    ema21_series = strat.ema21(hist["close"])
+    atr14_series = strat.atr14(hist)
+    # v5.4 §5m (adopted, supersedes §5l) -- the signal candle must
+    # also close on the trend side of EMA50. EMA_WARMUP_DAYS=120 is
+    # ~9,000 5-min candles, comfortably past the 50-candle min_periods
+    # for any symbol with at least a few hours of trading history, so
+    # this only ever fails closed (NaN) in a genuinely new listing's
+    # first day or two.
+    ema50_series = strat.ema_n(hist["close"], 50)
+    today_so_far = hist[hist.index.normalize() == pd.Timestamp(today)]
+    # v2 Spec §3.2 step 1b -- the day's very first (09:15) candle's
+    # own low/high, captured once, fixed for the whole day.
+    first_candle = today_so_far.loc[today_so_far.index == pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=15)]
+    if first_candle.empty:
+        print(f"[intraday_engine] {sym}: 09:15 candle missing -- cannot apply the "
+             f"first-candle gate safely, dropping this candidate for today.")
+        idb.mark_candidate_status(date_str, sym, "invalidated")
+        return None
+    first_candle_low = float(first_candle.iloc[0]["low"])
+    first_candle_high = float(first_candle.iloc[0]["high"])
+    # v5.4 §5i.1 -- the one-sided signal gate's own fixed reference
+    # range, from the 09:20 AND 09:25 candles specifically (distinct
+    # from the 09:15 first_candle above). Both are already-closed
+    # history by the time this runs (09:30+), same timing guarantee
+    # as the 09:15 candle. Missing either -> fail closed (None),
+    # matching signal_in_range()'s own fail-closed contract.
+    c20 = today_so_far.loc[today_so_far.index == pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=20)]
+    c25 = today_so_far.loc[today_so_far.index == pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=25)]
+    if not c20.empty and not c25.empty:
+        sig_range_low = min(float(c20.iloc[0]["low"]), float(c25.iloc[0]["low"]))
+        sig_range_high = max(float(c20.iloc[0]["high"]), float(c25.iloc[0]["high"]))
+    else:
+        print(f"[intraday_engine] {sym}: 09:20/09:25 candle missing -- one-sided "
+             f"signal gate fails closed, no fresh signal can form for this candidate today.")
+        sig_range_low, sig_range_high = None, None
+    # v5.4 §5n (adopted, supersedes §5m) -- the fair-value-gap veto
+    # zone, from the SAME 09:15 (first_candle) and 09:25 (c25)
+    # candles already fetched above -- no new data needed. (None,
+    # None) when c25 is missing or there's genuinely no gap that day
+    # -- both correctly leave the veto inert (see fvg_vetoed()).
+    if not c25.empty:
+        fvg_lo, fvg_hi = strat.fair_value_gap(first_candle_high, first_candle_low,
+                                              float(c25.iloc[0]["high"]), float(c25.iloc[0]["low"]))
+    else:
+        fvg_lo, fvg_hi = None, None
+    t = CandidateTracker(date_str, sym, c["direction"], ema21_series, atr14_series,
+                        first_candle_low, first_candle_high, c["rank"],
+                        sector=c.get("sector"), sector_ratio=c.get("sector_ratio"),
+                        sector_gate_pass=c.get("sector_gate_pass", False),
+                        sig_range_low=sig_range_low, sig_range_high=sig_range_high,
+                        ema50_series=ema50_series, fvg_lo=fvg_lo, fvg_hi=fvg_hi,
+                        rng_atr=c.get("rng_atr"), rng_atr_gate_pass=c.get("rng_atr_gate_pass", False),
+                        window_start=window_start)
+    t.hist = hist
+    # Seed the running vol-min from today's pre-window candles (session
+    # open through window_start) -- see step_candle()'s docstring; the
+    # running min starts at session open, not at the signal-window
+    # start. v5.4 §5o/§5u: window_start can be later than 09:30 (a
+    # 09:45-retry day, or a candidate this tracker's own LATER rolling
+    # checkpoint just admitted) -- so candles between 09:30 and
+    # window_start would never be seen by EITHER this seed OR the
+    # per-boundary update (which only runs from window_start onward)
+    # unless the seed's own cutoff also extends to cover them. max()
+    # keeps the existing 09:30 cutoff exactly as before when
+    # window_start is earlier (the normal, first-checkpoint case).
+    _cutoff_hm = max(dt.time(9, 30), dt.datetime.strptime(window_start, "%H:%M").time())
+    _cutoff_ts = pd.Timestamp(today).replace(hour=_cutoff_hm.hour, minute=_cutoff_hm.minute)
+    pre_window = today_so_far.loc[today_so_far.index < _cutoff_ts]
+    t.vol_min_so_far = float(pre_window["volume"].min()) if not pre_window.empty else None
+    return t
+
+
 def run_live(mode: str = "paper") -> None:
     """Entry point: `python intraday_engine.py` (paper mode) during real
     market hours. Idles/exits immediately on a non-trading day."""
@@ -1043,82 +1193,14 @@ def run_live(mode: str = "paper") -> None:
 
     # v5.4 §5o -- on a day rescued by the 09:45 retry, no signal may be
     # evaluated before the 09:40-labelled candle (today's shortlist
-    # wasn't knowable any earlier) -- a day-level value, not per-tracker,
-    # since every candidate today shares the same checkpoint. Gates the
-    # boundary loop below.
+    # wasn't knowable any earlier). v5.4 §5u: on a PRIMARY day this is
+    # now the FIRST checkpoint's window_start only -- each candidate
+    # added later by a rolling re-selection gets its OWN, later
+    # window_start (see _build_tracker() below), not this one.
     window_start = "09:40" if sel["checkpoint"] == "09:45" else strat.SIGNAL_WINDOW_START
 
-    trackers = []
-    for c in sel["candidates"]:
-        sym = c["symbol"]
-        hist = kite_client.fetch_intraday_candles(sym, days=EMA_WARMUP_DAYS, interval="5minute")
-        ema21_series = strat.ema21(hist["close"])
-        atr14_series = strat.atr14(hist)
-        # v5.4 §5m (adopted, supersedes §5l) -- the signal candle must
-        # also close on the trend side of EMA50. EMA_WARMUP_DAYS=120 is
-        # ~9,000 5-min candles, comfortably past the 50-candle min_periods
-        # for any symbol with at least a few hours of trading history, so
-        # this only ever fails closed (NaN) in a genuinely new listing's
-        # first day or two.
-        ema50_series = strat.ema_n(hist["close"], 50)
-        today_so_far = hist[hist.index.normalize() == pd.Timestamp(today)]
-        # v2 Spec §3.2 step 1b -- the day's very first (09:15) candle's
-        # own low/high, captured once, fixed for the whole day.
-        first_candle = today_so_far.loc[today_so_far.index == pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=15)]
-        if first_candle.empty:
-            print(f"[intraday_engine] {sym}: 09:15 candle missing -- cannot apply the "
-                 f"first-candle gate safely, dropping this candidate for today.")
-            idb.mark_candidate_status(date_str, sym, "invalidated")
-            continue
-        first_candle_low = float(first_candle.iloc[0]["low"])
-        first_candle_high = float(first_candle.iloc[0]["high"])
-        # v5.4 §5i.1 -- the one-sided signal gate's own fixed reference
-        # range, from the 09:20 AND 09:25 candles specifically (distinct
-        # from the 09:15 first_candle above). Both are already-closed
-        # history by the time this runs (09:30+), same timing guarantee
-        # as the 09:15 candle. Missing either -> fail closed (None),
-        # matching signal_in_range()'s own fail-closed contract.
-        c20 = today_so_far.loc[today_so_far.index == pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=20)]
-        c25 = today_so_far.loc[today_so_far.index == pd.Timestamp(today) + pd.Timedelta(hours=9, minutes=25)]
-        if not c20.empty and not c25.empty:
-            sig_range_low = min(float(c20.iloc[0]["low"]), float(c25.iloc[0]["low"]))
-            sig_range_high = max(float(c20.iloc[0]["high"]), float(c25.iloc[0]["high"]))
-        else:
-            print(f"[intraday_engine] {sym}: 09:20/09:25 candle missing -- one-sided "
-                 f"signal gate fails closed, no fresh signal can form for this candidate today.")
-            sig_range_low, sig_range_high = None, None
-        # v5.4 §5n (adopted, supersedes §5m) -- the fair-value-gap veto
-        # zone, from the SAME 09:15 (first_candle) and 09:25 (c25)
-        # candles already fetched above -- no new data needed. (None,
-        # None) when c25 is missing or there's genuinely no gap that day
-        # -- both correctly leave the veto inert (see fvg_vetoed()).
-        if not c25.empty:
-            fvg_lo, fvg_hi = strat.fair_value_gap(first_candle_high, first_candle_low,
-                                                  float(c25.iloc[0]["high"]), float(c25.iloc[0]["low"]))
-        else:
-            fvg_lo, fvg_hi = None, None
-        t = CandidateTracker(date_str, sym, c["direction"], ema21_series, atr14_series,
-                            first_candle_low, first_candle_high, c["rank"],
-                            sector=c.get("sector"), sector_ratio=c.get("sector_ratio"),
-                            sector_gate_pass=c.get("sector_gate_pass", False),
-                            sig_range_low=sig_range_low, sig_range_high=sig_range_high,
-                            ema50_series=ema50_series, fvg_lo=fvg_lo, fvg_hi=fvg_hi,
-                            rng_atr=c.get("rng_atr"), rng_atr_gate_pass=c.get("rng_atr_gate_pass", False))
-        t.hist = hist
-        # Seed the running vol-min from today's pre-window candles (09:15-
-        # 09:30) -- see step_candle()'s docstring; the running min starts
-        # at session open, not at the 09:30 signal-window start. v5.4
-        # §5o: on a 09:45-retry day, window_start itself is "09:40" --
-        # past the normal 09:30 cutoff -- so candles 09:30-09:35 would
-        # never be seen by EITHER this seed OR the per-boundary update
-        # below (which only runs from window_start onward) unless the
-        # seed's own cutoff also extends to cover them. max() keeps the
-        # existing 09:30 cutoff exactly as before on a normal day.
-        _cutoff_hm = max(dt.time(9, 30), dt.datetime.strptime(window_start, "%H:%M").time())
-        _cutoff_ts = pd.Timestamp(today).replace(hour=_cutoff_hm.hour, minute=_cutoff_hm.minute)
-        pre_window = today_so_far.loc[today_so_far.index < _cutoff_ts]
-        t.vol_min_so_far = float(pre_window["volume"].min()) if not pre_window.empty else None
-        trackers.append(t)
+    trackers = [t for c in sel["candidates"]
+               if (t := _build_tracker(c, date_str, today, window_start)) is not None]
 
     # Live tick feed (WebSocket, not REST polling) -- all candidates'
     # trigger/stop/target checks below react to real ticks as they
@@ -1134,6 +1216,15 @@ def run_live(mode: str = "paper") -> None:
     # count rather than each keeping its own (which would let both
     # independently think a slot was free and double-fill it).
     day_state = {"slots_remaining": max_trades_per_day}
+
+    # v5.4 §5u -- rolling re-rank at 09:35/09:40/09:45 on a PRIMARY day
+    # only; a RETRY day (bias only resolved at 09:45) keeps today's
+    # existing single-checkpoint behavior untouched -- the shortlist
+    # itself wasn't knowable any earlier on such a day (§5u.1).
+    is_retry_day = sel["checkpoint"] == "09:45"
+    already_selected_symbols = {t.symbol for t in trackers}
+    pending_reselect_checkpoints = [] if is_retry_day else ["09:35", "09:40", "09:45"]
+    reselected_checkpoints_done: set[str] = set()
 
     try:
         last_candle_ts = None
@@ -1170,6 +1261,35 @@ def run_live(mode: str = "paper") -> None:
 
             boundary = _last_closed_candle_label(now)
 
+            # v5.4 §5u -- rolling re-selection: the instant the candle a
+            # pending checkpoint ranks on has just closed, re-run
+            # selection and fold in any new top-N entrant. Checked BEFORE
+            # the per-tracker boundary processing below, so a symbol
+            # admitted at this exact boundary is already in `trackers`
+            # (with its own correct, later window_start) by the time
+            # that processing reaches it -- no one-boundary gap.
+            for _cp in pending_reselect_checkpoints:
+                if (_cp not in reselected_checkpoints_done
+                        and boundary.strftime("%H:%M") == strat.checkpoint_candle(_cp)):
+                    reselected_checkpoints_done.add(_cp)
+                    _new_cands = _rolling_reselect(date_str, _cp, all_syms, fno_syms,
+                                                   sel["day_bias"], already_selected_symbols, today)
+                    _new_window_start = strat.checkpoint_candle(_cp)
+                    for _c in _new_cands:
+                        _nt = _build_tracker(_c, date_str, today, _new_window_start)
+                        if _nt is None:
+                            continue
+                        trackers.append(_nt)
+                        already_selected_symbols.add(_nt.symbol)
+                        _tok = inst_map.get(_nt.symbol)
+                        if _tok is not None:
+                            token_by_symbol[_nt.symbol] = _tok
+                            ticker.add_tokens({_tok: _nt.symbol})
+                        else:
+                            print(f"[intraday_engine] {_nt.symbol}: no instrument token -- "
+                                 f"tick-driven stop/target/entry checks won't cover it, "
+                                 f"candle-close checks still will.")
+
             # v5.2 EMA-trail (candle-close part): for every OPEN position,
             # check the newly closed candle against its trail EMA. Its own
             # boundary tracker (NOT last_candle_ts) and deliberately outside
@@ -1198,13 +1318,15 @@ def run_live(mode: str = "paper") -> None:
                 last_pos_candle_ts = boundary
 
             # v2 Spec §3.1 -- SIGNAL_WINDOW_START moved to "09:30" (the
-            # candle labeled 09:30 is now itself eligible), so this gate
-            # follows the same constant rather than a separate hardcoded
-            # time, to avoid the two silently drifting apart again.
-            # v5.4 §5o -- window_start is "09:40" instead on a day the
-            # 09:45 retry rescued (see its own definition above).
-            if (boundary.time() >= dt.datetime.strptime(window_start, "%H:%M").time()
-                    and (last_candle_ts is None or boundary > last_candle_ts)
+            # candle labeled 09:30 is now itself eligible). v5.4 §5o/§5u:
+            # the day-level window_start variable above is only ever the
+            # FIRST checkpoint's own value now -- the actual per-boundary
+            # eligibility check moved to PER TRACKER (t.window_start)
+            # inside the loop below, since a candidate admitted by a
+            # later rolling checkpoint has a later one of its own. Only
+            # the day-wide dedup/slot-cap conditions stay gating this
+            # whole block.
+            if ((last_candle_ts is None or boundary > last_candle_ts)
                     and day_state["slots_remaining"] > 0):
                 # v3 Spec §4 -- collect EVERY candidate's event at this
                 # SAME boundary first; only after all of them have been
@@ -1225,6 +1347,13 @@ def run_live(mode: str = "paper") -> None:
                         # anyway, see its own guard) -- skip the refetch
                         # below entirely rather than pay for it uselessly
                         # every 5 minutes until the position closes.
+                        continue
+                    if boundary.time() < dt.datetime.strptime(t.window_start, "%H:%M").time():
+                        # v5.4 §5u -- this tracker's own entry checkpoint
+                        # hasn't happened yet (a later rolling entrant) --
+                        # not eligible for this boundary at all, same as
+                        # every tracker used to be gated before its single
+                        # shared window_start.
                         continue
                     # Refresh t.hist with just a SMALL recent window and
                     # merge it in, rather than re-fetching the whole

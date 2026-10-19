@@ -237,6 +237,30 @@ def _migrate_daily_selection_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE intraday_daily_selection ADD COLUMN rng_atr_gate_pass INTEGER")
     conn.commit()
 
+    # v5.4 §5u -- the checkpoint ("09:30"/"09:35"/"09:40"/"09:45") at
+    # which THIS symbol first entered the rolling top-N pool -- distinct
+    # from intraday_days.checkpoint, which is the DAY's own bias
+    # checkpoint (09:30 primary vs 09:45 retry). Drives that candidate's
+    # own window_start (strat.checkpoint_candle()) -- a late entrant must
+    # never be allowed to signal on a candle that closed before it was
+    # actually knowable to be in the pool.
+    if "entry_checkpoint" not in cols:
+        conn.execute(
+            "ALTER TABLE intraday_daily_selection ADD COLUMN entry_checkpoint TEXT NOT NULL DEFAULT '09:30'")
+        # Backfill existing rows (recorded before §5u existed, back when
+        # every candidate on a given day shared that day's OWN bias
+        # checkpoint) from intraday_days.checkpoint for that date -- the
+        # flat '09:30' default above is only correct for a PRIMARY day;
+        # a retry day's existing candidates were really all "09:45".
+        conn.execute("""
+            UPDATE intraday_daily_selection
+            SET entry_checkpoint = (
+                SELECT d.checkpoint FROM intraday_days d WHERE d.date = intraday_daily_selection.date)
+            WHERE EXISTS (
+                SELECT 1 FROM intraday_days d WHERE d.date = intraday_daily_selection.date)
+        """)
+    conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # Days / daily selection -- Spec.md §2
@@ -275,15 +299,25 @@ def get_day(date: str) -> dict | None:
 
 
 def record_candidates(date: str, candidates: list[dict]) -> None:
-    """candidates: [{"rank", "symbol", "ret_first15_pct", "gap_pct"(optional)}, ...]
-    -- call once after record_day() when day_bias is not None."""
+    """candidates: [{"rank", "symbol", "ret_first15_pct", "gap_pct"(optional),
+    "entry_checkpoint"(optional, default "09:30")}, ...] -- call once
+    after record_day() when day_bias is not None, and again (v5.4 §5u)
+    for each NEW symbol a later rolling checkpoint (09:35/09:40/09:45)
+    adds to the pool. entry_checkpoint is deliberately NOT in the ON
+    CONFLICT UPDATE clause -- a symbol already in today's pool keeps
+    whichever (earlier) checkpoint first stamped it even if this is
+    called again for it, matching §5u's "earliest checkpoint wins"
+    rule by construction rather than relying on every caller to have
+    already filtered it out in Python."""
     conn = get_conn()
     conn.executemany(
-        "INSERT INTO intraday_daily_selection (date, rank, symbol, ret_first15_pct, gap_pct) "
-        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(date, symbol) DO UPDATE SET "
+        "INSERT INTO intraday_daily_selection "
+        "(date, rank, symbol, ret_first15_pct, gap_pct, entry_checkpoint) "
+        "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(date, symbol) DO UPDATE SET "
         "rank = excluded.rank, ret_first15_pct = excluded.ret_first15_pct, "
         "gap_pct = excluded.gap_pct",
-        [(date, c["rank"], c["symbol"], c["ret_first15_pct"], c.get("gap_pct")) for c in candidates])
+        [(date, c["rank"], c["symbol"], c["ret_first15_pct"], c.get("gap_pct"),
+         c.get("entry_checkpoint", "09:30")) for c in candidates])
     conn.commit()
     conn.close()
 
@@ -292,8 +326,13 @@ def get_candidates(date: str) -> pd.DataFrame:
     conn = get_conn()
     df = pd.read_sql(
         "SELECT rank, symbol, ret_first15_pct, gap_pct, status, sector, sector_ratio, "
-        "sector_gate_pass, rng_atr, rng_atr_gate_pass FROM intraday_daily_selection "
-        "WHERE date = ? ORDER BY rank",
+        "sector_gate_pass, rng_atr, rng_atr_gate_pass, entry_checkpoint "
+        "FROM intraday_daily_selection "
+        # v5.4 §5u -- rank is LOCAL to whichever checkpoint stamped a
+        # candidate (a later checkpoint has its own 1..N), so ordering by
+        # rank alone would interleave unrelated checkpoints' candidates;
+        # group by checkpoint first, same as the rolling list is built.
+        "WHERE date = ? ORDER BY entry_checkpoint, rank",
         conn, params=(date,))
     conn.close()
     if not df.empty:

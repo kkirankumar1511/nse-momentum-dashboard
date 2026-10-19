@@ -421,6 +421,74 @@ def rng_atr_gate_pass(rng_atr: float | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# §2c -- rolling top-N re-ranking (v5.4 §5u)
+# ---------------------------------------------------------------------------
+
+# v5.4 §5u -- re-rank the candidate pool at each of these four checkpoints
+# (instead of just once at 09:30/09:45-retry), taking the UNION across the
+# day and stamping each symbol with the EARLIEST checkpoint it entered the
+# top-N at. A RETRY day (bias only resolved at 09:45) uses ONLY the last
+# entry here -- the shortlist itself isn't knowable any earlier on such a
+# day, exactly like today's existing single-checkpoint retry behavior,
+# left completely untouched by this feature (§5u.1: "ALL stamped 09:45").
+ROLLING_CHECKPOINTS = ["09:30", "09:35", "09:40", "09:45"]
+
+
+def checkpoint_candle(checkpoint: str) -> str:
+    """The closed-candle label a given checkpoint ranks on, which is ALSO
+    the window_start a candidate first entering the pool at that
+    checkpoint gets -- always checkpoint minus 5 minutes (09:30->09:25,
+    09:35->09:30, 09:40->09:35, 09:45->09:40). The two are identical by
+    construction (v5.4 §5u's own no-look-ahead audit table: "stamped X,
+    allowed from X-5") -- a candidate can't be known to be in the top-N
+    before the very candle that qualified it, and that candle is exactly
+    the one its own ranking pass just closed on."""
+    t = dt.datetime.strptime(checkpoint, "%H:%M") - dt.timedelta(minutes=5)
+    return t.strftime("%H:%M")
+
+
+def rank_and_accept_candidates(ret_map: dict[str, float], bias: str, top_n: int,
+                               gap_check, gap_threshold: float = GAP_FILTER_PCT
+                               ) -> list[tuple[str, float, float | None]]:
+    """One checkpoint's ranking + overnight-gap acceptance pass, shared by
+    every caller (today's single 09:30-or-09:45-retry check AND each of
+    v5.4 §5u's four rolling checkpoints) so they can never drift apart.
+
+    `ret_map`: symbol -> this checkpoint's own first15_return()-style %
+    (computed off whichever candle THIS checkpoint ranks on -- see
+    checkpoint_candle() above -- not necessarily the 09:25 one).
+    `gap_check(symbol) -> float | None`: caller-supplied overnight-gap %
+    resolver (a DataFrame lookup in the backtest, a REST/historical-
+    candle fetch live) -- intentionally NOT unified across callers, since
+    that data-access pattern genuinely differs between them (same reason
+    the existing single-checkpoint code never unified it either); only
+    the ranking/acceptance WALK itself is unified here.
+    `gap_threshold`: the Admin-editable intraday_gap_filter_pct, NOT the
+    module default -- every existing call site threads this through
+    explicitly; only a caller that genuinely wants the hardcoded default
+    (none currently do) should omit it.
+
+    A gapped-out candidate is skipped, not replaced by stopping the walk
+    early -- continues to the next-ranked symbol (this is the acceptance-
+    loop SUBSTITUTION behavior -- deliberately different from the post-
+    selection gates' own "mark and drop, no substitution" rule; see
+    §5s.9's placement note for why that distinction matters).
+
+    Returns [(symbol, ret_first15_pct, gap_pct), ...] in acceptance
+    order (rank = position in this list, 1-indexed by the caller)."""
+    ranked_all = select_candidates(pd.Series(ret_map, dtype=float), bias, n=len(ret_map))
+    accepted: list[tuple[str, float, float | None]] = []
+    for sym, ret in ranked_all.items():
+        gap = gap_check(sym)
+        if not passes_gap_filter(gap, threshold=gap_threshold):
+            continue
+        accepted.append((sym, float(ret), gap))
+        if len(accepted) >= top_n:
+            break
+    return accepted
+
+
+# ---------------------------------------------------------------------------
 # §3-§5 -- signal detection, entry/stop, target/exit management
 # ---------------------------------------------------------------------------
 

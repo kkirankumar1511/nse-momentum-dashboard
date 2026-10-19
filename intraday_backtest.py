@@ -310,7 +310,6 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
         nifty_ratio, _ = mkt.compute_first15_breadth(nifty50, close_0925, prev_close_map)
         bias = strat.day_bias(nifty_ratio)
         checkpoint = "09:30"
-        window_start = strat.SIGNAL_WINDOW_START
 
         if bias is None:
             # v5.4 §5o -- one retry 15 minutes later before skipping the
@@ -320,8 +319,7 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
             # its candidate ranking from the 09:45 close only (never
             # mixed with the 09:30 data), and no signal may be evaluated
             # before the 09:40 candle either -- its shortlist wasn't
-            # knowable any earlier -- hence window_start below, threaded
-            # into find_entry() so the scan genuinely can't start sooner.
+            # knowable any earlier.
             close_0940, prev_close_retry = _closes_at(9, 40)
             nifty_ratio_retry, _ = mkt.compute_first15_breadth(nifty50, close_0940, prev_close_retry)
             bias_retry = strat.day_bias(nifty_ratio_retry)
@@ -332,35 +330,62 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
             nifty_ratio = nifty_ratio_retry
             close_0925, prev_close_map = close_0940, prev_close_retry
             checkpoint = "09:45"
-            window_start = "09:40"
 
-        fno_rets = {}
-        for sym in fno_syms:
-            c0925, pc = close_0925.get(sym), prev_close_map.get(sym)
-            if c0925 is None or pc is None or pc == 0:
-                continue
-            fno_rets[sym] = strat.first15_return(c0925, pc)
+        # v5.4 §5u -- re-rank at 09:30/09:35/09:40/09:45 on a PRIMARY day,
+        # taking the UNION and stamping each symbol with the EARLIEST
+        # checkpoint it entered the top-N at. A RETRY day uses ONLY the
+        # single checkpoint that decided it -- the shortlist itself wasn't
+        # knowable any earlier on such a day (§5u.1: "ALL stamped 09:45"),
+        # exactly today's existing single-checkpoint behavior, untouched.
+        rolling_checkpoints = ["09:45"] if checkpoint == "09:45" else strat.ROLLING_CHECKPOINTS
+        _close_cache = {checkpoint: (close_0925, prev_close_map)}
 
-        ranked_all = strat.select_candidates(pd.Series(fno_rets, dtype=float), bias, n=len(fno_rets))
-        accepted: list[tuple[str, float, float | None]] = []
-        for sym, ret in ranked_all.items():
-            c0915 = _candle_at(candles5, sym, day_ts, 9, 15)
-            pc = prev_close_map.get(sym)
-            gap = (float(c0915["open"]) - pc) / pc * 100.0 if (c0915 is not None and pc) else None
-            if not strat.passes_gap_filter(gap, threshold=gap_filter_pct):
-                continue
-            accepted.append((sym, float(ret), gap))
-            if len(accepted) >= top_n_candidates:
-                break
+        _gap_cache: dict[str, float | None] = {}
 
-        if not accepted:
+        def _gap_check(sym: str) -> float | None:
+            # The 09:15 open vs prev close is a fixed DAY-level property,
+            # independent of which later checkpoint is doing the ranking
+            # -- resolved once per symbol per day, not once per checkpoint.
+            if sym not in _gap_cache:
+                c0915 = _candle_at(candles5, sym, day_ts, 9, 15)
+                pc = prev_close_map.get(sym)
+                _gap_cache[sym] = ((float(c0915["open"]) - pc) / pc * 100.0
+                                   if (c0915 is not None and pc) else None)
+            return _gap_cache[sym]
+
+        union: dict[str, dict] = {}
+        for cp in rolling_checkpoints:
+            if cp in _close_cache:
+                cp_close, cp_prev = _close_cache[cp]
+            else:
+                _h, _m = (int(x) for x in strat.checkpoint_candle(cp).split(":"))
+                cp_close, cp_prev = _closes_at(_h, _m)
+                _close_cache[cp] = (cp_close, cp_prev)
+            fno_rets = {}
+            for sym in fno_syms:
+                c_px, pc = cp_close.get(sym), cp_prev.get(sym)
+                if c_px is None or pc is None or pc == 0:
+                    continue
+                fno_rets[sym] = strat.first15_return(c_px, pc)
+            accepted = strat.rank_and_accept_candidates(fno_rets, bias, top_n_candidates, _gap_check,
+                                                        gap_threshold=gap_filter_pct)
+            for local_rank, (sym, ret, gap) in enumerate(accepted, start=1):
+                if sym in union:
+                    continue  # already entered at an earlier checkpoint -- keep that stamp
+                union[sym] = {"ret": ret, "gap": gap, "entry_checkpoint": cp, "rank": local_rank}
+
+        if not union:
             skipped_days.append({"date": day, "reason": "no_candidates", "nifty_ratio": nifty_ratio})
             continue
 
-        for rank, (sym, ret, gap) in enumerate(accepted, start=1):
+        for sym, cand in sorted(union.items(), key=lambda kv: (kv[1]["entry_checkpoint"], kv[1]["rank"])):
+            rank, ret, gap, entry_checkpoint = (cand["rank"], cand["ret"], cand["gap"],
+                                                cand["entry_checkpoint"])
+            window_start = strat.checkpoint_candle(entry_checkpoint)
             candidate_rows.append({"date": day, "symbol": sym, "rank": rank, "direction": bias,
                                   "ret_first15_pct": round(ret, 3), "gap_pct": gap,
-                                  "nifty_ratio": round(nifty_ratio, 3), "checkpoint": checkpoint})
+                                  "nifty_ratio": round(nifty_ratio, 3), "checkpoint": checkpoint,
+                                  "entry_checkpoint": entry_checkpoint})
             df5 = candles5.get(sym)
             if df5 is None or df5.empty or sym not in ema21_cache:
                 continue

@@ -5863,8 +5863,9 @@ def page_intraday_backtest():
         sp14.metric("Max trades/day", _p_max_trades)
         sp15.metric("Leverage", f"{_p_leverage}×")
         sp16.metric("Risk per trade", f"{_p_risk_pct:.1%}")
-        sp17, _, _, _ = st.columns(4)
+        sp17, sp18, _, _ = st.columns(4)
         sp17.metric("Vol-regime floor (§5s)", f"≥{istrat.MIN_RNG_ATR}")
+        sp18.metric("Rolling re-rank (§5u)", " / ".join(istrat.ROLLING_CHECKPOINTS))
 
     if daily.empty:
         st.warning("No trading day in this range produced a sector-gate-confirmed signal "
@@ -5940,7 +5941,11 @@ def page_intraday_backtest():
                 cand_filtered = cand_filtered[(_cd_all >= _cd_lo) & (_cd_all <= _cd_hi)]
 
             st.caption(f"Showing {len(cand_filtered)} of {len(candidates)} candidate(s)")
-            cand_sorted = cand_filtered.sort_values(["date", "rank"], ascending=[False, True])
+            # v5.4 §5u -- rank is LOCAL to whichever checkpoint stamped a
+            # candidate, so sort by checkpoint first (same reasoning as
+            # intraday_db.get_candidates()'s own ORDER BY).
+            cand_sorted = cand_filtered.sort_values(["date", "entry_checkpoint", "rank"],
+                                                     ascending=[False, True, True])
             cand_page = _ov_page_slice(cand_sorted, key="ibt_candidates", page_size=25)
             st.markdown(
                 _ov_table_html(
@@ -7189,6 +7194,7 @@ def page_intraday_dashboard():
                 _gap = c.get("gap_pct")
                 _table_rows.append({
                     "cand_rank": int(c["rank"]), "symbol": c["symbol"],
+                    "entry_checkpoint": c.get("entry_checkpoint") or "09:30",
                     "cand_sector": sector or "—", "ret_first15_pct": float(c["ret_first15_pct"]),
                     "gap_pct": float(_gap) if pd.notna(_gap) else float("nan"),
                     "ltp": cand_price if cand_price is not None else float("nan"),
@@ -7199,8 +7205,8 @@ def page_intraday_dashboard():
             _tdf = pd.DataFrame(_table_rows)
             st.markdown(_ov_table_html(
                 _tdf,
-                columns=["cand_rank", "symbol", "cand_sector", "ret_first15_pct", "gap_pct",
-                        "ltp", "chg_pct", "gate", "rng_gate", "state", "detail"],
+                columns=["cand_rank", "symbol", "entry_checkpoint", "cand_sector", "ret_first15_pct",
+                        "gap_pct", "ltp", "chg_pct", "gate", "rng_gate", "state", "detail"],
                 sym_cols=["symbol"],
                 pnl_cols=["ret_first15_pct", "chg_pct"],
                 num_fmt={"ret_first15_pct": "{:+.2f}%", "gap_pct": "{:+.2f}%", "ltp": "₹{:,.2f}",
