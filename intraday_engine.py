@@ -288,7 +288,7 @@ def resolve_rng_atr_gate(date: str, candidates: list[dict]) -> None:
 
 
 def _rolling_reselect(date_str: str, checkpoint: str, all_syms: list[str], fno_syms: list[str],
-                      bias: str, already_selected: set[str], today: dt.date) -> list[dict]:
+                      bias: str, already_selected: set[str], today: dt.date, mode: str) -> list[dict]:
     """v5.4 §5u -- one rolling re-ranking pass, for checkpoint in
     {"09:35", "09:40", "09:45"} (09:30 is the day's own initial
     selection, handled separately in run_live()). Called the moment
@@ -336,6 +336,16 @@ def _rolling_reselect(date_str: str, checkpoint: str, all_syms: list[str], fno_s
     # just scoped to the FEW new entrants, not the whole day's pool.
     resolve_sector_gates(date_str, new_candidates, close_map, prev_close, today)
     resolve_rng_atr_gate(date_str, new_candidates)
+
+    _summary = ", ".join(
+        f"#{c['rank']} {c['symbol']} ({c['ret_first15_pct']:+.2f}%) "
+        f"sectorGate={'PASS' if c.get('sector_gate_pass') else 'FAIL'} "
+        f"rngATR={'PASS' if c.get('rng_atr_gate_pass') else 'FAIL'}"
+        for c in new_candidates)
+    _push(f"KK Trading — {checkpoint} rolling re-select ({mode})",
+         f"{len(new_candidates)} new {bias} candidate(s) entered the top-N pool: {_summary}. "
+         f"Signal scanning starts from the {strat.checkpoint_candle(checkpoint)} candle just "
+         f"closed -- the same one that qualified each of them.")
     return new_candidates
 
 
@@ -528,8 +538,10 @@ def _open_position_from_trigger(tracker: CandidateTracker, event: dict,
     v2 Spec §6 -- the sector-confirmation gate is checked HERE, right
     after a breakout triggers and before any sizing/order placement --
     it can only ever drop THIS candidate's trade, never affect the
-    other candidate. tracker.sector_gate_pass was resolved once at 09:30
-    (resolve_sector_gates()), not recomputed now."""
+    other candidate. tracker.sector_gate_pass was resolved once, at
+    whichever checkpoint first admitted this candidate (v5.4 §5u: 09:30
+    for the day's initial pool, or 09:35/09:40/09:45 for a later rolling
+    entrant -- resolve_sector_gates() either way), not recomputed now."""
     if not tracker.sector_gate_pass:
         tracker.done = True
         idb.mark_candidate_status(tracker.date, tracker.symbol, "sector_gate_failed")
@@ -544,7 +556,9 @@ def _open_position_from_trigger(tracker: CandidateTracker, event: dict,
 
     # v5.4 §5s -- same post-trigger, drop-only-this-candidate placement
     # as the sector gate just above. tracker.rng_atr_gate_pass was
-    # resolved once at 09:30 (resolve_rng_atr_gate()), not recomputed now.
+    # resolved once, at whichever checkpoint first admitted this
+    # candidate (same v5.4 §5u timing as sector_gate_pass above), not
+    # recomputed now.
     if not tracker.rng_atr_gate_pass:
         tracker.done = True
         idb.mark_candidate_status(tracker.date, tracker.symbol, "rng_atr_gate_failed")
@@ -1162,25 +1176,35 @@ def run_live(mode: str = "paper") -> None:
         return
 
     # v2 Spec §6.4 -- resolve each candidate's sector-confirmation-gate
-    # ratio ONCE here, right after selection, using the same 09:30
+    # ratio ONCE here, right after selection, using this checkpoint's own
     # snapshot data (extended with any sector constituents not already
-    # covered) -- fixed for the whole day, looked up (never recomputed)
-    # the moment a breakout later triggers (see _open_position_from_trigger()).
+    # covered) -- fixed for THIS candidate's whole day once resolved,
+    # looked up (never recomputed) the moment a breakout later triggers
+    # (see _open_position_from_trigger()). v5.4 §5u: this is only the
+    # INITIAL batch (09:30, or 09:45 on a retry day) -- any candidate a
+    # later rolling checkpoint admits gets the identical treatment inside
+    # _rolling_reselect(), which pushes its own notification below.
     resolve_sector_gates(date_str, sel["candidates"], close_0925, prev_close, today)
     # v5.4 §5s -- same timing/placement as the sector gate just above.
     resolve_rng_atr_gate(date_str, sel["candidates"])
 
     _cands_df = idb.get_candidates(date_str)
-    _cand_summary = ", ".join(
-        f"#{int(r['rank'])} {r['symbol']} ({r['ret_first15_pct']:+.2f}%) "
-        f"sector={r['sector']} ratio={r['sector_ratio']:.2f} "
-        f"gate={'PASS' if r['sector_gate_pass'] else 'FAIL'}"
-        if pd.notna(r['sector_ratio']) else
-        f"#{int(r['rank'])} {r['symbol']} ({r['ret_first15_pct']:+.2f}%) sector=unresolved"
-        for _, r in _cands_df.iterrows())
+
+    def _one_cand_summary(r: pd.Series) -> str:
+        head = f"#{int(r['rank'])} {r['symbol']} ({r['ret_first15_pct']:+.2f}%)"
+        sector_bit = (f"sector={r['sector']} ratio={r['sector_ratio']:.2f} "
+                     f"gate={'PASS' if r['sector_gate_pass'] else 'FAIL'}"
+                     if pd.notna(r['sector_ratio']) else "sector=unresolved")
+        rng_bit = (f"rngATR={r['rng_atr']:.2f} {'PASS' if r['rng_atr_gate_pass'] else 'FAIL'}"
+                  if pd.notna(r['rng_atr']) else "rngATR=no data")
+        return f"{head} {sector_bit} {rng_bit}"
+
+    _cand_summary = ", ".join(_one_cand_summary(r) for _, r in _cands_df.iterrows())
+    _checkpoint_bit = (f"{sel['checkpoint']} retry" if sel["checkpoint"] == "09:45"
+                       else f"{sel['checkpoint']}, more may be added through 09:45 via rolling re-selection")
     _push(f"KK Trading — {sel['day_bias']} day ({mode})",
          f"NIFTY 50 ratio {sel['nifty_ratio']:.2f} -> {sel['day_bias']}. "
-         f"Candidates: {_cand_summary}")
+         f"Initial candidates ({_checkpoint_bit}): {_cand_summary}")
 
     max_trades_per_day = config.STRATEGY.get("intraday_max_trades_per_day", strat.MAX_TRADES_PER_DAY)
     leverage = config.STRATEGY.get("intraday_leverage", strat.LEVERAGE)
@@ -1273,7 +1297,7 @@ def run_live(mode: str = "paper") -> None:
                         and boundary.strftime("%H:%M") == strat.checkpoint_candle(_cp)):
                     reselected_checkpoints_done.add(_cp)
                     _new_cands = _rolling_reselect(date_str, _cp, all_syms, fno_syms,
-                                                   sel["day_bias"], already_selected_symbols, today)
+                                                   sel["day_bias"], already_selected_symbols, today, mode)
                     _new_window_start = strat.checkpoint_candle(_cp)
                     for _c in _new_cands:
                         _nt = _build_tracker(_c, date_str, today, _new_window_start)
