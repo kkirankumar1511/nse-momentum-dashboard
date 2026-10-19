@@ -171,7 +171,7 @@ LEVERAGE = 5.0
 # drawdown, downside deviation, Sortino and Calmar for ~1pp less CAGR.
 # Do not change one without re-checking the other (REQUIRED pairing,
 # same as §5r's 10% vol tolerance needing §5p's 4 slots).
-MAX_RISK_PCT_PER_TRADE = 0.006
+MAX_RISK_PCT_PER_TRADE = 0.005
 
 # v5.4 §5s -- daily volatility-regime floor (ADOPTED 2026-10-18): a
 # candidate is dropped post-selection (same stage as the sector gate,
