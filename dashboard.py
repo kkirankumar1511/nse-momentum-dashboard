@@ -8567,19 +8567,33 @@ def page_guide():
         'genuinely wasn\'t knowable any earlier).</p></div>', unsafe_allow_html=True)
 
     st.markdown(
-        '<div class="guide-card"><h4>2. Picking today\'s candidates</h4>'
+        '<div class="guide-card"><h4>2. Picking today\'s candidates — re-ranked through 09:45</h4>'
         f'<p>Once the day\'s direction is set, the whole F&amp;O universe is ranked by that same '
-        'first-15-minute move — biggest advancers for a LONG day, biggest decliners for a SHORT day — '
-        f'and the top {_i_top_n} become today\'s watchlist. A candidate whose 09:15 open '
-        f'already gapped more than {_i_gap_filter:.0f}% from the previous close is skipped '
-        'outright and replaced by the next-best ranked name, rather than trading a stock that\'s already '
-        'made most of its move before the opening range even forms. No sector or trend filter narrows '
-        'this initial pool — those checks come later, at the point a candidate actually tries to '
-        'trigger a trade, not before.</p></div>', unsafe_allow_html=True)
+        'first-15-minute-style move — biggest advancers for a LONG day, biggest decliners for a SHORT '
+        f'day — and the top {_i_top_n} become candidates. A stock whose 09:15 open already gapped more '
+        f'than {_i_gap_filter:.0f}% from the previous close is skipped outright and replaced by the '
+        'next-best ranked name, rather than trading a stock that\'s already made most of its move before '
+        'the opening range even forms.</p>'
+        '<p>That first ranking at 09:30 isn\'t final, though: the exact same ranking re-runs again at '
+        '09:35, 09:40 and 09:45 — each time off whichever 5-minute candle has just closed — and any '
+        'stock that makes the top list at ANY of those checks is added to today\'s pool, permanently, '
+        'stamped with the earliest check it qualified at. Nothing already admitted is ever removed, even '
+        'if it later slips back out of the top ranks — the pool only ever grows through the morning '
+        '(averaging ~7 candidates/day instead of a flat 5). A candidate admitted late still can\'t cheat '
+        'the clock: it\'s never evaluated against a candle that closed before the very check that '
+        'qualified it, so a stock that only becomes interesting at 09:40 genuinely can\'t trigger a trade '
+        'off, say, its 09:30 behavior. No sector or trend filter narrows this pool at any checkpoint — '
+        'those checks come later, at the point a candidate actually tries to trigger a trade, not '
+        'before.</p>'
+        '<p>On a day whose bias was only settled by the 09:45 retry (card 1), none of this re-ranking '
+        'happens — the day gets just the one, 09:45 ranking, the same as always. The pool itself wasn\'t '
+        'knowable any earlier on such a day, so there\'s nothing earlier to roll from.</p></div>',
+        unsafe_allow_html=True)
 
     st.markdown(
         '<div class="guide-card"><h4>3. The signal candle — what makes a candle worth watching</h4>'
-        '<p>From 09:25 onward, each candidate\'s own 5-minute candles are scanned one at a time for a '
+        '<p>From 09:25 onward (or from whichever later candle actually admitted it, for a rolling '
+        'entrant — card 2), each candidate\'s own 5-minute candles are scanned one at a time for a '
         '<b>pullback candle</b>: it must be the counter-trend color (red for a LONG setup, green for '
         'SHORT — i.e. a dip against the day\'s own direction), its volume must be at or near the '
         f'lowest seen so far that day (within {istrat.VOL_THRESHOLD_PCT*100:.0f}% of the running '
@@ -8612,7 +8626,9 @@ def page_guide():
     st.markdown(
         '<div class="guide-card"><h4>5. One more check at the moment of entry — the sector gate</h4>'
         f'<p>A breakout having triggered isn\'t enough on its own: the candidate\'s own NSE sector index '
-        'must ALSO show the same first-15-minute advance/decline skew the whole-market check used — but '
+        'must ALSO show the same first-15-minute advance/decline skew the whole-market check used '
+        '(resolved once, the moment the candidate was admitted to the pool, same as the vol-regime floor '
+        'below — never recomputed afterward) — but '
         f'held to a stricter bar ({istrat.SECTOR_GATE_RATIO_LONG_MIN} / {istrat.SECTOR_GATE_RATIO_SHORT_MAX}, '
         'independent of the looser market-wide threshold). A strong individual stock inside a weak sector '
         'fails here and the trade is simply never taken — this gate protects trade QUALITY, not just '
@@ -8622,7 +8638,9 @@ def page_guide():
     st.markdown(
         '<div class="guide-card"><h4>5b. One more check, resolved alongside it — the daily vol-regime floor</h4>'
         f'<p>A stock\'s own recent daily range, relative to its own 14-day ATR, must be at least '
-        f'<b>{istrat.MIN_RNG_ATR}×</b> — checked once at 09:30, same timing as the sector gate above. '
+        f'<b>{istrat.MIN_RNG_ATR}×</b> — checked once, the moment the candidate is admitted to the pool '
+        '(09:30 for the day\'s first batch, or whichever later re-ranking checkpoint a rolling entrant '
+        'joined at — card 2), same timing as the sector gate above. '
         'This isn\'t a directional prediction: it\'s a check for whether the stock can even move far '
         'enough intraday to produce the kind of outsized move this strategy\'s edge actually depends on '
         '— a stock currently compressed well below its own normal range usually can\'t, whichever way '
