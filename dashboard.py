@@ -5943,9 +5943,13 @@ def page_intraday_backtest():
             st.caption(f"Showing {len(cand_filtered)} of {len(candidates)} candidate(s)")
             # v5.4 §5u -- rank is LOCAL to whichever checkpoint stamped a
             # candidate, so sort by checkpoint first (same reasoning as
-            # intraday_db.get_candidates()'s own ORDER BY).
-            cand_sorted = cand_filtered.sort_values(["date", "entry_checkpoint", "rank"],
-                                                     ascending=[False, True, True])
+            # intraday_db.get_candidates()'s own ORDER BY). A result cached
+            # from a backtest run BEFORE §5u existed has no entry_checkpoint
+            # column at all -- fall back to the old date/rank-only sort
+            # rather than crashing on it.
+            _sort_cols = (["date", "entry_checkpoint", "rank"] if "entry_checkpoint" in cand_filtered.columns
+                         else ["date", "rank"])
+            cand_sorted = cand_filtered.sort_values(_sort_cols, ascending=[False] + [True] * (len(_sort_cols) - 1))
             cand_page = _ov_page_slice(cand_sorted, key="ibt_candidates", page_size=25)
             st.markdown(
                 _ov_table_html(
