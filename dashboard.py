@@ -5916,7 +5916,11 @@ def page_intraday_backtest():
     _tl, _mm, _ra = _m["trade_level"], _m["monthly_metrics"], _m["risk_adjusted"]
 
     def _f(v, spec="{:.2f}", suffix=""):
-        return f"{v:{spec[1:-1]}}{suffix}" if pd.notna(v) and v not in (float("inf"), float("-inf")) \
+        # spec looks like "{:.2f}" -- [2:-1] strips the brace AND the
+        # leading colon (format_spec itself, e.g. ".2f", has no colon of
+        # its own); [1:-1] alone leaves the colon in, producing an
+        # invalid double-colon spec (caught live: "{v::.1f}").
+        return f"{v:{spec[2:-1]}}{suffix}" if pd.notna(v) and v not in (float("inf"), float("-inf")) \
             else ("∞" if v == float("inf") else "—")
 
     with st.expander("📊 Detailed performance analytics", expanded=not daily.empty):
