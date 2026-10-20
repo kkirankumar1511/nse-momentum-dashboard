@@ -5912,6 +5912,103 @@ def page_intraday_backtest():
                          "no day bias / no candidates", "", "amber")
         + '</div>', unsafe_allow_html=True)
 
+    _m = ibt.compute_intraday_metrics(res)
+    _tl, _mm, _ra = _m["trade_level"], _m["monthly_metrics"], _m["risk_adjusted"]
+
+    def _f(v, spec="{:.2f}", suffix=""):
+        return f"{v:{spec[1:-1]}}{suffix}" if pd.notna(v) and v not in (float("inf"), float("-inf")) \
+            else ("∞" if v == float("inf") else "—")
+
+    with st.expander("📊 Detailed performance analytics", expanded=not daily.empty):
+        if daily.empty or _tl["positions"] == 0:
+            st.caption("No positions this run -- nothing to analyze yet.")
+        else:
+            st.markdown("**Trade-level** (per POSITION, not per leg -- a split target+runner "
+                       "counts once, its legs' P&L summed)")
+            st.markdown(
+                '<div class="ov-grid-metrics">'
+                + _ov_metric_html("Positions", str(_tl["positions"]), None, "", "blue")
+                + _ov_metric_html("Win rate", _f(_tl["win_rate_pct"], "{:.1f}", "%"), None, "", "purple")
+                + _ov_metric_html("Mean R", _f(_tl["mean_R"], "{:+.2f}"), "size-independent edge/trade", "", "green")
+                + _ov_metric_html("Median R", _f(_tl["median_R"], "{:+.2f}"),
+                                 "the typical trade (most lose)", "", "coral")
+                + _ov_metric_html("Max R", _f(_tl["max_R"], "{:+.2f}"), "biggest single winner", "", "green")
+                + _ov_metric_html("P(R≥2)", _f(_tl["p_r_ge_2_pct"], "{:.1f}", "%"),
+                                 "the tail that drives returns", "", "teal")
+                + '</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="ov-grid-metrics">'
+                + _ov_metric_html("Avg win R", _f(_tl["avg_win_R"], "{:+.2f}"), None, "", "green")
+                + _ov_metric_html("Avg loss R", _f(_tl["avg_loss_R"], "{:+.2f}"),
+                                 "≈ -1.04 expected (slippage+costs past -1.00)", "", "red")
+                + _ov_metric_html("Payoff ratio", _f(_tl["payoff_ratio"]), "abs(avg win R / avg loss R)", "", "blue")
+                + _ov_metric_html("Profit factor", _f(_tl["profit_factor"]), "net, after costs", "", "teal")
+                + _ov_metric_html("Costs / gross profit", _f(_tl["cost_pct_of_gross_profit"], "{:.1f}", "%"),
+                                 ">30% would mean the configuration is churning", "", "amber")
+                + '</div>', unsafe_allow_html=True)
+            st.caption("R-multiple distribution")
+            st.dataframe(_m["r_buckets"].rename(columns={"bucket": "R bucket", "count": "Count", "pct": "% of trades"}),
+                        hide_index=True, width="stretch")
+
+            st.markdown("**Monthly** — the block §5s/§5u were adopted on")
+            st.markdown(
+                '<div class="ov-grid-metrics">'
+                + _ov_metric_html("Negative months", f"{_mm['negative_months']} / {_mm['total_months']}",
+                                 None, "", "red" if _mm["negative_months"] else "green")
+                + _ov_metric_html("Months < -5%", str(_mm["months_lt_neg5_pct"]), "deep-loss count", "", "red")
+                + _ov_metric_html("Months ≥ 2%", str(_mm["months_ge_2_pct"]), None, "", "green")
+                + _ov_metric_html("Monthly win rate", _f(_mm["monthly_win_rate_pct"], "{:.1f}", "%"), None, "", "purple")
+                + '</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="ov-grid-metrics">'
+                + _ov_metric_html("Mean monthly", _f(_mm["mean_monthly_pct"], "{:+.2f}", "%"), None, "", "blue")
+                + _ov_metric_html("Median monthly", _f(_mm["median_monthly_pct"], "{:+.2f}", "%"),
+                                 "the honest 'typical month'", "", "coral")
+                + _ov_metric_html("Best month", _f(_mm["best_month_pct"], "{:+.2f}", "%"), None, "", "green")
+                + _ov_metric_html("Worst month", _f(_mm["worst_month_pct"], "{:+.2f}", "%"), None, "", "red")
+                + _ov_metric_html("Downside deviation", _f(_mm["downside_deviation"], "{:.2f}"),
+                                 "only losses count against this", "", "amber")
+                + '</div>', unsafe_allow_html=True)
+            st.caption("Monthly return distribution (against equity at the START of that month)")
+            st.dataframe(_m["monthly_buckets"].rename(columns={"bucket": "Monthly return", "count": "Months"}),
+                        hide_index=True, width="stretch")
+
+            st.markdown("**Risk-adjusted & return**")
+            st.markdown(
+                '<div class="ov-grid-metrics">'
+                + _ov_metric_html("CAGR", _f(_ra["cagr_pct"], "{:+.2f}", "%"), None, "", "green")
+                + _ov_metric_html("Final equity", f"₹{_ra['final_equity']:,.0f}",
+                                 f"{_ra['total_return_pct']:+.1f}% total return", "", "blue")
+                + _ov_metric_html("Sortino", _f(_ra["sortino"]), "monthly-return based", "", "teal")
+                + _ov_metric_html("Calmar", _f(_ra["calmar"]), "CAGR / abs(max drawdown)", "", "purple")
+                + '</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="ov-grid-metrics">'
+                + _ov_metric_html("Max drawdown", _f(_ra["max_drawdown_pct"], "{:.2f}", "%"),
+                                 "daily equity, peak to trough", "", "red")
+                + _ov_metric_html("Month-end drawdown", _f(_ra["month_end_drawdown_pct"], "{:.2f}", "%"),
+                                 "same, sampled only at month-end", "", "amber")
+                + '</div>', unsafe_allow_html=True)
+
+            _dd_ep = _m["drawdown_episodes"]
+            if not _dd_ep.empty:
+                st.caption("Drawdown episodes (peak → trough → recovery) — duration matters as much "
+                          "as depth for whether a real account could be held through it")
+                _dd_show = _dd_ep.copy()
+                _dd_show["recovery_date"] = _dd_show.apply(
+                    lambda r: "ongoing" if r["ongoing"] else pd.Timestamp(r["recovery_date"]).strftime("%Y-%m-%d"),
+                    axis=1)
+                _dd_show["peak_date"] = pd.to_datetime(_dd_show["peak_date"]).dt.strftime("%Y-%m-%d")
+                _dd_show["trough_date"] = pd.to_datetime(_dd_show["trough_date"]).dt.strftime("%Y-%m-%d")
+                _dd_show["depth_pct"] = _dd_show["depth_pct"].round(2)
+                st.dataframe(
+                    _dd_show[["peak_date", "trough_date", "recovery_date", "peak_to_trough_days",
+                             "trough_to_recovery_days", "total_days", "depth_pct"]].rename(columns={
+                        "peak_date": "Peak", "trough_date": "Trough", "recovery_date": "Recovery",
+                        "peak_to_trough_days": "Peak→trough (days)", "trough_to_recovery_days": "Trough→recovery (days)",
+                        "total_days": "Total (days)", "depth_pct": "Depth %"}),
+                    hide_index=True, width="stretch")
+
     if not candidates.empty:
         with st.expander(f"Daily candidates ({len(candidates)})", expanded=False):
             cf1, cf2, cf3 = st.columns(3)

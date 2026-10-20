@@ -39,6 +39,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 
+import numpy as np
 import pandas as pd
 
 import config
@@ -668,4 +669,270 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
         "trades": trades_df, "daily": daily_df, "candidates": candidates_df,
         "skipped_days": pd.DataFrame(skipped_days), "start_date": start_date, "end_date": end_date,
         "capital_start": capital, "capital_end": capital_cur,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Post-run analytics -- trade-level R-multiples, monthly/risk-adjusted
+# stats, drawdown episodes. Pure post-processing of run_backtest()'s own
+# output; never re-simulates anything, so it can't itself introduce any
+# new look-ahead risk.
+# ---------------------------------------------------------------------------
+
+def positions_from_trades(trades: pd.DataFrame) -> pd.DataFrame:
+    """Collapses `trades` (one row per LEG -- up to 2 per position, target
+    half + runner half, each with its own partial qty/exit) to one row
+    per POSITION -- the unit every trade-level stat below (win rate, R,
+    profit factor) needs. qty is SUMMED across a position's legs (they
+    were split FROM the original size by strat.leg_quantities(), so they
+    sum back to it); entry_price/stop_price/direction/symbol/date are
+    identical across a position's own legs, so just the first copy;
+    net/gross_pnl/cost are summed (a position's TOTAL realized P&L, not
+    one leg's own slice of it)."""
+    if trades.empty:
+        return pd.DataFrame(columns=["position_id", "date", "symbol", "direction", "rank", "sector",
+                                     "entry_time", "exit_time", "entry_price", "stop_price", "qty",
+                                     "net_pnl", "gross_pnl", "cost", "R"])
+    g = trades.groupby("position_id", sort=False)
+    pos = g.agg(
+        date=("date", "first"), symbol=("symbol", "first"), direction=("direction", "first"),
+        rank=("rank", "first"), sector=("sector", "first"),
+        entry_time=("entry_time", "first"), exit_time=("exit_time", "max"),
+        entry_price=("entry_price", "first"), stop_price=("stop_price", "first"),
+        qty=("qty", "sum"), net_pnl=("net_pnl", "sum"), gross_pnl=("gross_pnl", "sum"),
+        cost=("cost", "sum"),
+    ).reset_index()
+    risk_per_share = (pos["entry_price"] - pos["stop_price"]).abs()
+    risk_total = (risk_per_share * pos["qty"]).replace(0, np.nan)
+    pos["R"] = pos["net_pnl"] / risk_total
+    return pos
+
+
+def trade_level_metrics(pos: pd.DataFrame) -> dict:
+    """positions/win-rate/R-multiple stats. `pos`: positions_from_trades()'
+    own output (one row per position, with an "R" column already)."""
+    if pos.empty:
+        return {"positions": 0, "win_rate_pct": np.nan, "mean_R": np.nan, "median_R": np.nan,
+                "max_R": np.nan, "p_r_ge_2_pct": np.nan, "avg_win_R": np.nan, "avg_loss_R": np.nan,
+                "payoff_ratio": np.nan, "profit_factor": np.nan, "cost_pct_of_gross_profit": np.nan}
+    R = pos["R"].dropna()
+    wins_R, losses_R = R[R > 0], R[R <= 0]
+    gross_profit = pos.loc[pos["gross_pnl"] > 0, "gross_pnl"].sum()
+    gross_loss = -pos.loc[pos["gross_pnl"] <= 0, "gross_pnl"].sum()
+    net_gross_win = pos.loc[pos["net_pnl"] > 0, "net_pnl"].sum()
+    net_gross_loss = -pos.loc[pos["net_pnl"] <= 0, "net_pnl"].sum()
+    return {
+        "positions": int(len(pos)),
+        "win_rate_pct": float((pos["net_pnl"] > 0).mean() * 100),
+        "mean_R": float(R.mean()) if not R.empty else np.nan,
+        "median_R": float(R.median()) if not R.empty else np.nan,
+        "max_R": float(R.max()) if not R.empty else np.nan,
+        "p_r_ge_2_pct": float((R >= 2).mean() * 100) if not R.empty else np.nan,
+        "avg_win_R": float(wins_R.mean()) if not wins_R.empty else np.nan,
+        "avg_loss_R": float(losses_R.mean()) if not losses_R.empty else np.nan,
+        "payoff_ratio": (abs(wins_R.mean() / losses_R.mean())
+                        if not wins_R.empty and not losses_R.empty and losses_R.mean() != 0 else np.nan),
+        # Net profit factor -- AFTER costs, matching what the strategy
+        # actually keeps (gross-only would overstate the edge).
+        "profit_factor": (net_gross_win / net_gross_loss) if net_gross_loss else np.inf,
+        # Costs against gross WINNING P&L specifically (how much of the
+        # gross upside costs eat into), not against net or total gross --
+        # the standard "cost drag on profit" framing.
+        "cost_pct_of_gross_profit": float(pos["cost"].sum() / gross_profit * 100) if gross_profit else np.nan,
+    }
+
+
+def r_distribution_buckets(pos: pd.DataFrame) -> pd.DataFrame:
+    """≤-1 / -1..0 / 0..1 / 1..2 / 2..3 / 3..5 / ≥5, right-closed (so
+    exactly R=-1.00 -- the modal stop-out -- lands in "≤-1", not "-1..0")."""
+    labels = ["≤-1", "-1..0", "0..1", "1..2", "2..3", "3..5", "≥5"]
+    if pos.empty or pos["R"].dropna().empty:
+        return pd.DataFrame({"bucket": labels, "count": [0] * len(labels), "pct": [0.0] * len(labels)})
+    R = pos["R"].dropna()
+    bins = [-np.inf, -1, 0, 1, 2, 3, 5, np.inf]
+    cut = pd.cut(R, bins=bins, labels=labels, right=True)
+    counts = cut.value_counts().reindex(labels, fill_value=0)
+    return pd.DataFrame({"bucket": labels, "count": counts.values,
+                        "pct": (counts.values / len(R) * 100).round(1)})
+
+
+def monthly_table(daily: pd.DataFrame, capital_start: float) -> pd.DataFrame:
+    """One row per calendar month that had at least one trading day.
+    monthly_pct is computed against EQUITY AT THE START of that month
+    (the prior month's closing capital, or the backtest's own starting
+    capital for its first month) -- never against cumulative/compounded
+    totals, which would understate a bad month that followed a good one
+    and overstate one that followed a drawdown."""
+    if daily.empty:
+        return pd.DataFrame(columns=["month", "month_pnl", "equity_start", "equity_end",
+                                     "n_trades", "monthly_pct"])
+    d = daily.copy()
+    d["date"] = pd.to_datetime(d["date"])
+    d = d.sort_values("date").reset_index(drop=True)
+    # capital_before: equity at the START of each trading day -- the
+    # first trading day of a month's own capital_before IS that month's
+    # starting equity (today's close minus today's own P&L).
+    d["capital_before"] = d["capital"] - d["day_pnl"]
+    d.loc[0, "capital_before"] = capital_start  # the very first day starts from the run's own seed
+    d["month"] = d["date"].dt.to_period("M")
+    monthly = d.groupby("month", sort=True).agg(
+        month_pnl=("day_pnl", "sum"), equity_start=("capital_before", "first"),
+        equity_end=("capital", "last"), n_trades=("n_trades", "sum"),
+    ).reset_index()
+    monthly["monthly_pct"] = monthly["month_pnl"] / monthly["equity_start"].replace(0, np.nan) * 100
+    return monthly
+
+
+def monthly_metrics(monthly: pd.DataFrame) -> dict:
+    if monthly.empty:
+        return {"negative_months": 0, "total_months": 0, "months_lt_neg5_pct": 0,
+                "months_ge_2_pct": 0, "mean_monthly_pct": np.nan, "median_monthly_pct": np.nan,
+                "best_month_pct": np.nan, "worst_month_pct": np.nan,
+                "downside_deviation": np.nan, "monthly_win_rate_pct": np.nan}
+    pct = monthly["monthly_pct"].dropna()
+    return {
+        "negative_months": int((pct < 0).sum()), "total_months": int(len(pct)),
+        "months_lt_neg5_pct": int((pct < -5).sum()), "months_ge_2_pct": int((pct >= 2).sum()),
+        "mean_monthly_pct": float(pct.mean()), "median_monthly_pct": float(pct.median()),
+        "best_month_pct": float(pct.max()), "worst_month_pct": float(pct.min()),
+        # sqrt(mean(min(r,0)^2)) -- only losing months count against this,
+        # a winning month contributes exactly 0, never a negative penalty.
+        "downside_deviation": float(np.sqrt((pct.clip(upper=0) ** 2).mean())),
+        "monthly_win_rate_pct": float((pct > 0).mean() * 100),
+    }
+
+
+def monthly_buckets(monthly: pd.DataFrame) -> pd.DataFrame:
+    """<0% / 0-1% / 1-2% / 2-5% / ≥5%, left-closed (so exactly 0% lands
+    in "0-1%", exactly 5% lands in "≥5%") -- the "empty middle" this is
+    meant to expose is whether most months cluster at the extremes
+    (<0% and ≥5%) rather than the merely-positive 0-2% band."""
+    labels = ["<0%", "0-1%", "1-2%", "2-5%", "≥5%"]
+    if monthly.empty or monthly["monthly_pct"].dropna().empty:
+        return pd.DataFrame({"bucket": labels, "count": [0] * len(labels)})
+    pct = monthly["monthly_pct"].dropna()
+    bins = [-np.inf, 0, 1, 2, 5, np.inf]
+    cut = pd.cut(pct, bins=bins, labels=labels, right=False)
+    counts = cut.value_counts().reindex(labels, fill_value=0)
+    return pd.DataFrame({"bucket": labels, "count": counts.values})
+
+
+def _equity_curve_with_seed(daily: pd.DataFrame, capital_start: float) -> tuple[pd.Series, pd.Series]:
+    """(dates, equity) with the run's own starting capital prepended as
+    day zero -- every drawdown/CAGR calc below needs a true starting
+    reference point, not just the first TRADED day's own closing value
+    (which could itself already be under water if day 1 lost money)."""
+    if daily.empty:
+        return pd.Series([pd.NaT]), pd.Series([capital_start])
+    d = daily.copy()
+    d["date"] = pd.to_datetime(d["date"])
+    d = d.sort_values("date").reset_index(drop=True)
+    dates = pd.concat([pd.Series([d["date"].iloc[0]]), d["date"]], ignore_index=True)
+    equity = pd.concat([pd.Series([float(capital_start)]), d["capital"]], ignore_index=True)
+    return dates, equity
+
+
+def risk_adjusted_metrics(monthly: pd.DataFrame, daily: pd.DataFrame, capital_start: float,
+                          start_date: dt.date, end_date: dt.date) -> dict:
+    mm = monthly_metrics(monthly)
+    mean_m, down_dev = mm["mean_monthly_pct"], mm["downside_deviation"]
+    sortino = (mean_m / down_dev * np.sqrt(12)) if down_dev else np.nan
+
+    _, equity = _equity_curve_with_seed(daily, capital_start)
+    max_dd = float((equity / equity.cummax() - 1).min() * 100) if len(equity) > 1 else 0.0
+
+    final_equity = float(equity.iloc[-1])
+    years = max((end_date - start_date).days / 365.25, 1e-9)
+    cagr = ((final_equity / capital_start) ** (1 / years) - 1) * 100 if capital_start else np.nan
+    calmar = (cagr / abs(max_dd)) if max_dd else np.nan
+
+    # Month-end drawdown: same cummax/drawdown math, but sampled only at
+    # each month's OWN closing equity -- smooths out intra-month noise,
+    # answering "how bad did it look if you only checked at month-end."
+    if not monthly.empty:
+        month_end_eq = pd.concat([pd.Series([float(capital_start)]), monthly["equity_end"]], ignore_index=True)
+        month_end_dd = float((month_end_eq / month_end_eq.cummax() - 1).min() * 100)
+    else:
+        month_end_dd = 0.0
+
+    return {"sortino": sortino, "calmar": calmar, "max_drawdown_pct": max_dd,
+           "month_end_drawdown_pct": month_end_dd, "cagr_pct": cagr, "final_equity": final_equity,
+           "total_return_pct": (final_equity / capital_start - 1) * 100 if capital_start else np.nan}
+
+
+def drawdown_episodes(daily: pd.DataFrame, capital_start: float, top_n: int = 5) -> pd.DataFrame:
+    """Every peak-to-recovery episode (a NEW all-time-high partitions the
+    equity curve into episodes), ranked by TOTAL calendar days (peak to
+    recovery) -- duration matters as much as depth for whether a real
+    account could be held through it. The most recent episode, if the
+    curve hasn't made a new high since, is reported as "ongoing"
+    (recovery_date/trough_to_recovery_days are None) rather than
+    silently dropped or treated as resolved."""
+    cols = ["peak_date", "trough_date", "recovery_date", "peak_to_trough_days",
+           "trough_to_recovery_days", "total_days", "depth_pct", "ongoing"]
+    dates, equity = _equity_curve_with_seed(daily, capital_start)
+    if len(equity) < 2:
+        return pd.DataFrame(columns=cols)
+    cummax = equity.cummax()
+    peak_idx = equity.index[equity == cummax].tolist()
+
+    episodes = []
+    for i in range(len(peak_idx) - 1):
+        s, e = peak_idx[i], peak_idx[i + 1]
+        if e <= s:
+            continue
+        seg = equity.iloc[s:e + 1]
+        t_idx = seg.idxmin()
+        peak_d, trough_d, rec_d = dates.iloc[s], dates.iloc[t_idx], dates.iloc[e]
+        episodes.append({
+            "peak_date": peak_d, "trough_date": trough_d, "recovery_date": rec_d,
+            "peak_to_trough_days": (trough_d - peak_d).days,
+            "trough_to_recovery_days": (rec_d - trough_d).days,
+            "total_days": (rec_d - peak_d).days, "depth_pct": (seg.min() / equity.iloc[s] - 1) * 100,
+            "ongoing": False,
+        })
+    if peak_idx and peak_idx[-1] < len(equity) - 1:
+        s = peak_idx[-1]
+        seg = equity.iloc[s:]
+        t_idx = seg.idxmin()
+        peak_d, trough_d, last_d = dates.iloc[s], dates.iloc[t_idx], dates.iloc[-1]
+        episodes.append({
+            "peak_date": peak_d, "trough_date": trough_d, "recovery_date": None,
+            "peak_to_trough_days": (trough_d - peak_d).days, "trough_to_recovery_days": None,
+            "total_days": (last_d - peak_d).days, "depth_pct": (seg.min() / equity.iloc[s] - 1) * 100,
+            "ongoing": True,
+        })
+    if not episodes:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(episodes)
+    # The seed point (capital_start) shares day 1's own calendar date (both
+    # "start the day" and "end the day" labels collapse to the same date --
+    # _equity_curve_with_seed() has no day BEFORE the first trading day to
+    # put the seed on). If day 1 is profitable, the seed is a peak
+    # immediately superseded by day 1's close on the SAME date, producing a
+    # zero-duration, zero-depth phantom "episode" on every such run --
+    # filtered out here, not a real drawdown by any definition.
+    df = df[df["total_days"] > 0].reset_index(drop=True)
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    return df.sort_values("total_days", ascending=False).head(top_n).reset_index(drop=True)
+
+
+def compute_intraday_metrics(result: dict) -> dict:
+    """Everything above, bundled from a single run_backtest() result dict
+    -- the one call the Dashboard (or any script) needs."""
+    trades, daily = result["trades"], result["daily"]
+    capital_start = result["capital_start"]
+    pos = positions_from_trades(trades)
+    monthly = monthly_table(daily, capital_start)
+    return {
+        "positions": pos,
+        "trade_level": trade_level_metrics(pos),
+        "r_buckets": r_distribution_buckets(pos),
+        "monthly": monthly,
+        "monthly_metrics": monthly_metrics(monthly),
+        "monthly_buckets": monthly_buckets(monthly),
+        "risk_adjusted": risk_adjusted_metrics(monthly, daily, capital_start,
+                                               result["start_date"], result["end_date"]),
+        "drawdown_episodes": drawdown_episodes(daily, capital_start),
     }
