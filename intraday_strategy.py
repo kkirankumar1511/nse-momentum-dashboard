@@ -1229,9 +1229,16 @@ def simulate_exit_v54(day: pd.DataFrame, entry_time: pd.Timestamp, entry: float,
          no next candle in `day`, that crossing candle's own close -- the
          closest batch equivalent of live's "fall back to the current
          price" case).
-      5. Squareoff at the "15:10"-labeled candle's own CLOSE (Spec v3 §9 --
-         NOT force_squareoff()'s real-time-LTP convention, which only
-         exists because live can't achieve this exact price).
+      5. Squareoff at the "15:10"-labeled candle's own OPEN (CORRECTED
+         2026-10-21 -- Spec v3 §9 originally used this candle's CLOSE, a
+         price live genuinely cannot achieve: force_squareoff() places
+         its real order right as the 15:10 candle BEGINS, at ~15:10:00
+         real time, filling near that candle's own open, not 5 minutes
+         later at its close. The backtest's own published numbers were
+         measuring an unreachable, overly optimistic exit for every
+         position still open at the squareoff boundary -- one of the
+         most common exit paths there is -- this aligns the backtest
+         with what live/paper actually achieve instead.).
 
     Deliberate batch-vs-tick approximation: the touch candle's own EMA10
     (not the prior COMPLETED candle's) decides the trail, since a 5-min
@@ -1293,7 +1300,7 @@ def simulate_exit_v54(day: pd.DataFrame, entry_time: pd.Timestamp, entry: float,
                 active_stop = entry
 
         if squareoff_ts is not None and ts >= squareoff_ts:
-            legs.append({"exit_time": ts, "exit_price": float(row["close"]),
+            legs.append({"exit_time": ts, "exit_price": float(row["open"]),
                         "reason": "squareoff", "qty_frac": remaining_frac})
             return legs
 

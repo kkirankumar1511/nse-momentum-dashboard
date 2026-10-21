@@ -867,11 +867,12 @@ def force_squareoff(tracker: CandidateTracker, ltp: float, now: dt.datetime, mod
     by run_live() once its own loop exits at 15:10:00 real time -- a
     2-minute safety buffer before Zerodha's own 15:12:00 auto-square-off
     for F&O-enabled equity (CAS cash segment) MIS positions, the actual
-    broker-enforced cutoff this code trades against. NOT the same as the
-    backtest's own squareoff-price convention (the "15:10"-labeled
-    candle's close = 15:15:00 real time, Spec v3 §9) -- that price isn't
-    achievable live for this broker, see run_live()'s own comment on
-    this exact point."""
+    broker-enforced cutoff this code trades against. Matches the
+    backtest's own squareoff-price convention (simulate_exit_v54(), the
+    "15:10"-labeled candle's OPEN, ~15:10:00 real time -- corrected
+    2026-10-21 from the candle's close/15:15:00, which this code never
+    actually waits for) -- see run_live()'s own comment on this exact
+    point."""
     if tracker.position_id is None:
         return None
     pos = idb.get_position(tracker.position_id)
@@ -1256,30 +1257,23 @@ def run_live(mode: str = "paper") -> None:
         print("Entering intraday loop (09:30-15:10)...")
         while True:
             now = dt.datetime.now()
-            # Two DIFFERENT 15:xx numbers are in play here, and only one
-            # of them governs live trading:
-            #  - The backtest's own squareoff price convention (Spec v3
-            #    §9) uses the "15:10"-labeled candle's CLOSE, i.e. the
-            #    price at 15:15:00 real time -- that's what the published
-            #    backtest numbers assume was achievable.
-            #  - Zerodha (the broker this account trades through) auto-
-            #    square-offs MIS positions on F&O-enabled equity (cash
-            #    segment, CAS) at 15:12:00 real time, NOT 15:15 -- a hard
-            #    broker-side risk-management cutoff, not something this
-            #    code can trade past. Waiting until 15:15 would mean
-            #    Zerodha's own system force-closes the position first, at
-            #    an uncontrolled price, before this code's own squareoff
-            #    order even fires.
-            # This live loop follows the ACHIEVABLE constraint (15:12),
-            # not the backtest's theoretical one -- exiting at 15:10
-            # leaves a 2-minute safety buffer for order placement/fill
-            # latency before Zerodha's own cutoff. This is a genuine,
-            # unavoidable gap between backtested and live squareoff
-            # pricing for this broker -- squareoff-reason exits will
-            # price off wherever the market is at 15:10 instead of
-            # 15:15, which can come out better or worse than the
-            # backtest's own assumption trade to trade, not
-            # systematically either way.
+            # Zerodha (the broker this account trades through) auto-
+            # square-offs MIS positions on F&O-enabled equity (cash
+            # segment, CAS) at 15:12:00 real time -- a hard broker-side
+            # risk-management cutoff, not something this code can trade
+            # past. Exiting this loop at 15:10:00 leaves a 2-minute
+            # safety buffer for order placement/fill latency before that
+            # cutoff -- force_squareoff() fires right at this moment, at
+            # whatever the real-time LTP is. CORRECTED 2026-10-21: the
+            # backtest's own squareoff-price convention (simulate_exit_
+            # v54(), Spec v3 §9) used to use the "15:10"-labeled candle's
+            # CLOSE (the price at 15:15:00, five minutes further along
+            # than this code ever actually waits) -- an unreachable,
+            # overly optimistic assumption for one of the most common
+            # exit paths there is. It now uses that same candle's OPEN
+            # instead (~15:10:00, matching this loop's own real-time
+            # exit), so there's no longer a real divergence between what
+            # the backtest measures and what live/paper can achieve here.
             if now.time() >= dt.time(15, 10):
                 break
 
