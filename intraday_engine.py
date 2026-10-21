@@ -116,7 +116,8 @@ def run_selection(date: str, nifty50_symbols: list[str], fno_symbols: list[str],
     waiting or re-fetching itself, same as every other wall-clock-free
     decision function in this module)."""
     nifty_ratio, nifty_rets = mkt.compute_first15_breadth(nifty50_symbols, close_0925, prev_day_close)
-    bias = strat.day_bias(nifty_ratio)
+    bias = (strat.day_bias(nifty_ratio)
+           if len(nifty_rets) >= strat.MIN_NIFTY50_BREADTH_SAMPLE else None)
     advancers = sum(1 for v in nifty_rets.values() if v > 0)
     decliners = sum(1 for v in nifty_rets.values() if v < 0)
     idb.record_day(date, nifty_ratio, bias, advancers, decliners, checkpoint=checkpoint)
@@ -146,19 +147,24 @@ def run_selection(date: str, nifty50_symbols: list[str], fno_symbols: list[str],
     gap_filter_pct = config.STRATEGY.get("intraday_gap_filter_pct", strat.GAP_FILTER_PCT)
     top_n_candidates = config.STRATEGY.get("intraday_top_n_candidates", strat.TOP_N_CANDIDATES)
 
-    ranked_all = strat.select_candidates(pd.Series(fno_rets), bias, n=len(fno_rets))
     today_date = dt.date.fromisoformat(date)
-    accepted: list[tuple[str, float, float | None]] = []  # (symbol, ret_first15_pct, gap_pct)
-    for sym, ret in ranked_all.items():
+
+    def _gap_check(sym: str) -> float | None:
         gap = _overnight_gap_pct(sym, prev_day_close.get(sym), today_date)
         if not strat.passes_gap_filter(gap, threshold=gap_filter_pct):
             print(f"[intraday_engine] {sym}: excluded from candidate pool -- "
                  f"09:15 gap {'unresolvable' if gap is None else f'{gap:+.2f}%'} "
                  f"(threshold ±{gap_filter_pct}%)")
-            continue
-        accepted.append((sym, float(ret), gap))
-        if len(accepted) >= top_n_candidates:
-            break
+        return gap
+
+    # v5.4 §0.9.3 -- this WAS a duplicate of rank_and_accept_candidates()'s
+    # own walk; now it calls the shared helper so the day's first selection
+    # and §5u's rolling re-selections can never disagree about
+    # substitution. GAP_FILTER_SUBSTITUTE=False means a gapped name is
+    # dropped and the day runs with fewer than TOP_N candidates.
+    accepted = strat.rank_and_accept_candidates(
+        fno_rets, bias, top_n_candidates, _gap_check,
+        gap_threshold=gap_filter_pct)
 
     candidates = [{"symbol": sym, "direction": bias, "rank": i + 1}
                  for i, (sym, _, _) in enumerate(accepted)]

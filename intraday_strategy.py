@@ -114,6 +114,11 @@ TOP_N_CANDIDATES = 5  # v5.4: back to top-5 (from v5/v5.3's top-2) -- per
 # itself -- only the pool width (TOP_N_CANDIDATES) and the gap filter
 # below are new.
 
+# v5.4 §0.9.3 -- on a >5% overnight gap, DROP the candidate rather than
+# letting the next-best non-gapped name take its slot. False reproduces
+# what §8 measured when the filter was adopted; True was the previous
+# (never-measured) behaviour. See rank_and_accept_candidates().
+GAP_FILTER_SUBSTITUTE = False
 GAP_FILTER_PCT = 5.0  # v5.4 §4/§8 -- discard a candidate whose 09:15
 # candle's own OPEN gapped more than this % (either direction) from the
 # previous day's close, checked once before it's even ranked into the
@@ -140,6 +145,20 @@ def passes_gap_filter(gap_pct: float | None, threshold: float = GAP_FILTER_PCT) 
 # codebases on one number rather than two close-but-different ones.
 BIAS_RATIO_LONG_MIN = 1.53
 BIAS_RATIO_SHORT_MAX = 0.66
+
+# The research engine's own list-builder (build_rolling_list.py) refuses to
+# trust the NIFTY50 breadth ratio at all below this many resolved
+# constituents (`if up+dn < 20: return None`), forcing a retry/skip instead.
+# This codebase's day_bias() had no such floor: on a handful of days with
+# literally ZERO resolved constituents (Diwali Muhurat sessions --
+# 2021-11-04, 2022-10-24, 2023-11-12, 2024-11-01, 2025-10-21, measured: 5 of
+# 1272 trading days over 5 years, all exactly these) advancers=decliners=0
+# hits compute_first15_breadth()'s decliners==0 -> ratio=inf branch, which
+# day_bias() then reads as a confident LONG -- a thin/non-existent special
+# session misread as strong bullish breadth. Callers must check
+# len(ret_first15) against this floor BEFORE calling day_bias(), treating
+# too few resolved names the same as day_bias() returning None.
+MIN_NIFTY50_BREADTH_SAMPLE = 20
 
 # Spec v2 §6.3 -- entry-time sector-confirmation gate threshold.
 # Deliberately kept STRICT (2.0/0.5) independent of the day-bias
@@ -468,17 +487,35 @@ def rank_and_accept_candidates(ret_map: dict[str, float], bias: str, top_n: int,
     explicitly; only a caller that genuinely wants the hardcoded default
     (none currently do) should omit it.
 
-    A gapped-out candidate is skipped, not replaced by stopping the walk
-    early -- continues to the next-ranked symbol (this is the acceptance-
-    loop SUBSTITUTION behavior -- deliberately different from the post-
-    selection gates' own "mark and drop, no substitution" rule; see
-    §5s.9's placement note for why that distinction matters).
+    GAP_FILTER_SUBSTITUTE controls what happens to a gapped-out
+    candidate (v5.4 §0.9.3):
+
+      False (ADOPTED 2026-10-21) -- take the top N by RANK, then drop any
+        that gap out, WITHOUT reaching deeper. This is what §8 actually
+        measured when the filter was adopted (its table shows positions
+        falling 725 -> 534) and what §0 describes ("SKIP a candidate").
+        Measured over 5 years: 10 negative months vs 14, -7.33% vs
+        -8.28% drawdown, 61.58% vs 58.34% CAGR. P(fewer negatives) 98.5%.
+
+      True (the previous behaviour) -- keep walking the ranked universe
+        and let the next-best non-gapped name take the slot. Never
+        measured before 2026-10-21; costs 4 negative months and ~3.2
+        CAGR points.
+
+    Either way this is the ACCEPTANCE stage, distinct from the
+    post-selection gates' "mark and drop" rule -- see §5s.9's placement
+    note for why that distinction matters.
 
     Returns [(symbol, ret_first15_pct, gap_pct), ...] in acceptance
     order (rank = position in this list, 1-indexed by the caller)."""
     ranked_all = select_candidates(pd.Series(ret_map, dtype=float), bias, n=len(ret_map))
     accepted: list[tuple[str, float, float | None]] = []
-    for sym, ret in ranked_all.items():
+    # §0.9.3: without substitution the walk is bounded by RANK, so a day
+    # whose top-N contains gapped names simply ends up with fewer than N
+    # candidates -- it never reaches down to rank N+1.
+    walk = ranked_all.items() if GAP_FILTER_SUBSTITUTE \
+        else list(ranked_all.items())[:top_n]
+    for sym, ret in walk:
         gap = gap_check(sym)
         if not passes_gap_filter(gap, threshold=gap_threshold):
             continue
