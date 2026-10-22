@@ -316,13 +316,28 @@ def first15_return(close_0925: float, prev_day_close: float) -> float:
     return (close_0925 / prev_day_close - 1) * 100
 
 
-def day_bias(nifty_ratio: float) -> str | None:
+def day_bias(nifty_ratio: float, inclusive: bool = False) -> str | None:
     """Spec v2 §2.2's day-bias gate. `nifty_ratio` = advancers/decliners
     among NIFTY50 constituents by first15_return sign (ratio = +inf if
     decliners == 0). Returns None -- the day is SKIPPED entirely -- when
     the ratio doesn't clear either threshold. Do not casually retune
     BIAS_RATIO_LONG_MIN/SHORT_MAX -- the relationship between this
     threshold and outcome was NOT monotonic in Spec v2 §9.4's sweep."""
+    if inclusive:
+        # v5.4 §0.12 -- the research engine's build_rolling_list.py uses
+        # `ratio >= LONG_MIN` / `ratio <= SHORT_MAX`. On a day whose
+        # breadth lands EXACTLY on 1.53 or 0.66 (e.g. 23 advancers / 15
+        # decliners = 1.5333..., but an exact 1.53 does occur) the two
+        # conventions disagree about whether the day trades AT ALL, not
+        # merely about one candidate. The backtest passes inclusive=True
+        # to reproduce research; LIVE keeps the strict form it has always
+        # used, since a threshold day is marginal by definition and
+        # changing live's behaviour is a separate, measurable decision.
+        if nifty_ratio >= BIAS_RATIO_LONG_MIN:
+            return LONG
+        if nifty_ratio <= BIAS_RATIO_SHORT_MAX:
+            return SHORT
+        return None
     if nifty_ratio > BIAS_RATIO_LONG_MIN:
         return LONG
     if nifty_ratio < BIAS_RATIO_SHORT_MAX:
@@ -344,6 +359,140 @@ def sector_gate_pass(sector_ratio: float, direction: str) -> bool:
     if direction == LONG:
         return sector_ratio > SECTOR_GATE_RATIO_LONG_MIN
     return sector_ratio < SECTOR_GATE_RATIO_SHORT_MAX
+
+
+# v5.4 §0.10 -- floor for the BACKTEST sector policy only. Part 2 of the
+# three-part rule ("every member that existed is resolved") cannot on its
+# own protect a thin sector: NAUKRI's 4-of-27 passed an "every resolved
+# member agrees" check too, just among the wrong 4 (§10.3).
+MIN_SECTOR_MEMBERS = 5
+
+SECTOR_POLICY_LIVE = "live"
+SECTOR_POLICY_BACKTEST = "backtest"
+SECTOR_POLICY_RESOLVED = "resolved"
+
+
+def sector_breadth_ratio(members: list[str],
+                         day,
+                         close_0925: dict[str, float],
+                         prev_close: dict[str, float],
+                         first_bar: dict | None = None,
+                         *,
+                         policy: str = SECTOR_POLICY_LIVE,
+                         min_members: int = MIN_SECTOR_MEMBERS) -> float | None:
+    """v5.4 §0.10 -- THE sector advance/decline ratio. One implementation
+    for live, the dashboard backtest and the research engine; returns
+    None to mean "not trustworthy, fail the gate closed".
+
+    Kept pure (no I/O) like the rest of this module: the caller resolves
+    `close_0925` / `prev_close` ({symbol: price}) and, for the backtest
+    policy, `first_bar` ({symbol: earliest available daily bar date, or
+    None if the fetch itself failed}).
+
+    POLICY -- the data-completeness rule, NOT the threshold (that stays
+    in sector_gate_pass()):
+
+      "live"     fail closed if ANY member is unresolved. Correct for
+                 live/paper: everything in today's index exists today, so
+                 a missing member is a genuine gap (stale cache, a
+                 suspension) and must never be averaged over. No
+                 min_members floor -- preserves intraday_engine.py's
+                 long-standing behaviour exactly; adding one there is a
+                 live behaviour change and must be measured separately.
+
+      "backtest" (1) a member counts only if it existed by `day`. Only a
+                 non-empty daily series whose EARLIEST bar is after `day`
+                 proves it had not listed yet; that member is excluded
+                 outright, not counted as a failure. A member whose fetch
+                 failed entirely (first_bar None) is NOT assumed
+                 not-yet-listed -- that is indistinguishable from a real
+                 gap -- so it stays in and will trip (2).
+                 (2) fail closed if any member that DID exist by `day` is
+                 unresolved -- the real-gap / NAUKRI case.
+                 (3) `min_members` floor on the surviving count.
+
+      "resolved" ADOPTED for the backtest 2026-10-22, and what the
+                 research engine has always done (its SECTOR_COVERAGE=
+                 "off"): compute the ratio over whatever members actually
+                 resolved on `day`, with NO fail-closed and no floor. A
+                 member missing its 09:25 bar is dropped from the count
+                 rather than discarding the whole sector.
+                 Why: part 2 of the three-part rule is all-or-nothing --
+                 ONE unresolvable constituent kills a 27-member sector on
+                 EVERY day. Measured 2026-10-22: moving the universe
+                 207 -> 213 changed which sectors were touched, caught
+                 sectors whose constituents had never been fetched, and
+                 rejections went 936 -> 2998, positions 1627 -> 349. The
+                 spec itself flags part 2's tolerance as an open question
+                 ("how much slack a LARGE sector gets for one stale
+                 member ... not implemented here").
+                 The NAUKRI 4-of-27 risk this re-opens is addressed at the
+                 DATA layer instead: the sector universe is now a fixed
+                 457-symbol set (every constituent of every index that can
+                 be a primary sector, union the F&O list) rather than a
+                 demand-driven fetch, so "unresolved" means a real halt or
+                 suspension, not "never fetched" -- which is what actually
+                 went wrong on 2026-10-09 (187 of 393 symbols stale).
+                 NOT for live: intraday_engine.py keeps its own strict
+                 gate, where a missing member really is a data gap.
+
+
+    Why the asymmetry is correct rather than drift: `members` is TODAY's
+    index membership. Replayed against 2021 most members simply had not
+    listed yet, and treating "not yet listed" as "data missing" rejects
+    whole sectors -- and whole days, once every candidate's sector is
+    rejected -- for a reason unrelated to data quality. Commit 33dee03
+    applied the strict rule to the backtest and it measured ~50 CAGR
+    points over 5 years. The two policies agree on live data; they differ
+    only when replaying the past.
+
+    Ratio semantics match intraday_market.compute_first15_breadth()
+    exactly -- advancers/decliners over the surviving members, a member
+    missing either price (or with a zero prior close) silently excluded
+    from the ratio, +inf when decliners == 0.
+    """
+    if policy not in (SECTOR_POLICY_LIVE, SECTOR_POLICY_BACKTEST,
+                      SECTOR_POLICY_RESOLVED):
+        raise ValueError(f"unknown sector policy {policy!r}")
+
+    if policy in (SECTOR_POLICY_BACKTEST, SECTOR_POLICY_RESOLVED):
+        first_bar = first_bar or {}
+        existing = []
+        for m in members:
+            fb = first_bar.get(m)
+            if fb is not None and fb > day:
+                continue  # proven not yet listed as of `day`
+            existing.append(m)
+    else:
+        existing = list(members)
+
+    if not existing:
+        return None
+
+    unresolved = [m for m in existing
+                 if m not in close_0925 or m not in prev_close]
+    if policy == SECTOR_POLICY_RESOLVED:
+        # drop the unresolved rather than failing the sector; no floor.
+        _bad = set(unresolved)
+        existing = [m for m in existing if m not in _bad]
+        if not existing:
+            return None
+    elif unresolved:
+        return None
+    elif policy == SECTOR_POLICY_BACKTEST and len(existing) < min_members:
+        return None
+
+    advancers = decliners = 0
+    for m in existing:
+        c, pc = close_0925.get(m), prev_close.get(m)
+        if c is None or pc is None or pc == 0:
+            continue
+        r = first15_return(c, pc)
+        if r > 0:
+            advancers += 1
+        elif r < 0:
+            decliners += 1
+    return advancers / decliners if decliners else float("inf")
 
 
 def select_candidates(fno_ret_first15: pd.Series, bias: str, n: int = TOP_N_CANDIDATES) -> pd.Series:
@@ -464,6 +613,131 @@ def checkpoint_candle(checkpoint: str) -> str:
     the one its own ranking pass just closed on."""
     t = dt.datetime.strptime(checkpoint, "%H:%M") - dt.timedelta(minutes=5)
     return t.strftime("%H:%M")
+
+
+# v5.4 §0.12 -- research's build_rolling_list.py refuses to rank a
+# checkpoint that resolved fewer than this many F&O first-15 returns: a
+# top-5 drawn from a handful of names is not a ranking.
+MIN_FNO_RANKING_SAMPLE = 50
+
+
+def _breadth_ratio(symbols, close_map, prev_map):
+    """advancers/decliners by first15_return sign, +inf when decliners==0.
+    Returns (ratio, n_resolved); ratio is None when nothing resolved.
+    Same exclusion rule as intraday_market.compute_first15_breadth (a
+    symbol missing either price, or with a zero prior close, is skipped) --
+    reimplemented here only because that module imports THIS one."""
+    up = dn = n = 0
+    for sym in symbols:
+        c, pc = close_map.get(sym), prev_map.get(sym)
+        if c is None or pc is None or pc == 0:
+            continue
+        n += 1
+        r = first15_return(c, pc)
+        if r > 0:
+            up += 1
+        elif r < 0:
+            dn += 1
+    if n == 0:
+        return None, 0
+    return (up / dn if dn else float("inf")), n
+
+
+def build_rolling_candidates(closes_at, nifty50_symbols, fno_symbols, *,
+                             gap_check=None,
+                             gap_threshold: float = GAP_FILTER_PCT,
+                             top_n: int = TOP_N_CANDIDATES,
+                             min_breadth_sample: int = MIN_NIFTY50_BREADTH_SAMPLE,
+                             min_ranking_sample: int = MIN_FNO_RANKING_SAMPLE,
+                             checkpoints=None,
+                             primary: str = "09:30",
+                             retry: str = "09:45",
+                             renumber_rank: bool = False) -> dict:
+    """v5.4 §5o + §5u, ONE implementation -- see this patch's own module
+    docstring for why. Used by intraday_backtest.py and by the research
+    engine's list builder; the live engine's run_selection() does the same
+    thing against a live feed.
+
+    `closes_at(checkpoint)` -> (close_map, prev_close_map) for that
+    checkpoint's candle, as {symbol: price}. Called at most once per
+    checkpoint; the caller is expected to cache.
+
+    `gap_check(sym)` -> gap % vs the prior close, or None if unresolvable.
+    Omit it to skip gap filtering entirely (what research's list builder
+    does -- it applies the filter later, which is equivalent while
+    substitution is off, since both simply DROP the gapped name).
+
+    Returns {"bias", "bias_checkpoint", "nifty_ratio", "candidates"},
+    where candidates is {symbol: {"ret", "gap", "entry_checkpoint",
+    "rank"}}. bias is None when no checkpoint resolved one -- the day is
+    skipped.
+    """
+    cps = list(checkpoints) if checkpoints is not None else list(ROLLING_CHECKPOINTS)
+
+    def _mins(cp):
+        h, m = cp.split(":")
+        return int(h) * 60 + int(m)
+
+    bias = bias_cp = None
+    nifty_ratio = None
+    cache = {}
+    for cp in (primary, retry):
+        if cp not in cache:
+            cache[cp] = closes_at(cp)
+        close_map, prev_map = cache[cp]
+        ratio, n = _breadth_ratio(nifty50_symbols, close_map, prev_map)
+        if ratio is None or n < min_breadth_sample:
+            continue
+        b = day_bias(ratio, inclusive=True)
+        if b is not None:
+            bias, bias_cp, nifty_ratio = b, cp, ratio
+            break
+
+    if bias is None:
+        return {"bias": None, "bias_checkpoint": None,
+                "nifty_ratio": nifty_ratio, "candidates": {}}
+
+    union: dict[str, dict] = {}
+    for cp in [c for c in cps if _mins(c) >= _mins(bias_cp)]:
+        if cp not in cache:
+            cache[cp] = closes_at(cp)
+        close_map, prev_map = cache[cp]
+        rets = {}
+        for sym in fno_symbols:
+            c, pc = close_map.get(sym), prev_map.get(sym)
+            if c is None or pc is None or pc == 0:
+                continue
+            rets[sym] = first15_return(c, pc)
+        if len(rets) < min_ranking_sample:
+            continue
+        ranked = select_candidates(pd.Series(rets, dtype=float), bias, n=len(rets))
+        # renumber_rank -- v5.4 §0.15. Two conventions exist for the rank
+        # stamped on a surviving candidate once gapped names are dropped
+        # from the top-N:
+        #   False : the candidate's position in the PRE-filter top-N, so
+        #           survivors of a gapped #2 keep 1,3,4,5.
+        #   True  : renumbered 1..N in acceptance order (1,2,3,4) -- what
+        #           intraday_engine.py's rank_and_accept_candidates() has
+        #           always recorded for LIVE.
+        # Rank is only ever an ORDERING key, and renumbering preserves
+        # order WITHIN a checkpoint, so the two can only ever disagree
+        # where candidates from DIFFERENT checkpoints tie on entry_time
+        # and the 4-trade cap binds (measured: 58 of 1,487 entry-time
+        # groups could be affected, and only when a gap-drop actually
+        # occurred at one of the tied checkpoints).
+        _accepted = 0
+        for rank, (sym, ret) in enumerate(list(ranked.items())[:top_n], start=1):
+            if sym in union:
+                continue  # keep the EARLIEST checkpoint's stamp
+            gap = gap_check(sym) if gap_check is not None else None
+            if gap_check is not None and not passes_gap_filter(gap, threshold=gap_threshold):
+                continue
+            _accepted += 1
+            union[sym] = {"ret": float(ret), "gap": gap, "entry_checkpoint": cp,
+                          "rank": _accepted if renumber_rank else rank}
+
+    return {"bias": bias, "bias_checkpoint": bias_cp,
+            "nifty_ratio": nifty_ratio, "candidates": union}
 
 
 def rank_and_accept_candidates(ret_map: dict[str, float], bias: str, top_n: int,

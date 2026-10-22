@@ -1140,7 +1140,15 @@ def run_live(mode: str = "paper") -> None:
     _wait_until(dt.time(9, 30))
 
     nifty50 = mkt.fetch_nifty50_constituents()
-    fno_syms = list(config.UNIVERSE)
+    # v5.4 §0.10 -- UNIVERSE_RAW, not UNIVERSE. config.UNIVERSE's skip list
+    # ("Skip stocks from scanner") is a POSITIONAL-trading preference whose
+    # own Admin help scopes it to the Screener, Live Rebalance and
+    # backtest.py; every current entry is reason "Higher Stock Value",
+    # which is about sizing a positional holding, not an intraday trade at
+    # 5x leverage on a 0.50% risk budget. Reading UNIVERSE here was
+    # silently excluding 6 F&O names (BOSCHLTD, FORCEMOT, PAGEIND,
+    # POWERINDIA, SHREECEM, SOLARINDS) from LIVE intraday selection.
+    fno_syms = list(config.UNIVERSE_RAW)
     all_syms = sorted(set(nifty50) | set(fno_syms))
     print(f"Fetching 09:25 close + prev close for {len(all_syms)} symbols...")
     close_0925, prev_close = _prev_close_and_0925(all_syms, today)

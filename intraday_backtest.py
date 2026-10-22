@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import time
 
 import numpy as np
 import pandas as pd
@@ -52,6 +53,14 @@ import sector_universe as su
 EMA_WARMUP_DAYS = 120  # same depth as intraday_engine.py's EMA_WARMUP_DAYS
 CACHE_DIR = os.path.join("cache", "intraday_backtest")
 
+# v5.4 §0.15 -- rank convention for candidates surviving the gap filter.
+# False = position in the PRE-filter top-N (1,3,4,5 when #2 gapped).
+# True  = renumbered 1..N, which is what LIVE (intraday_engine.py) records.
+# Measured over 5 years to decide which live should adopt -- see §0.15.
+RENUMBER_RANK = True   # A/B run: live's convention
+
+
+
 
 def _trading_days(start_date: dt.date, end_date: dt.date) -> list[dt.date]:
     days = []
@@ -65,19 +74,38 @@ def _trading_days(start_date: dt.date, end_date: dt.date) -> list[dt.date]:
 
 def _candle_at(candles5: dict[str, pd.DataFrame], sym: str, day_ts: pd.Timestamp,
                hh: int, mm: int) -> pd.Series | None:
+    """Was `df[df.index == ts]` -- a full boolean-equality SCAN of the
+    symbol's entire multi-year 5-min history on every single call (this
+    runs ~213 symbols x several checkpoint/candle lookups x ~1272 days
+    over a 5-year backtest -- the dominant cost of the day-scanning
+    phase). `.loc[ts]` resolves an exact timestamp via the DatetimeIndex's
+    own hashtable instead -- same return value, O(1) average instead of
+    O(n) per call."""
     df = candles5.get(sym)
     if df is None or df.empty:
         return None
-    row = df[df.index == day_ts + pd.Timedelta(hours=hh, minutes=mm)]
-    return row.iloc[0] if not row.empty else None
+    ts = day_ts + pd.Timedelta(hours=hh, minutes=mm)
+    try:
+        row = df.loc[ts]
+    except KeyError:
+        return None
+    if isinstance(row, pd.DataFrame):  # duplicate timestamp -- old semantics took the first
+        return row.iloc[0] if not row.empty else None
+    return row
 
 
 def _prev_close(daily: dict[str, pd.DataFrame], sym: str, day_ts: pd.Timestamp) -> float | None:
+    """Was a full `.normalize()` + boolean-mask scan of the symbol's whole
+    daily series on every call. `searchsorted` finds the same "latest
+    close strictly before day_ts" via binary search instead (the daily
+    index is already chronologically sorted, same assumption the old
+    `.iloc[-1]`-on-a-filtered-series code relied on)."""
     d = daily.get(sym)
     if d is None or d.empty:
         return None
-    prior = d[d.index.normalize() < day_ts]
-    return float(prior["close"].iloc[-1]) if not prior.empty else None
+    idx = d.index if d.index.is_normalized else d.index.normalize()
+    pos = idx.searchsorted(day_ts, side="left")
+    return float(d["close"].iloc[pos - 1]) if pos > 0 else None
 
 
 def _cache_path(kind: str, symbol: str) -> str:
@@ -184,16 +212,59 @@ def _fetch_universe(symbols: list[str], candles5: dict, daily: dict,
     cooperative cancellation (raised from inside that callback) is
     checked often enough to actually feel responsive."""
     todo = [s for s in symbols if s not in candles5]
+    failed: list[str] = []
     for i, sym in enumerate(todo):
+        t0 = time.time()
         try:
             candles5[sym] = _load_or_fetch_5min(sym, warmup_from, fetch_to)
             daily[sym] = _load_or_fetch_daily(sym, warmup_from, fetch_to)
+            # Kite's historical API is rate-limited to ~3 req/s (same
+            # convention as kite_client.fetch_universe_candles's own
+            # pause=0.35). _load_or_fetch_*'s own inter-CHUNK sleep only
+            # fires within one symbol's multi-chunk fetch, so a run that
+            # needs many never-before-cached symbols -- each resolved in
+            # a single chunk -- fired them back-to-back with no pacing at
+            # all. Measured 2026-10-22: a 168-symbol sector-constituent
+            # backfill hit Kite's rate limit (surfaced as a generic
+            # "Invalid api_key or access_token") around the 160th symbol,
+            # reproduced twice. A pure cache hit takes milliseconds, so
+            # only pace the iterations that actually went over the
+            # network -- a fully-cached run stays exactly as fast as
+            # before this fix.
+            if time.time() - t0 > 0.05:
+                time.sleep(0.35)
         except Exception as e:
+            # v5.4 §0.11 -- an EXPIRED/INVALID Kite token is not a
+            # per-symbol data gap, it is a dead run: every later symbol
+            # fails the same way, the sector gate then fails those sectors
+            # closed on every day, and the backtest still completes and
+            # reports a number. Measured 2026-10-22: two runs finished
+            # "successfully" at 349 and 1668 positions (vs 1627 on the
+            # same config with a live token) purely because 68-69 symbols
+            # came back empty on auth errors. Abort loudly instead.
+            if "api_key" in str(e) or "access_token" in str(e) or "token" in str(e).lower():
+                raise RuntimeError(
+                    f"Kite auth failed while fetching {sym}: {e}. "
+                    f"Refresh KITE_ACCESS_TOKEN and re-run -- continuing "
+                    f"would silently produce a result computed from "
+                    f"missing data.") from e
             print(f"[intraday_backtest] {sym}: candle fetch failed -- {e}")
+            failed.append(sym)
             candles5[sym] = pd.DataFrame()
             daily[sym] = pd.DataFrame()
         if tick:
             tick((i + 1) / len(todo), f"{stage} ({i + 1}/{len(todo)})")
+
+    # Even without an auth error, a large share of empty frames means the
+    # run is not measuring the strategy -- the sector gate reads whatever
+    # survived. 5% is well above normal (a genuine delisting or two) and
+    # well below the 17% that produced the 349-position run.
+    if todo and len(failed) > max(3, 0.05 * len(todo)):
+        raise RuntimeError(
+            f"{len(failed)}/{len(todo)} symbols returned no candles "
+            f"({', '.join(failed[:8])}{'...' if len(failed) > 8 else ''}). "
+            f"Refusing to report a backtest computed from this much "
+            f"missing data.")
 
 
 def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
@@ -229,7 +300,16 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
     # historical-data call per symbol).
     _progress("Fetching NIFTY 50 + F&O universe constituents...", 0.0)
     nifty50 = mkt.fetch_nifty50_constituents()
-    fno_syms = list(config.UNIVERSE)
+    # v5.4 §0.10 -- UNIVERSE_RAW, not UNIVERSE. The skip list behind
+    # config.UNIVERSE ("Skip stocks from scanner") is a POSITIONAL-trading
+    # preference -- its own Admin help scopes it to "the Screener, Live
+    # Rebalance, and backtest.py". Its current entries are all reason
+    # "Higher Stock Value", i.e. too expensive to size a positional
+    # holding in; that constraint does not apply to an intraday trade with
+    # 5x leverage and a 0.50% risk budget. Reading UNIVERSE here silently
+    # shrank the intraday universe 213 -> 207 (BOSCHLTD, FORCEMOT,
+    # PAGEIND, POWERINDIA, SHREECEM, SOLARINDS).
+    fno_syms = list(config.UNIVERSE_RAW)
     all_syms = sorted(set(nifty50) | set(fno_syms))
 
     candles5: dict[str, pd.DataFrame] = {}
@@ -307,73 +387,51 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
                     prev_map[sym] = pc
             return close_map, prev_map
 
-        close_0925, prev_close_map = _closes_at(9, 25)
-        nifty_ratio, _ = mkt.compute_first15_breadth(nifty50, close_0925, prev_close_map)
-        bias = strat.day_bias(nifty_ratio)
-        checkpoint = "09:30"
+        # v5.4 §0.12 -- day bias + the §5u rolling top-N union now come
+        # from ONE shared implementation (strat.build_rolling_candidates),
+        # the same one the research engine's list builder uses. This file
+        # supplies DATA ACCESS only -- which candle to read, and how to
+        # resolve a symbol's overnight gap -- never a decision. Matching
+        # two hand-written copies of this logic by inspection failed three
+        # times in one session (the bias boundary, the <50 F&O ranking
+        # sample guard, and rank-before-vs-after the gap filter were each
+        # found only after a 25-minute run disagreed).
+        _cp_cache: dict[str, tuple[dict, dict]] = {}
 
-        if bias is None:
-            # v5.4 §5o -- one retry 15 minutes later before skipping the
-            # day outright: if the primary (09:30) breadth check landed
-            # in the neutral gap, recheck at 09:45 using the 09:40-
-            # labelled candle's close. A rescued day takes its bias AND
-            # its candidate ranking from the 09:45 close only (never
-            # mixed with the 09:30 data), and no signal may be evaluated
-            # before the 09:40 candle either -- its shortlist wasn't
-            # knowable any earlier.
-            close_0940, prev_close_retry = _closes_at(9, 40)
-            nifty_ratio_retry, _ = mkt.compute_first15_breadth(nifty50, close_0940, prev_close_retry)
-            bias_retry = strat.day_bias(nifty_ratio_retry)
-            if bias_retry is None:
-                skipped_days.append({"date": day, "reason": "no_day_bias", "nifty_ratio": nifty_ratio})
-                continue
-            bias = bias_retry
-            nifty_ratio = nifty_ratio_retry
-            close_0925, prev_close_map = close_0940, prev_close_retry
-            checkpoint = "09:45"
-
-        # v5.4 §5u -- re-rank at 09:30/09:35/09:40/09:45 on a PRIMARY day,
-        # taking the UNION and stamping each symbol with the EARLIEST
-        # checkpoint it entered the top-N at. A RETRY day uses ONLY the
-        # single checkpoint that decided it -- the shortlist itself wasn't
-        # knowable any earlier on such a day (§5u.1: "ALL stamped 09:45"),
-        # exactly today's existing single-checkpoint behavior, untouched.
-        rolling_checkpoints = ["09:45"] if checkpoint == "09:45" else strat.ROLLING_CHECKPOINTS
-        _close_cache = {checkpoint: (close_0925, prev_close_map)}
+        def _closes_at_cp(cp: str) -> tuple[dict, dict]:
+            if cp not in _cp_cache:
+                _h, _m = (int(x) for x in strat.checkpoint_candle(cp).split(":"))
+                _cp_cache[cp] = _closes_at(_h, _m)
+            return _cp_cache[cp]
 
         _gap_cache: dict[str, float | None] = {}
 
         def _gap_check(sym: str) -> float | None:
             # The 09:15 open vs prev close is a fixed DAY-level property,
-            # independent of which later checkpoint is doing the ranking
-            # -- resolved once per symbol per day, not once per checkpoint.
+            # independent of which checkpoint is doing the ranking --
+            # resolved once per symbol per day, not once per checkpoint.
             if sym not in _gap_cache:
                 c0915 = _candle_at(candles5, sym, day_ts, 9, 15)
-                pc = prev_close_map.get(sym)
+                pc = _prev_close(daily, sym, day_ts)
                 _gap_cache[sym] = ((float(c0915["open"]) - pc) / pc * 100.0
                                    if (c0915 is not None and pc) else None)
             return _gap_cache[sym]
 
-        union: dict[str, dict] = {}
-        for cp in rolling_checkpoints:
-            if cp in _close_cache:
-                cp_close, cp_prev = _close_cache[cp]
-            else:
-                _h, _m = (int(x) for x in strat.checkpoint_candle(cp).split(":"))
-                cp_close, cp_prev = _closes_at(_h, _m)
-                _close_cache[cp] = (cp_close, cp_prev)
-            fno_rets = {}
-            for sym in fno_syms:
-                c_px, pc = cp_close.get(sym), cp_prev.get(sym)
-                if c_px is None or pc is None or pc == 0:
-                    continue
-                fno_rets[sym] = strat.first15_return(c_px, pc)
-            accepted = strat.rank_and_accept_candidates(fno_rets, bias, top_n_candidates, _gap_check,
-                                                        gap_threshold=gap_filter_pct)
-            for local_rank, (sym, ret, gap) in enumerate(accepted, start=1):
-                if sym in union:
-                    continue  # already entered at an earlier checkpoint -- keep that stamp
-                union[sym] = {"ret": ret, "gap": gap, "entry_checkpoint": cp, "rank": local_rank}
+        _built = strat.build_rolling_candidates(
+            _closes_at_cp, nifty50, fno_syms,
+            gap_check=_gap_check, gap_threshold=gap_filter_pct,
+            top_n=top_n_candidates, renumber_rank=RENUMBER_RANK)
+        bias = _built["bias"]
+        checkpoint = _built["bias_checkpoint"]
+        nifty_ratio = _built["nifty_ratio"]
+        union = _built["candidates"]
+
+        if bias is None:
+            skipped_days.append({"date": day, "reason": "no_day_bias",
+                                 "nifty_ratio": nifty_ratio})
+            continue
+
+        close_0925, prev_close_map = _closes_at_cp(checkpoint)
 
         if not union:
             skipped_days.append({"date": day, "reason": "no_candidates", "nifty_ratio": nifty_ratio})
@@ -463,8 +521,6 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
     # 2 (how much slack a LARGE sector gets for one stale member) is
     # still an OPEN question in that spec -- not implemented here,
     # staying strict until it's actually measured rather than guessed.
-    MIN_SECTOR_MEMBERS = 5
-
     def _sector_ratio(sec: str, day: dt.date) -> float | None:
         """v5.4 spec copy 8 §0.3's three-part rule -- supersedes the old
         "fail closed on ANY missing constituent" rule (commit 33dee03),
@@ -499,27 +555,25 @@ def run_backtest(start_date: dt.date, end_date: dt.date, capital: float,
         if key not in sector_ratio_cache:
             members = sector_members.get(sec, [])
             day_ts = pd.Timestamp(day)
-            close_0925, prev_close_map = {}, {}
-            existing = []
+            close_0925, prev_close_map, first_bar = {}, {}, {}
             for m in members:
                 d = daily.get(m)
-                fetch_failed = d is None or d.empty
-                listed_by_day = not fetch_failed and d.index.min().normalize() <= day_ts
-                if not listed_by_day and not fetch_failed:
-                    continue  # proven not yet listed as of `day` -- excluded, not a gap
-                existing.append(m)
+                if d is None or d.empty:
+                    first_bar[m] = None  # fetch failed -- NOT not-yet-listed
+                    continue
+                fb = d.index.min().normalize().date()
+                first_bar[m] = fb
+                if fb > day:
+                    continue  # proven not yet listed -- no price lookup needed
                 row = _candle_at(candles5, m, day_ts, 9, 25)
                 pc = _prev_close(daily, m, day_ts)
                 if row is not None:
                     close_0925[m] = float(row["close"])
                 if pc is not None:
                     prev_close_map[m] = pc
-            unresolved = [m for m in existing if m not in close_0925 or m not in prev_close_map]
-            if unresolved or len(existing) < MIN_SECTOR_MEMBERS:
-                sector_ratio_cache[key] = None
-            else:
-                ratio, _ = mkt.compute_first15_breadth(existing, close_0925, prev_close_map)
-                sector_ratio_cache[key] = ratio
+            sector_ratio_cache[key] = strat.sector_breadth_ratio(
+                members, day, close_0925, prev_close_map, first_bar,
+                policy=strat.SECTOR_POLICY_RESOLVED)
         return sector_ratio_cache[key]
 
     _progress("Resolving sector bias for every candidate...", 0.89)
