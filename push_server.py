@@ -25,7 +25,7 @@ import json
 import os
 import ssl
 import tomllib
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import state_db
 
@@ -44,6 +44,17 @@ def _load_ssl_paths() -> tuple[str, str] | None:
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Confirmed live 2026-10-27: a scanner bot opened a connection, never
+    # sent a complete request, and the server -- being single-threaded
+    # with no read timeout -- sat blocked inside rfile.read() forever.
+    # Every OTHER connection (legitimate subscribe POSTs included) then
+    # just queued up and timed out from the client's side, with nothing
+    # to show for it in this process's own log (it never got far enough
+    # to log anything). timeout=10 makes a stalled read raise instead of
+    # hanging; ThreadingHTTPServer below means one slow/stuck peer no
+    # longer blocks every other connection while it waits.
+    timeout = 10
+
     def _cors(self):
         # Reflects the request's own Origin rather than "*" so this still
         # works if the dashboard is ever reached from more than one
@@ -95,7 +106,14 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ssl_paths = _load_ssl_paths()
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    # ThreadingHTTPServer, not HTTPServer -- confirmed live 2026-10-27: a
+    # single stuck/slow connection (see Handler.timeout's docstring) was
+    # blocking every OTHER connection too, since the plain HTTPServer
+    # handles one request at a time. The TLS wrap below still applies to
+    # the one listening socket -- accept() on a wrapped listening socket
+    # already returns wrapped per-connection sockets, so this needs no
+    # other change to work per-thread.
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     if ssl_paths:
         cert, key = ssl_paths
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
