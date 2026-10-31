@@ -282,28 +282,59 @@ if not st.session_state.get("dashboard_authenticated", False):
             (function(){
               if (window.__ovLoginEnter) return;
               window.__ovLoginEnter = true;
-              document.addEventListener('keydown', function(e){
-                if (e.key !== 'Enter' && e.keyCode !== 13) return;
+              // NOTE: never write a tag name wrapped in angle brackets
+              // anywhere in this script body, even in a comment --
+              // Streamlit's st.html sanitizer silently empties the ENTIRE
+              // script, with no error, if the raw text looks like a
+              // disallowed nested tag. Confirmed this the hard way: Enter
+              // silently did nothing again after a previous fix, because
+              // the comment explaining a selector bug used that exact
+              // shape itself.
+              function trySubmit(target){
                 const form = document.querySelector('[data-testid="stForm"]');
-                if (!form || !form.contains(document.activeElement)) return;
+                if (!form || !form.contains(target)) return;
+                // Force-resync each field's value into React/Streamlit's own
+                // state before clicking -- covers a value the BROWSER itself
+                // set (autofill, a password manager) without a real
+                // synthetic keystroke, which never reaches React's own
+                // onChange, leaving Streamlit's backend with the OLD value
+                // at submit time. Re-firing the native value setter before
+                // dispatching 'input' makes React re-read the DOM's actual
+                // current value instead of trusting its own stale tracked
+                // one -- a no-op for ordinary typed input (already in
+                // sync).
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                form.querySelectorAll('input').forEach(function(inp){
+                  setter.call(inp, inp.value);
+                  inp.dispatchEvent(new Event('input', { bubbles: true }));
+                });
                 // Not just the FIRST button element in the form -- that's
-                // the password field's own show/hide eye-icon toggle
-                // (kind is plain button), which comes before the real
-                // submit button in DOM order and was wrongly being
-                // clicked instead (confirmed live: a real user's Enter
-                // press toggled password visibility rather than signing
-                // in). form_submit_button's own button carries a kind
-                // ending in FormSubmit (e.g. primaryFormSubmit).
-                // NOTE: never write a tag name wrapped in angle brackets
-                // anywhere in this script body, even in a comment --
-                // Streamlit's st.html sanitizer silently empties the
-                // ENTIRE script, with no error, if the raw text looks
-                // like a disallowed nested tag. Confirmed this the hard
-                // way: Enter silently did nothing again after the
-                // previous fix, because the comment explaining the
-                // button-selector bug used that exact shape itself.
+                // the password field's own show/hide eye-icon toggle (kind
+                // is plain button), which comes before the real submit
+                // button in DOM order and was wrongly being clicked instead
+                // (confirmed live: a real user's Enter press toggled
+                // password visibility rather than signing in).
+                // form_submit_button's own button carries a kind ending in
+                // FormSubmit (e.g. primaryFormSubmit).
                 const btn = form.querySelector('button[kind$="FormSubmit"]');
                 if (btn) { btn.click(); }
+              }
+              // Desktop: a real keydown with key/keyCode 13.
+              document.addEventListener('keydown', function(e){
+                if (e.key !== 'Enter' && e.keyCode !== 13) return;
+                trySubmit(document.activeElement);
+              }, true);
+              // Mobile (reported live 2026-10-31, Android Chrome): the
+              // on-screen keyboard's Enter/Go/Done key routinely does NOT
+              // fire a keydown with key 'Enter' at all -- it only fires an
+              // 'input' event whose inputType is 'insertLineBreak'. Without
+              // this, the whole handler above silently never runs on
+              // mobile (no click, no error -- indistinguishable from the
+              // button just not working), while a manual tap on the Sign
+              // in button, a real click, works fine.
+              document.addEventListener('input', function(e){
+                if (e.inputType !== 'insertLineBreak') return;
+                trySubmit(e.target);
               }, true);
             })();
             </script>""",
